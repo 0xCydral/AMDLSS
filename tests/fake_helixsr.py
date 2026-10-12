@@ -12,7 +12,7 @@ import json, os, sys
 from pathlib import Path
 
 DLL = 'amd_fidelityfx_dx12.dll'
-INI = ('[FrameGen]\\r\\n; comment\\r\\nFGInput=auto\\r\\nFGOutput=auto\\r\\n\\r\\n[Other]\\r\\nKey = 1\\r\\n')
+INI = ('[FrameGen]\\r\\n; comment\\r\\nFGInput=auto\\r\\nFGOutput=auto\\r\\n\\r\\n[Other]\\r\\nKey = 1\\r\\n\\r\\n[Log]\\r\\nLogToFile=auto\\r\\nLogLevel=auto\\r\\n')
 
 
 def original(t):

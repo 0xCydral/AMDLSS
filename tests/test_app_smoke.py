@@ -197,6 +197,7 @@ def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch
     assert (one / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME'  # not the drop-in
     ini = (one / 'OptiScaler.ini').read_bytes()
     assert b'FGInput=dlssg\r\n' in ini and b'FGOutput=fsrfg\r\n' in ini and b'Key = 1\r\n' in ini
+    assert b'LogToFile=true\r\n' in ini and b'LogLevel=2\r\n' in ini  # logging is on after an OptiScaler install
     wait(top, app, lambda: app.tree.item('0', 'values')[2] == 'OptiScaler')
     assert app.tree.item('0', 'values')[2] == 'OptiScaler'
     app.tree.selection_set('0')
@@ -217,6 +218,37 @@ def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch
     wait(top, app, lambda: len(answers.told) == 4)
     assert not (one / 'OptiScaler.ini').exists() and not (one / 'opti.marker').exists()
     assert not (window[2] / 'data' / 'framegen.json').exists()
+
+
+def test_collect_logs_button_writes_the_zip_and_shows_it(window, monkeypatch):
+    import zipfile
+
+    from amdlss import logs
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    desktop, shown_in_explorer = window[2] / 'desktop', []
+    monkeypatch.setattr(logs, 'desktop_dir', lambda: desktop)
+    monkeypatch.setattr(logs, 'system_info', lambda: {})
+    monkeypatch.setattr(logs, 'reveal', lambda path, say=print: shown_in_explorer.append(path))
+    app.collect_logs()  # nothing selected: nothing asked
+    assert not answers.asked and app.game_logs.state == 'disabled'
+    app.tree.selection_set('0')
+    top.update()
+    assert app.game_logs.state == 'normal'
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert 'press Collect logs and send the zip' in answers.told[0]
+    (one / 'OptiScaler.log').write_text('[Info] hooked\n')
+    app.tree.selection_set('0')
+    top.update()
+    app.collect_logs()
+    assert answers.asked[-1][0] == 'Collect logs for One' and 'exe-folder/OptiScaler.log' in answers.asked[-1][1]
+    wait(top, app, lambda: shown_in_explorer and not app.busy)
+    [zipped] = desktop.glob('AMDLSS-logs-One-*.zip')
+    assert shown_in_explorer == [zipped]
+    with zipfile.ZipFile(zipped) as archive:
+        assert {'exe-folder/OptiScaler.log', 'files.txt', 'system.txt', 'amdlss-install.log'} <= set(archive.namelist())
+        assert 'install (optiscaler)' in archive.read('amdlss-install.log').decode()
 
 
 def rows_of(app):

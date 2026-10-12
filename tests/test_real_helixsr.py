@@ -12,11 +12,12 @@ import os
 import re
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from amdlss import framegen, games, helixsr
+from amdlss import framegen, games, helixsr, logs
 
 SOURCE = os.environ.get('AMDLSS_TEST_HELIXSR', '')
 pytestmark = pytest.mark.skipif(not (SOURCE and helixsr.built(SOURCE) and helixsr.helixsr_python().is_file()),
@@ -102,8 +103,16 @@ def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     assert b'FGInput=dlssg' in on and b'FGOutput=fsrfg' in on
     assert framegen.apply(game, False, tmp_path) and (game / 'OptiScaler.ini').read_bytes() == ini
 
+    assert framegen.apply(game, True, tmp_path, framegen.LOGGING)   # the real [Log] section has both keys
+    assert framegen.is_on(game, framegen.LOGGING) and b'LogToFile=true' in (game / 'OptiScaler.ini').read_bytes()
+    (game / 'OptiScaler.log').write_text('[Info] a log the switch made')
+    with zipfile.ZipFile(logs.collect(after, copy, tmp_path / 'data', tmp_path / 'out', {})) as archive:
+        names = set(archive.namelist())
+    assert {'exe-folder/OptiScaler.log', 'exe-folder/OptiScaler.ini', 'exe-folder/HelixSR/helixsr-install.json',
+            'files.txt', 'system.txt'} <= names, names
+
     framegen.apply(game, True, tmp_path)
-    listed = [g for g in client.list_games([game]) if Path(g.folder) == game][0]
+    listed =[g for g in client.list_games([game]) if Path(g.folder) == game][0]
     client.remove(listed, [game])
     framegen.forget(game, tmp_path)
     assert tree(game) == before  # every file back, byte for byte, OptiScaler.ini and the HelixSR folder gone

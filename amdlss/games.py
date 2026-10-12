@@ -270,4 +270,5 @@ def after_text(game, frame_gen=False):
         text += " Press Insert in the game to open OptiScaler's menu."
         if frame_gen:
             text += '\n\n' + FRAMEGEN_HINT
-    return text + '\n\nThe Remove button puts the original files back.'
+    return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'
+                   '\n\nThe Remove button puts the original files back.')

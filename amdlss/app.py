@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, framegen, games as gamelist, helixsr, settings
+from . import VERSION, framegen, games as gamelist, helixsr, logs, settings
 from .ui import (BAD, BG, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, GOLD, LINE, MUTED, OK, TEXT, Bar, FlatButton,
                  Look, mix, short_path)
 
@@ -154,6 +154,9 @@ class App:
         scroll.pack(side='right', fill='y')
         self.tree.bind('<<TreeviewSelect>>', lambda _e: self.update_buttons())
         self.tree.bind('<Double-1>', lambda _e: self.open_folder())
+        self.menu = tk.Menu(self.tree, tearoff=0)
+        self.menu.add_command(label='Collect logs', command=self.collect_logs)
+        self.tree.bind('<Button-3>', self.row_menu)
         self.empty = self.label(games, 'Install HelixSR first, then your games show up here.', 'small', MUTED, CARD,
                                 anchor='w')
         self.empty.pack(fill='x', pady=(px(6), 0))
@@ -168,8 +171,10 @@ class App:
         self.game_folder.pack(side='left')
         self.game_forget = FlatButton(tk, self.look, actions, 'Forget folder', self.forget_folder)
         self.game_forget.pack(side='left', padx=px(8))
-        self.label(actions, 'Close the game first. No online or anti-cheat games: the account can be banned.',
-                   'small', CAUTION, CARD).pack(side='right')
+        self.game_logs = FlatButton(tk, self.look, actions, 'Collect logs', self.collect_logs)
+        self.game_logs.pack(side='left')
+        self.label(games, 'Close the game first. No online or anti-cheat games: the account can be banned.',
+                   'small', CAUTION, CARD, anchor='w').pack(fill='x', pady=(px(6), 0))
 
         # per-game choices: which route (only when both work) and frame generation (OptiScaler route only)
         options = tk.Frame(games, bg=CARD)
@@ -243,6 +248,15 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(self.log.get('1.0', 'end-1c'))
 
+    def row_menu(self, event):
+        """Right-click on a game row: select it and offer Collect logs."""
+        row = self.tree.identify_row(event.y)
+        if row:
+            self.tree.selection_set(row)
+            self.update_buttons()
+            self.menu.entryconfigure(0, state=self.game_logs.state)
+            self.menu.tk_popup(event.x_root, event.y_root)
+
     def selected(self):
         chosen = self.tree.selection()
         return self.shown[int(chosen[0])] if chosen else None
@@ -257,6 +271,8 @@ class App:
                                     text='Update' if game and game.installed else 'Install')
         self.game_remove.configure(state='normal' if ready and game and game.installed else 'disabled')
         self.game_folder.configure(state='normal' if game and game.folder and os.path.isdir(game.folder) else 'disabled')
+        self.game_logs.configure(state='normal' if idle and game and game.folder and os.path.isdir(game.folder)
+                                 else 'disabled')
         self.game_forget.configure(state='normal' if idle and game and game.manual and not game.installed else 'disabled')
         self.update_options(game, idle)
 
@@ -452,16 +468,31 @@ class App:
         extras = list(self.extras)
         route = self.route_var.get() if game.route_choice else None
         frame_gen = self.fg_var.get() if self.route_of(game) == 'optiscaler' and game.exe_folder else None
+        record = self.game_log(game, f'{"update" if game.installed else "install"} ({self.route_of(game)})')
 
         def install():
-            after = self.helixsr.install(game, extras, self.on_line, route)
-            if frame_gen is not None and after.state == 'optiscaler':
-                if framegen.apply(after.exe_folder, frame_gen, self.data_dir):
-                    self.on_line(f'frame generation {"on" if frame_gen else "off"}: '
-                                 f'{framegen.ini_path(after.exe_folder)}')
+            try:
+                after = self.helixsr.install(game, extras, record, route)
+            except helixsr.HelixSRError as error:
+                record.fail(error)
+                raise
+            if after.state == 'optiscaler' and after.exe_folder:
+                if frame_gen is not None and framegen.apply(after.exe_folder, frame_gen, self.data_dir):
+                    record(f'frame generation {"on" if frame_gen else "off"}: {framegen.ini_path(after.exe_folder)}')
+                try:   # so a game that "looks unchanged" leaves OptiScaler.log behind; never a reason to fail
+                    if framegen.apply(after.exe_folder, True, self.data_dir, framegen.LOGGING):
+                        record(f'OptiScaler logging on: {framegen.ini_path(after.exe_folder)}')
+                except (helixsr.HelixSRError, OSError) as error:
+                    record(f'OptiScaler logging was not turned on: {error}')
             return after
 
         self.work(install, lambda after: self.installed(after, bool(frame_gen)))
+
+    def game_log(self, game, action):
+        """on_line for one action in `game`: the window's log, and the game's own log file for Collect logs."""
+        record = logs.GameLog(self.data_dir, game.folder, self.on_line)
+        record.start(f'{action} {game.name}')
+        return record
 
     def installed(self, game, frame_gen=False):
         self.set_busy(False)
@@ -480,9 +511,14 @@ class App:
         self.set_busy(True, None)
         self.progress.configure(text=f'Removing from {game.name}…')
         extras = list(self.extras)
+        record = self.game_log(game, 'remove')
 
         def remove():
-            after = self.helixsr.remove(game, extras, self.on_line)
+            try:
+                after = self.helixsr.remove(game, extras, record)
+            except helixsr.HelixSRError as error:
+                record.fail(error)
+                raise
             if game.exe_folder:
                 framegen.forget(game.exe_folder, self.data_dir)
             return after
@@ -494,6 +530,21 @@ class App:
         self.refresh_helixsr_status()
         self.messagebox.showinfo('AMDLSS', f'HelixSR is removed from {game.name}. The original files are back.')
         self.refresh_games()
+
+    def collect_logs(self):
+        game = self.selected()
+        if not (game and game.folder and os.path.isdir(game.folder) and not self.busy):
+            return
+        if not self.messagebox.askyesno(f'Collect logs for {game.name}', logs.confirm_text(game, self.data_dir)):
+            return
+        self.set_busy(True, None)
+        self.progress.configure(text=f'Collecting logs for {game.name}…')
+        self.work(lambda: logs.collect(game, self.helixsr_folder, self.data_dir), self.logs_done)
+
+    def logs_done(self, path):
+        self.set_busy(False)
+        self.log_line(f'logs collected: {path}')
+        logs.reveal(path, self.log_line)
 
     def refresh_helixsr_status(self):
         if self.helixsr:

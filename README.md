@@ -39,6 +39,22 @@ Some games, such as Dragon's Dogma 2, offer only NVIDIA's DLSS Frame Generation,
 
 HelixSR also has an experimental route that loads its DLSS loader. AMDLSS does not offer it. A game that already uses it (from HelixSR's own setup) shows as "DLSS loader (experimental)" and can only be removed.
 
+## Sending logs
+
+If a game looks the same with HelixSR as without it, send a log zip instead of describing it. Pick the game, press **Collect logs** (or right-click the game), read the list in the dialog and confirm. AMDLSS writes `AMDLSS-logs-<game>-<date>-<time>.zip` to your Desktop and opens Explorer with it selected. Send that file.
+
+The zip answers four questions: did HelixSR load, did the game call DLSS or FSR at all, did OptiScaler pass the call to HelixSR, did the network run. It holds, for each file that exists:
+
+- the logs: `helixsr.log` and `helixsr_loader.log` (HelixSR's `HelixSR` folder next to the game's .exe, or next to the game's FSR DLL for the drop-in), `OptiScaler.log`, `fakenvapi.log`;
+- the settings and install record: `OptiScaler.ini`, `fakenvapi.ini`, `helixsr-install.json`;
+- `files.txt`: name, size, date and file version of every .dll and .exe in those folders, and whether each upscaler DLL is HelixSR's;
+- `system.txt`: Windows version, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions and `helixsr_setup.json`;
+- `amdlss-install.log`: what AMDLSS printed when it installed into that game.
+
+Your Windows user name is replaced by `<user>` in every path and text, and nothing else from your user folder is read. Nothing is uploaded. A log larger than 16 MB goes in as its last 16 MB.
+
+For a game installed through the OptiScaler route, AMDLSS turns OptiScaler's file logging on after the install (`LogToFile=true` and `LogLevel=2` in the `[Log]` section of `OptiScaler.ini`, the same way as the frame generation values: nothing else in the file changes). **Remove** puts the file back through HelixSR's own uninstall, drops AMDLSS's record and deletes the `OptiScaler.log` that this switch made. Only a game run after the install has an `OptiScaler.log`: start the game, play a minute, close it, then press Collect logs.
+
 ## Warnings
 
 - Do not use this in online games or games with anti-cheat. The account can be banned, or the game can refuse to start. AMDLSS looks for anti-cheat files in each game folder and flags the game, but it cannot know every game. Check it yourself.

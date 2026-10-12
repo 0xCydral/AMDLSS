@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import framegen, games, helixsr
+from . import framegen, games, helixsr, logs
 
 
 def check_parsing():
@@ -77,6 +77,32 @@ def check_framegen():
         assert framegen.apply(folder, False, folder) and (Path(folder) / 'OptiScaler.ini').read_bytes() == ini
 
 
+def check_logging_switch():
+    ini = b'[Upscalers]\r\nLogLevel=x\r\n[Log]\r\nLogToFile=auto\r\nLogLevel = auto\r\n[Other]\r\n'
+    on = framegen.set_values(ini, framegen.LOGGING.values, framegen.LOGGING)
+    assert on == ini.replace(b'LogToFile=auto', b'LogToFile=true').replace(b'= auto', b'= 2'), on
+    with tempfile.TemporaryDirectory() as folder:
+        (Path(folder) / 'OptiScaler.ini').write_bytes(ini)
+        (Path(folder) / 'OptiScaler.log').write_text('ours')
+        assert framegen.apply(folder, True, folder, framegen.LOGGING) and framegen.is_on(folder, framegen.LOGGING)
+        framegen.forget(folder, folder)   # Remove: the record and the log it made are gone
+        assert not (Path(folder) / 'OptiScaler.log').exists() and not (Path(folder) / framegen.RECORD).exists()
+
+
+def check_collect_logs():
+    redact = logs.redactor(['Jordan'])
+    assert redact('C:\\Users\\Jordan\\Games and Jordan') == 'C:\\Users\\<user>\\Games and <user>'
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder) / 'Game'
+        (root / 'HelixSR').mkdir(parents=True)
+        (root / 'HelixSR' / 'helixsr.log').write_bytes(b'path C:\\Users\\Jordan\\x')
+        (root / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+        game = games.Game(name='G: x', folder=str(root), exe_folder=str(root))
+        path = logs.collect(game, None, Path(folder) / 'data', Path(folder) / 'out', {})
+        with zipfile.ZipFile(path) as archive:
+            assert sorted(archive.namelist()) == ['exe-folder/HelixSR/helixsr.log', 'files.txt', 'system.txt']
+            assert b'HelixSR 1.8.1' in archive.read('files.txt')
+
 def check_helixsr():
     assert helixsr.setup_command() == ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                                        'helixsr-setup.ps1', '-Yes']
@@ -111,7 +137,8 @@ def check_zip_slip():
 
 
 def run():
-    for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_helixsr, check_zip_slip):
+    for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
+                  check_collect_logs, check_helixsr, check_zip_slip):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')
