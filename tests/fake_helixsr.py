@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """A stand-in for HelixSR's setup folder, so tests can run AMDLSS's whole path (bridge, list parsing, install and
 remove command lines) with no HelixSR and no game. make() writes setup/helixsr_install.py, which has the same
-module-level names and command line as HelixSR's (games, original, is_helixsr, Game.* attributes; `list`,
-`install N`, `uninstall N`, `--folder PATH`) and does the FSR drop-in with plain file renames."""
+module-level names and command line as HelixSR's (games, install, say, done_message, original, is_helixsr,
+Game.* attributes; `list`, `install N`, `uninstall N`, `--folder PATH`). The FSR drop-in is plain file renames; the
+OptiScaler route writes a marker file and an OptiScaler.ini next to the game, and uninstall deletes them."""
 import json
 from pathlib import Path
 
 STUB = '''
 import json, os, sys
 from pathlib import Path
+
+DLL = 'amd_fidelityfx_dx12.dll'
+INI = ('[FrameGen]\\r\\n; comment\\r\\nFGInput=auto\\r\\nFGOutput=auto\\r\\n\\r\\n[Other]\\r\\nKey = 1\\r\\n')
 
 
 def original(t):
@@ -22,17 +26,31 @@ def is_helixsr(t):
         return False
 
 
+def say(msg):
+    print(f'[helixsr-setup] {msg}', flush=True)
+
+
+def version_of(dll):
+    return '9.9.9'
+
+
+def network_ready(here):
+    return True
+
+
 class Game:
     def __init__(self, name, folder, fsr, inputs):
         self.name, self.folder = name, Path(folder)
         self.fsr_targets = [self.folder / 'amd_fidelityfx_upscaler_dx12.dll'] if fsr else []
         self.inputs, self.target = inputs, self.folder
-        self.route = 'direct' if fsr else 'optiscaler'
+        self.can_opti = bool(fsr and inputs)
         self.dlss_installed = False
-        self.opti_installed = False
+        self.opti_installed = (self.folder / 'opti.marker').exists()
+        self.chosen = self.opti_installed
+        self.route = 'direct' if fsr and not self.chosen else 'optiscaler'
 
     def installed(self):
-        return any(original(t).exists() and is_helixsr(t) for t in self.fsr_targets)
+        return self.opti_installed or any(original(t).exists() and is_helixsr(t) for t in self.fsr_targets)
 
     def label(self):
         if self.route == 'direct':
@@ -48,6 +66,33 @@ def games(extra):
     return out
 
 
+def install(g, here):
+    if g.route == 'optiscaler':
+        (g.folder / 'opti.marker').write_text('chosen' if g.chosen else '')
+        if not (g.folder / 'OptiScaler.ini').exists():
+            (g.folder / 'OptiScaler.ini').write_bytes(INI.encode())
+        say(f'  installed in {g.folder} (OptiScaler)')
+        return
+    for t in g.fsr_targets:
+        os.replace(t, original(t))
+        t.write_bytes(b'HELIX stand-in')
+
+
+def uninstall(g):
+    if g.opti_installed:
+        (g.folder / 'opti.marker').unlink()
+        (g.folder / 'OptiScaler.ini').unlink(missing_ok=True)
+        return
+    for t in g.fsr_targets:
+        os.replace(original(t), t)
+
+
+def done_message(todo=()):
+    say('Done. Start the game and pick this in its graphics settings:')
+    for g in todo:
+        say(f'  {g.name}: ' + ('DLSS' if g.route == 'optiscaler' else 'AMD FSR'))
+
+
 def main(argv):
     here, cmd, rest = Path(argv[0]), argv[1], argv[2:]
     extra = []
@@ -61,14 +106,9 @@ def main(argv):
             print(f'  {i:3}. {g.name:45} {"HelixSR installed" if g.installed() else g.label()}', flush=True)
     elif cmd in ('install', 'uninstall'):
         g = gl[int(rest[0]) - 1]
-        print(f'[helixsr-setup] {g.name}', flush=True)
-        for t in g.fsr_targets:
-            if cmd == 'install':
-                os.replace(t, original(t))
-                t.write_bytes(b'HELIX stand-in')
-            else:
-                os.replace(original(t), t)
-        print('[helixsr-setup] done', flush=True)
+        say(g.name)
+        install(g, here) if cmd == 'install' else uninstall(g)
+        say('done')
     else:
         raise SystemExit('usage')
 

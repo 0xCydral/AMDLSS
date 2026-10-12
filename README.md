@@ -16,7 +16,7 @@ AMDLSS is unofficial. It is not affiliated with HelixSR, NVIDIA or AMD.
 
    The setup downloads Python, numpy and the shader compiler once (about 150 MB), builds the network (about a minute) and deletes NVIDIA's DLL. The status line then shows the HelixSR version.
 3. Your games appear in the list: name, what the game supports, and its state (not installed, FSR drop-in or OptiScaler). HelixSR finds games from Steam, Epic, GOG and Xbox. For any other game press **Add game folder...**.
-4. Pick a game and press **Install**. AMDLSS shows what will change and asks you to confirm. When it finishes it tells you what to choose in the game.
+4. Pick a game and press **Install**. AMDLSS shows what will change and asks you to confirm. When it finishes it tells you what to choose in the game. A game that has both an FSR 3.1 DLL and DLSS, XeSS or FSR 2 files works either way, so before you install you pick **Install as: DLSS (OptiScaler)** or **AMD FSR (drop-in)**. DLSS (OptiScaler) is offered first when the game lists DLSS, so the game's DLSS option is usable; otherwise HelixSR's own default is. This is the same choice as the `o` and `f` answers in HelixSR's own setup. Use the FSR drop-in if OptiScaler gives you trouble in that game.
 5. **Remove** runs HelixSR's own uninstall for that game and puts the original files back.
 
 ## What to choose in the game
@@ -26,7 +26,15 @@ HelixSR picks one of two ways for each game. AMDLSS shows the result after the i
 | State in the list | In the game's graphics settings |
 |---|---|
 | FSR drop-in (the game has an FSR 3.1 DLL) | choose AMD FSR |
-| OptiScaler (the game has DLSS, XeSS or FSR 2 only) | choose DLSS. Press Insert in the game to open OptiScaler's menu |
+| OptiScaler (picked for a game that has an FSR 3.1 DLL, or the game has DLSS, XeSS or FSR 2 only) | choose DLSS. Press Insert in the game to open OptiScaler's menu |
+
+### Frame generation (OptiScaler route only)
+
+Some games, such as Dragon's Dogma 2, offer only NVIDIA's DLSS Frame Generation, which cannot run on AMD. For a game installed through the OptiScaler route, the box **Frame generation: use the game's DLSS Frame Generation option (runs AMD FSR frame generation)** is off by default. When you turn it on and press Install (or Update), AMDLSS sets two values in the `OptiScaler.ini` that HelixSR placed next to the game's exe: `FGInput=dlssg` and `FGOutput=fsrfg` in `[FrameGen]`. Every other byte of the file stays as it was. In the game, turn on DLSS Frame Generation; it runs AMD's frame generation. Keep NVIDIA Reflex off.
+
+- It only works in games that use NVIDIA Streamline for DLSS frame generation. That is OptiScaler's limit, not AMDLSS's.
+- It is untested on real games so far.
+- Update with the box off puts the two values back as they were (AMDLSS keeps them in `%LOCALAPPDATA%\AMDLSS\framegen.json`). **Remove** runs HelixSR's own uninstall, which restores or deletes `OptiScaler.ini`, so nothing stays behind.
 
 HelixSR also has an experimental route that loads its DLSS loader. AMDLSS does not offer it. A game that already uses it (from HelixSR's own setup) shows as "DLSS loader (experimental)" and can only be removed.
 
@@ -39,7 +47,7 @@ HelixSR also has an experimental route that loads its DLSS loader. AMDLSS does n
 
 ## What AMDLSS does and does not do
 
-- It runs HelixSR's own scripts without changing them. Listing games, installing and removing use HelixSR's `helixsr_install.py` with HelixSR's own embedded Python (`install N`, `uninstall N`, `--folder PATH`). A small read-only helper, run in that same Python, reads HelixSR's game scan and returns it as JSON. If the helper fails, AMDLSS parses the installer's printed `list` output instead.
+- It runs HelixSR's own scripts without changing them. Listing games, installing and removing use HelixSR's `helixsr_install.py` with HelixSR's own embedded Python (`install N`, `uninstall N`, `--folder PATH`). A small read-only helper, run in that same Python, reads HelixSR's game scan and returns it as JSON. If the helper fails, AMDLSS parses the installer's printed `list` output instead. `install N` always takes HelixSR's default route, so for the OptiScaler route in a game that also has an FSR 3.1 DLL, a second small helper in the same Python does what the installer's `o` answer does (it sets `route` and `chosen`) and then calls the installer's own `install()`. HelixSR's files are only imported.
 - Before each install or remove, AMDLSS reads the list again and matches the game by folder, so a change in your library cannot send the action to another game.
 - It does not bundle, modify or redistribute HelixSR or any NVIDIA file. This repository holds only AMDLSS's own code.
 - Files: HelixSR is extracted to `%LOCALAPPDATA%\AMDLSS\HelixSR-1.8.1`, and the games you added by hand are saved in `%LOCALAPPDATA%\AMDLSS\settings.json`. HelixSR's own downloads go to `%LOCALAPPDATA%\HelixSR`. Delete these folders to remove everything. Remove HelixSR from your games first.
@@ -69,4 +77,4 @@ python AMDLSS.pyw --selftest      # logic checks, no window, exits 0
 python -m pytest -q               # unit tests
 ```
 
-The unit tests need no network and no HelixSR. One more test runs HelixSR's real installer against a fake game folder in `%TEMP%\amdlss-fake`. It is skipped unless `AMDLSS_TEST_HELIXSR` names a built HelixSR folder. It copies that folder first and deletes everything it made.
+The unit tests need no network and no HelixSR. One more test runs HelixSR's real installer against a fake game folder in `%TEMP%\amdlss-fake`. It is skipped unless `AMDLSS_TEST_HELIXSR` names a built HelixSR folder (`AMDLSS_TEST_ROOT` moves the fake folder elsewhere). It copies that folder first, runs both routes and the frame generation switch, and deletes everything it made.

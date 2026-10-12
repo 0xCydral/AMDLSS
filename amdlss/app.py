@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, games as gamelist, helixsr, settings
+from . import VERSION, framegen, games as gamelist, helixsr, settings
 from .ui import (BAD, BG, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, GOLD, LINE, MUTED, OK, TEXT, Bar, FlatButton,
                  Look, mix, short_path)
 
@@ -42,6 +42,9 @@ class App:
         self.helixsr = None        # a HelixSR once its network is built
         self.games, self.shown = [], []
         self.busy = False
+        self.option_key = None      # (folder, state) of the game the route and frame generation boxes show
+        self.route_var = tk.StringVar(value='optiscaler')
+        self.fg_var = tk.BooleanVar(value=False)
         self.calls = queue.Queue()  # work for the Tk thread from worker threads
         root.title(f'AMDLSS {VERSION}')
         root.configure(bg=BG)
@@ -73,6 +76,14 @@ class App:
 
     def label(self, parent, text, font='body', fg=TEXT, bg=BG, **options):
         return self.tk.Label(parent, text=text, font=self.look.fonts[font], fg=fg, bg=bg, **options)
+
+    def choice(self, parent, text, value):
+        button = self.tk.Radiobutton(parent, text=text, value=value, variable=self.route_var, bg=CARD, fg=TEXT,
+                                     selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
+                                     disabledforeground=DIM, font=self.look.fonts['small'], bd=0, highlightthickness=0,
+                                     command=self.update_buttons)
+        button.pack(side='left', padx=(self.look.px(10), 0))
+        return button
 
     def card(self, parent, **pack):
         frame = self.tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=LINE,
@@ -152,6 +163,21 @@ class App:
         self.label(actions, 'Close the game first. No online or anti-cheat games: the account can be banned.',
                    'small', CAUTION, CARD).pack(side='right')
 
+        # per-game choices: which route (only when both work) and frame generation (OptiScaler route only)
+        options = tk.Frame(games, bg=CARD)
+        options.pack(fill='x')
+        self.route_row = tk.Frame(options, bg=CARD)
+        self.label(self.route_row, 'Install as', 'small', MUTED, CARD).pack(side='left')
+        self.route_buttons = [self.choice(self.route_row, text, value) for text, value in
+                              (('DLSS (OptiScaler)', 'optiscaler'), ('AMD FSR (drop-in)', 'direct'))]
+        self.fg_row = tk.Frame(options, bg=CARD)
+        self.fg_box = tk.Checkbutton(self.fg_row, text=gamelist.FRAMEGEN_LABEL, variable=self.fg_var, bg=CARD, fg=TEXT,
+                                     selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
+                                     disabledforeground=DIM, font=self.look.fonts['small'], anchor='w', bd=0,
+                                     highlightthickness=0, command=self.update_buttons)
+        self.fg_box.pack(side='left')
+        self.options = options
+
         # log
         logs = self.card(page)
         head = tk.Frame(logs, bg=CARD)
@@ -223,6 +249,30 @@ class App:
                                     text='Update' if game and game.installed else 'Install')
         self.game_remove.configure(state='normal' if ready and game and game.installed else 'disabled')
         self.game_folder.configure(state='normal' if game and game.folder else 'disabled')
+        self.update_options(game, idle)
+
+    def route_of(self, game):
+        """The route Install will use for `game`: the installed one, the box's pick, or HelixSR's default."""
+        if game.installed:
+            return game.state
+        return self.route_var.get() if game.route_choice else game.route
+
+    def update_options(self, game, idle):
+        """Shows the route choice (both routes work, not installed) and the frame generation box (OptiScaler route)."""
+        key = (game.folder, game.state) if game else None
+        if key != self.option_key:  # another game or another state: start from its own default
+            self.option_key = key
+            if game:
+                self.route_var.set(game.default_route if game.route_choice else game.route)
+                self.fg_var.set(game.installed and framegen.is_on(game.exe_folder) if game.exe_folder else False)
+        self.route_row.pack_forget()
+        self.fg_row.pack_forget()
+        if game and game.route_choice:
+            self.route_row.pack(fill='x', pady=(self.look.px(8), 0))
+        if game and game.exe_folder and self.route_of(game) == 'optiscaler':
+            self.fg_row.pack(fill='x', pady=(self.look.px(4), 0))
+        for widget in (*self.route_buttons, self.fg_box):
+            widget.configure(state='normal' if idle else 'disabled')
 
     def set_busy(self, busy, progress=None):
         self.busy = busy
@@ -361,19 +411,30 @@ class App:
         game = self.selected()
         if not (self.helixsr and game and game.can_install and not self.busy):
             return
-        if not self.messagebox.askyesno(f'Install into {game.name}', gamelist.plan_text(game), icon='warning',
-                                        default='no'):
+        plan = gamelist.plan_text(game, self.route_of(game))
+        if not self.messagebox.askyesno(f'Install into {game.name}', plan, icon='warning', default='no'):
             return
         self.set_busy(True, None)
         self.progress.configure(text=f'Installing into {game.name}…')
         self.set_status(f'• Installing HelixSR into {game.name}…')
         extras = list(self.extras)
-        self.work(lambda: self.helixsr.install(game, extras, self.on_line), self.installed)
+        route = self.route_var.get() if game.route_choice else None
+        frame_gen = self.fg_var.get() if self.route_of(game) == 'optiscaler' and game.exe_folder else None
 
-    def installed(self, game):
+        def install():
+            after = self.helixsr.install(game, extras, self.on_line, route)
+            if frame_gen is not None and after.state == 'optiscaler':
+                if framegen.apply(after.exe_folder, frame_gen, self.data_dir):
+                    self.on_line(f'frame generation {"on" if frame_gen else "off"}: '
+                                 f'{framegen.ini_path(after.exe_folder)}')
+            return after
+
+        self.work(install, lambda after: self.installed(after, bool(frame_gen)))
+
+    def installed(self, game, frame_gen=False):
         self.set_busy(False)
         self.refresh_helixsr_status()
-        self.messagebox.showinfo('AMDLSS', gamelist.after_text(game))
+        self.messagebox.showinfo('AMDLSS', gamelist.after_text(game, frame_gen))
         self.refresh_games()
 
     def remove_game(self):
@@ -387,7 +448,14 @@ class App:
         self.set_busy(True, None)
         self.progress.configure(text=f'Removing from {game.name}…')
         extras = list(self.extras)
-        self.work(lambda: self.helixsr.remove(game, extras, self.on_line), self.removed)
+
+        def remove():
+            after = self.helixsr.remove(game, extras, self.on_line)
+            if game.exe_folder:
+                framegen.forget(game.exe_folder, self.data_dir)
+            return after
+
+        self.work(remove, self.removed)
 
     def removed(self, game):
         self.set_busy(False)

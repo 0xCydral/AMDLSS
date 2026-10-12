@@ -11,6 +11,9 @@ DLSS network as Direct3D 12 compute on AMD cards. This module:
     embedded Python (`install N`, `uninstall N`, `--folder PATH`). The list comes from a small read-only bridge run in
     that same Python (it imports helixsr_install and prints JSON); if the bridge cannot run, the installer's printed
     `list` output is parsed instead.
+  - installs the OptiScaler route into a game that has an FSR 3.1 DLL and DLSS (HelixSR's `install N` would take the
+    FSR drop-in there) through a second small bridge that sets what the installer's "o" answer sets and calls the
+    installer's own install().
 
 The pinned files are HelixSR 1.8.1. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
 """
@@ -64,10 +67,41 @@ def state(g):
 with contextlib.redirect_stdout(sys.stderr):
     found = h.games(extra)
 rows = [{'index': i, 'name': g.name, 'folder': str(g.folder), 'inputs': list(g.inputs), 'fsr31': bool(g.fsr_targets),
-         'route': g.route, 'state': state(g), 'fsr_targets': [str(t) for t in g.fsr_targets],
+         'can_opti': bool(getattr(g, 'can_opti', False)), 'route': g.route, 'state': state(g),
+         'fsr_targets': [str(t) for t in g.fsr_targets],
          'exe_folder': str(g.target) if g.target else ''} for i, g in enumerate(found, 1)]
 print('@SENTINEL@' + json.dumps(rows))
 '''.replace('@SENTINEL@', gamelist.SENTINEL)
+
+# Runs inside HelixSR's own Python: the OptiScaler route for a game that also has an FSR 3.1 DLL. `helixsr_install.py
+# install N` always takes the game's default route (the FSR drop-in), so this does what the installer's interactive
+# answer "o" does (ask(): route = optiscaler, chosen = can_opti) and then calls the installer's own install() and
+# done_message(). HelixSR's files are imported, never changed. argv: HelixSR folder, game folder, extra folders.
+BRIDGE_INSTALL = '''
+import os, sys
+from pathlib import Path
+here, folder, extra = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3:]
+sys.path.insert(0, str(here / 'setup'))
+import helixsr_install as h
+
+
+def same(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+if not h.network_ready(here):
+    raise SystemExit('the network files are missing: the setup builds them first')
+g = next((g for g in h.games(extra) if same(g.folder, folder)), None)
+if g is None:
+    raise SystemExit('the game is no longer in the list: ' + folder)
+if not getattr(g, 'can_opti', False):
+    raise SystemExit(g.name + ' cannot use the OptiScaler route (it needs an FSR 3.1 DLL and DLSS, XeSS or FSR 2)')
+g.route, g.chosen = 'optiscaler', g.can_opti
+h.say('HelixSR ' + h.version_of(here / h.DLL))
+h.say(g.name)
+h.install(g, here)
+h.done_message([g])
+'''
 
 
 class HelixSRError(Exception):
@@ -341,6 +375,9 @@ class HelixSR:
     def bridge_command(self, extras=()):
         return [self.python, '-I', '-', self.folder, *[str(extra) for extra in extras]]
 
+    def optiscaler_command(self, game_folder, extras=()):
+        return [self.python, '-I', '-c', BRIDGE_INSTALL, self.folder, game_folder, *[str(extra) for extra in extras]]
+
     def list_games(self, extras=()):
         """The games HelixSR finds in the Steam libraries plus `extras` (folders added by hand)."""
         self._need_python()
@@ -375,14 +412,22 @@ class HelixSR:
             raise HelixSRError(f'{game.name} disappeared from the list after the change: refresh the list')
         return fresh, after
 
-    def install(self, game, extras=(), on_line=None):
-        """Installs HelixSR's default route into `game`; returns the game as listed afterwards. Raises HelixSRError
-        when HelixSR fails or the game does not show the route installed."""
-        fresh, after = self._act(self.install_command, game, extras, on_line)
-        if after.state not in (fresh.route, 'unknown'):  # 'unknown': only the printed list was readable
+    def install(self, game, extras=(), on_line=None, route=None):
+        """Installs into `game`; returns the game as listed afterwards. Raises HelixSRError when HelixSR fails or the
+        game does not show the route installed. `route` None or 'direct' runs HelixSR's `install N`, which takes the
+        game's default route; 'optiscaler' (only for a game with can_opti) runs the install bridge."""
+        if route == 'optiscaler' and game.can_opti and game.folder:
+            def command(_index, extra_folders):
+                return self.optiscaler_command(game.folder, extra_folders)
+            wanted = route
+        else:
+            command, wanted = self.install_command, None
+        fresh, after = self._act(command, game, extras, on_line)
+        wanted = wanted or fresh.route
+        if after.state not in (wanted, 'unknown'):  # 'unknown': only the printed list was readable
             raise HelixSRError(f'HelixSR finished but {game.name} shows as "{after.state_text}", not '
-                               f'"{gamelist.STATE_TEXT.get(fresh.route, fresh.route)}": read the log above')
-        after.route = fresh.route
+                               f'"{gamelist.STATE_TEXT.get(wanted, wanted)}": read the log above')
+        after.route = wanted
         return after
 
     def remove(self, game, extras=(), on_line=None):

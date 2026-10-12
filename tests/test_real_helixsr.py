@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The real thing, without a real game: HelixSR's own installer (route f) into a FAKE game folder.
+"""The real thing, without a real game: HelixSR's own installer (both routes) into a FAKE game folder.
 
 Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json); HelixSR's
 Python must be in %LOCALAPPDATA%\\HelixSR\\python. The folder is copied into %TEMP%\\amdlss-fake first, so HelixSR's
 own files are never written, and the install goes only into the fake game there. AMDLSS_TEST_INSTALLER may name a
-newer setup/helixsr_install.py to lay over the copy. Everything under %TEMP%\\amdlss-fake is deleted at the end.
+newer setup/helixsr_install.py to lay over the copy. AMDLSS_TEST_ROOT replaces the %TEMP%\\amdlss-fake folder.
+Everything under that folder is deleted at the end.
 """
 import hashlib
 import os
@@ -15,12 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from amdlss import helixsr
+from amdlss import framegen, games, helixsr
 
 SOURCE = os.environ.get('AMDLSS_TEST_HELIXSR', '')
 pytestmark = pytest.mark.skipif(not (SOURCE and helixsr.built(SOURCE) and helixsr.helixsr_python().is_file()),
                                 reason='AMDLSS_TEST_HELIXSR does not name a built HelixSR folder')
-FAKE_ROOT = Path(tempfile.gettempdir()) / 'amdlss-fake'
+FAKE_ROOT = Path(os.environ.get('AMDLSS_TEST_ROOT') or Path(tempfile.gettempdir()) / 'amdlss-fake')
 
 
 def sha(path):
@@ -72,3 +73,37 @@ def test_install_and_remove_into_a_fake_game(fake_game):
     client.remove(after, [game])
     assert not backup.exists() and not (game / 'helixsr-install.json').exists()
     assert tree(game) == before  # every file back, byte for byte, and nothing left behind
+
+
+def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_path):
+    copy, game = fake_game
+    assert FAKE_ROOT in game.parents
+    before = tree(game)
+    client = helixsr.HelixSR(copy)
+    entry = [g for g in client.list_games([game]) if Path(g.folder) == game][0]
+    assert entry.can_opti and entry.route_choice and entry.route == 'direct' and entry.default_route == 'optiscaler'
+
+    lines = []
+    after = client.install(entry, [game], lambda text, final: lines.append(text), route='optiscaler')
+    assert after.state == 'optiscaler' and after.in_game() == 'DLSS'
+    fsr_dll = 'amd_fidelityfx_upscaler_dx12.dll'
+    assert sha(game / fsr_dll) == before[fsr_dll]  # the drop-in was not used: the game's FSR DLL is untouched
+    for name in ('dxgi.dll', 'OptiScaler.ini', 'fakenvapi.dll', 'HelixSR/helixsr-install.json',
+                 'HelixSR/amd_fidelityfx_framegeneration_dx12.dll'):
+        assert (game / name).is_file(), name
+    assert any('Done. Start the game' in line for line in lines), lines
+    assert client.list_games([game])[-1].state == 'optiscaler'
+
+    ini = (game / 'OptiScaler.ini').read_bytes()
+    assert framegen.apply(game, True, tmp_path)
+    on = (game / 'OptiScaler.ini').read_bytes()
+    assert framegen.is_on(game)
+    assert on.replace(b'FGInput=dlssg', b'FGInput=auto').replace(b'FGOutput=fsrfg', b'FGOutput=auto') == ini
+    assert b'FGInput=dlssg' in on and b'FGOutput=fsrfg' in on
+    assert framegen.apply(game, False, tmp_path) and (game / 'OptiScaler.ini').read_bytes() == ini
+
+    framegen.apply(game, True, tmp_path)
+    listed = [g for g in client.list_games([game]) if Path(g.folder) == game][0]
+    client.remove(listed, [game])
+    framegen.forget(game, tmp_path)
+    assert tree(game) == before  # every file back, byte for byte, OptiScaler.ini and the HelixSR folder gone

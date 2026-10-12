@@ -110,6 +110,9 @@ def test_install_and_remove_buttons_drive_the_whole_path(window, monkeypatch):
     pump(top, app)
     app.tree.selection_set('0')
     top.update()
+    assert app.route_var.get() == 'optiscaler'  # the game lists DLSS: that is offered first
+    app.route_var.set('direct')
+    top.update()
     app.install_game()
     assert 'Close the game first' in answers.asked[0][1] and answers.asked[0][2]['default'] == 'no'
     end = time.time() + 10
@@ -131,3 +134,84 @@ def test_install_and_remove_buttons_drive_the_whole_path(window, monkeypatch):
         time.sleep(0.02)
     assert (one / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME'
     assert not (one / 'amd_fidelityfx_upscaler_dx12.original.dll').exists()
+
+
+def shown(widget):
+    return widget.winfo_manager() == 'pack'
+
+
+def two_game_app(window, monkeypatch, answers=None):
+    """A window over a fake HelixSR with One (FSR 3.1 + DLSS: both routes) and Three (XeSS only: OptiScaler only)."""
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    top, _make, tmp = window
+    one = tmp / 'One'
+    one.mkdir()
+    (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']},
+                        {'name': 'Three', 'folder': str(tmp / 'Three'), 'fsr': False, 'inputs': ['XeSS']}])
+    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    (folder / helixsr.BUILT).write_text('{}')
+    monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
+    app = App(top, tk, ttk, filedialog, answers or Answers(), font)
+    pump(top, app)
+    return top, app, one
+
+
+def test_the_route_choice_and_frame_generation_boxes_follow_the_game(window, monkeypatch):
+    top, app, _one = two_game_app(window, monkeypatch)
+    assert not shown(app.route_row) and not shown(app.fg_row)  # nothing selected
+    app.tree.selection_set('0')  # One: both routes work, DLSS listed -> OptiScaler is offered first
+    top.update()
+    assert shown(app.route_row) and shown(app.fg_row) and app.route_var.get() == 'optiscaler'
+    assert not app.fg_var.get()  # default off
+    app.route_var.set('direct')
+    app.update_buttons()
+    assert shown(app.route_row) and not shown(app.fg_row)  # the FSR drop-in has no frame generation box
+    app.tree.selection_set('1')  # Three: OptiScaler is its only route, so no choice but the box
+    top.update()
+    assert not shown(app.route_row) and shown(app.fg_row)
+
+
+def wait(top, app, until, seconds=10):
+    end = time.time() + seconds
+    while time.time() < end and not until():
+        top.update()
+        time.sleep(0.02)
+    top.update()
+
+
+def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch):
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    app.tree.selection_set('0')
+    top.update()
+    app.fg_var.set(True)
+    app.install_game()
+    assert 'OptiScaler' in answers.asked[0][1]
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert 'choose DLSS' in answers.told[0] and 'Turn on DLSS Frame Generation in the game' in answers.told[0]
+    assert (one / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME'  # not the drop-in
+    ini = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FGInput=dlssg\r\n' in ini and b'FGOutput=fsrfg\r\n' in ini and b'Key = 1\r\n' in ini
+    wait(top, app, lambda: app.tree.item('0', 'values')[2] == 'OptiScaler')
+    assert app.tree.item('0', 'values')[2] == 'OptiScaler'
+    app.tree.selection_set('0')
+    top.update()
+    assert not shown(app.route_row) and shown(app.fg_row) and app.fg_var.get()  # installed: shows what the file says
+    app.fg_var.set(False)  # Update with the box off puts the old values back
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
+    app.tree.selection_set('0')
+    top.update()
+    app.fg_var.set(True)
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 3 and not app.busy)
+    app.tree.selection_set('0')
+    top.update()
+    app.remove_game()
+    wait(top, app, lambda: len(answers.told) == 4)
+    assert not (one / 'OptiScaler.ini').exists() and not (one / 'opti.marker').exists()
+    assert not (window[2] / 'data' / 'framegen.json').exists()

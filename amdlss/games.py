@@ -25,6 +25,7 @@ class Game:
     folder: str = ''            # the game folder HelixSR scanned; '' when only the printed list was parsed
     inputs: list = field(default_factory=list)   # upscalers the game ships: DLSS, XeSS, FSR 2
     fsr31: bool = False         # the game has an FSR 3.1 DLL (HelixSR's drop-in route)
+    can_opti: bool = False      # FSR 3.1 DLL and DLSS/XeSS/FSR 2 inputs: both routes work (HelixSR's can_opti)
     route: str = 'optiscaler'   # the route HelixSR installs by default: direct or optiscaler
     state: str = 'none'         # none, direct, optiscaler, dlss or unknown
     fsr_targets: list = field(default_factory=list)
@@ -49,9 +50,24 @@ class Game:
         # The experimental DLSS loader is never offered: a game already on it can only be removed.
         return self.state != 'dlss'
 
+    @property
+    def route_choice(self):
+        """True when the user can pick the route: both work and nothing is installed yet."""
+        return self.can_opti and not self.installed
+
+    @property
+    def default_route(self):
+        """The route offered first: OptiScaler (the game's DLSS option) when the game lists DLSS, else HelixSR's."""
+        return 'optiscaler' if self.can_opti and 'DLSS' in self.inputs else self.route
+
+    @property
+    def active_route(self):
+        """The route that is installed when the state says so, else the route HelixSR would install."""
+        return self.state if self.state in IN_GAME else self.route
+
     def in_game(self, route=None):
-        """What to choose in the game's graphics menu for `route` (default: the route HelixSR installs)."""
-        return IN_GAME.get(route or self.route, 'AMD FSR')
+        """What to choose in the game's graphics menu for `route` (default: the installed route, else HelixSR's)."""
+        return IN_GAME.get(route or self.active_route, 'AMD FSR')
 
 
 def from_json(entries):
@@ -60,6 +76,7 @@ def from_json(entries):
     for entry in entries:
         games.append(Game(name=str(entry['name']), folder=str(entry.get('folder') or ''),
                           inputs=list(entry.get('inputs') or []), fsr31=bool(entry.get('fsr31')),
+                          can_opti=bool(entry.get('can_opti')),
                           route=str(entry.get('route') or 'optiscaler'), state=str(entry.get('state') or 'none'),
                           fsr_targets=list(entry.get('fsr_targets') or []),
                           exe_folder=str(entry.get('exe_folder') or ''), index=int(entry.get('index') or 0)))
@@ -174,9 +191,9 @@ WARNINGS = ("Close the game first.\n"
             "Do not use HelixSR in online games or games with anti-cheat: the account can be banned.")
 
 
-def plan_text(game):
+def plan_text(game, route=None):
     """What installing will do, before the user agrees (HelixSR's own description of its two routes)."""
-    if game.route == 'direct':
+    if (route or game.route) == 'direct':
         files = ''.join(f'\n  {path}' for path in game.fsr_targets[:3])
         what = ("HelixSR replaces the game's FSR 3.1 DLL and keeps the game's own file next to it as "
                 f"*.original.dll:{files}")
@@ -191,9 +208,17 @@ def plan_text(game):
     return text + f'\n\nInstall into {game.name}?'
 
 
-def after_text(game):
+FRAMEGEN_LABEL = ("Frame generation: use the game's DLSS Frame Generation option "
+                  "(runs AMD FSR frame generation)")
+FRAMEGEN_HINT = ("Turn on DLSS Frame Generation in the game; it runs AMD's frame generation. "
+                 "Keep NVIDIA Reflex off.")
+
+
+def after_text(game, frame_gen=False):
     """What to choose in the game's menu once HelixSR is installed, as HelixSR's setup reports it."""
     text = f"HelixSR is installed in {game.name}.\n\nIn the game's graphics settings choose {game.in_game()}."
-    if game.route == 'optiscaler':
+    if game.active_route == 'optiscaler':
         text += " Press Insert in the game to open OptiScaler's menu."
+        if frame_gen:
+            text += '\n\n' + FRAMEGEN_HINT
     return text + '\n\nThe Remove button puts the original files back.'

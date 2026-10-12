@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import games, helixsr
+from . import framegen, games, helixsr
 
 
 def check_parsing():
@@ -37,6 +37,29 @@ def check_game_rules():
     assert games.anticheat_of('EasyAntiCheat_EOS.exe') == 'Easy Anti-Cheat'
     assert games.anticheat_of('BEService_x64.exe') == 'BattlEye'
     assert games.anticheat_of('faceitems.pak') is None  # a whole word, never the middle of a name
+
+
+def check_routes():
+    both = games.Game(name='x', fsr31=True, can_opti=True, inputs=['DLSS'], route='direct')
+    assert both.route_choice and both.default_route == 'optiscaler'  # DLSS listed: offered first
+    assert games.Game(name='x', fsr31=True, can_opti=True, inputs=['XeSS'], route='direct').default_route == 'direct'
+    assert not games.Game(name='x', route='optiscaler').route_choice  # only one route works
+    assert not games.Game(name='x', can_opti=True, state='optiscaler').route_choice  # installed
+    assert both.in_game() == 'AMD FSR' and games.Game(name='x', state='optiscaler', route='direct').in_game() == 'DLSS'
+    command = helixsr.HelixSR('C:/h', python='C:/p/python.exe').optiscaler_command('D:/g', ['E:/x'])
+    assert [str(c) for c in command[1:3]] == ['-I', '-c'] and [str(c) for c in command[-3:]] == ['C:\\h', 'D:/g', 'E:/x']
+    assert "g.route, g.chosen = 'optiscaler', g.can_opti" in helixsr.BRIDGE_INSTALL
+
+
+def check_framegen():
+    ini = b'[FrameGen]\r\n; c\r\nFGInput = nofg\r\nFGOutput=auto\r\n[Other]\r\nFGInput=keep\r\n'
+    on = framegen.set_values(ini, framegen.ON)
+    assert on == ini.replace(b'nofg', b'dlssg').replace(b'FGOutput=auto', b'FGOutput=fsrfg'), on
+    assert framegen.read_values(on) == framegen.ON
+    with tempfile.TemporaryDirectory() as folder:
+        (Path(folder) / 'OptiScaler.ini').write_bytes(ini)
+        assert framegen.apply(folder, True, folder) and framegen.is_on(folder)
+        assert framegen.apply(folder, False, folder) and (Path(folder) / 'OptiScaler.ini').read_bytes() == ini
 
 
 def check_helixsr():
@@ -73,7 +96,7 @@ def check_zip_slip():
 
 
 def run():
-    for check in (check_parsing, check_game_rules, check_helixsr, check_zip_slip):
+    for check in (check_parsing, check_game_rules, check_routes, check_framegen, check_helixsr, check_zip_slip):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

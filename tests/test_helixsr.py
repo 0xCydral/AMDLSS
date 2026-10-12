@@ -164,3 +164,88 @@ def test_missing_helixsr_python_is_a_clear_error(tmp_path):
 def test_progress_lines_are_split_from_finished_lines():
     assert list(helixsr.feed_lines([b'10%\r20%\r', b'30%\r\ndone\n'])) == [
         ('10%', False), ('20%', False), ('30%', True), ('done', True)]
+
+
+def test_the_bridge_reports_which_games_can_use_either_route(fake):
+    client, _one, _two = fake
+    listed = client.list_games()
+    assert [g.can_opti for g in listed] == [True, True, False]
+    assert [g.route_choice for g in listed] == [True, True, False]
+    assert listed[0].default_route == 'optiscaler'  # it lists DLSS
+
+
+def test_the_default_route_stays_the_installers_when_the_game_has_no_dlss():
+    game = games.Game(name='x', fsr31=True, can_opti=True, inputs=['XeSS'], route='direct')
+    assert game.route_choice and game.default_route == 'direct'
+    both = games.Game(name='x', fsr31=True, can_opti=True, inputs=['DLSS'], route='direct')
+    assert both.default_route == 'optiscaler' and both.route_choice
+    assert not games.Game(name='x', can_opti=True, inputs=['DLSS'], state='direct').route_choice  # installed
+
+
+def run_recorder(monkeypatch):
+    seen = []
+
+    def record(command, cwd, on_line=None, timeout=0):
+        seen.append([str(part) for part in command])
+        return 1, ['stopped on purpose']
+
+    monkeypatch.setattr(helixsr, 'run_streaming', record)
+    return seen
+
+
+def test_the_default_route_runs_the_installers_own_install_n(fake, monkeypatch):
+    client, _one, _two = fake
+    game = client.list_games()[0]
+    seen = run_recorder(monkeypatch)
+    for route in (None, 'direct'):
+        with pytest.raises(helixsr.HelixSRError):
+            client.install(game, route=route)
+    assert [command[3:5] for command in seen] == [['install', '1'], ['install', '1']]
+
+
+def test_the_optiscaler_route_runs_the_install_bridge_with_the_game_folder(fake, monkeypatch):
+    client, one, _two = fake
+    game = client.list_games()[0]
+    seen = run_recorder(monkeypatch)
+    with pytest.raises(helixsr.HelixSRError):
+        client.install(game, ['D:/extra'], route='optiscaler')
+    _python, flag, code, script, here, folder, extra = seen[0]
+    assert (flag, code, script) == ('-I', '-c', helixsr.BRIDGE_INSTALL)
+    assert (here, folder, extra) == (str(client.folder), str(one), 'D:/extra')
+    # the bridge sets what the installer's "o" answer sets, then calls its own install and done message
+    assert "g.route, g.chosen = 'optiscaler', g.can_opti" in helixsr.BRIDGE_INSTALL
+    assert 'h.install(g, here)' in helixsr.BRIDGE_INSTALL and 'h.done_message([g])' in helixsr.BRIDGE_INSTALL
+
+
+def test_a_game_without_both_routes_ignores_the_optiscaler_request(fake, monkeypatch):
+    client, _one, _two = fake
+    three = client.list_games()[2]
+    seen = run_recorder(monkeypatch)
+    with pytest.raises(helixsr.HelixSRError):
+        client.install(three, route='optiscaler')
+    assert seen[0][3:5] == ['install', '3']
+
+
+def test_the_optiscaler_route_installs_and_removes_through_the_bridge(fake):
+    client, one, _two = fake
+    dll = one / 'amd_fidelityfx_upscaler_dx12.dll'
+    lines = []
+    after = client.install(client.list_games()[0], on_line=lambda text, final: lines.append(text), route='optiscaler')
+    assert after.state == 'optiscaler' and after.route == 'optiscaler' and after.in_game() == 'DLSS'
+    assert dll.read_bytes() == b'GAME ORIGINAL'  # the drop-in was not used
+    assert (one / 'opti.marker').read_text() == 'chosen' and (one / 'OptiScaler.ini').is_file()
+    assert any('Done. Start the game' in line for line in lines), lines
+    assert 'Insert' in games.after_text(after)
+    listed = client.list_games()[0]
+    assert listed.state == 'optiscaler' and not listed.route_choice
+    client.remove(listed)
+    assert not (one / 'opti.marker').exists() and not (one / 'OptiScaler.ini').exists()
+
+
+def test_the_bridge_refuses_a_game_that_cannot_use_the_optiscaler_route(fake):
+    client, _one, _two = fake
+    three = client.list_games()[2]
+    code, tail = helixsr.run_streaming(client.optiscaler_command(three.folder), client.folder)
+    assert code != 0 and 'cannot use the OptiScaler route' in tail[-1]
+    code, tail = helixsr.run_streaming(client.optiscaler_command(three.folder + 'x'), client.folder)
+    assert code != 0 and 'no longer in the list' in tail[-1]
