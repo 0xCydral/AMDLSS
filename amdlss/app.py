@@ -41,10 +41,12 @@ class App:
         self.helixsr_folder = None
         self.helixsr = None        # a HelixSR once its network is built
         self.games, self.shown = [], []
+        self.failed = {}            # folder added by hand -> why it was not offered, until the next Rescan
         self.busy = False
         self.option_key = None      # (folder, state) of the game the route and frame generation boxes show
         self.route_var = tk.StringVar(value='optiscaler')
         self.fg_var = tk.BooleanVar(value=False)
+        self.show_all = tk.BooleanVar(value=False)   # also list the games that are not offered, greyed out
         self.calls = queue.Queue()  # work for the Tk thread from worker threads
         root.title(f'AMDLSS {VERSION}')
         root.configure(bg=BG)
@@ -121,7 +123,10 @@ class App:
         bar = tk.Frame(games, bg=CARD)
         bar.pack(fill='x', pady=(0, px(8)))
         self.label(bar, 'Your games', 'h2', TEXT, CARD).pack(side='left')
-        self.rescan_button = FlatButton(tk, self.look, bar, 'Rescan', self.refresh_games)
+        tk.Checkbutton(bar, text='Show all games', variable=self.show_all, command=self.fill_tree, bg=CARD, fg=TEXT,
+                       selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT, font=self.look.fonts['small'],
+                       bd=0, highlightthickness=0).pack(side='left', padx=(px(14), 0), pady=(px(4), 0))
+        self.rescan_button = FlatButton(tk, self.look, bar, 'Rescan', self.rescan)
         self.rescan_button.pack(side='right')
         self.add_button = FlatButton(tk, self.look, bar, 'Add game folder…', self.add_folder)
         self.add_button.pack(side='right', padx=px(8))
@@ -142,6 +147,7 @@ class App:
             self.tree.column(key, width=px(width), anchor='w', stretch=key in ('name', 'notes'))
         self.tree.tag_configure('installed', foreground=OK)
         self.tree.tag_configure('warn', foreground=CAUTION)
+        self.tree.tag_configure('hidden', foreground=DIM)
         scroll = self.ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side='left', fill='both', expand=True)
@@ -160,6 +166,8 @@ class App:
         self.game_remove.pack(side='left', padx=px(8))
         self.game_folder = FlatButton(tk, self.look, actions, 'Open game folder', self.open_folder)
         self.game_folder.pack(side='left')
+        self.game_forget = FlatButton(tk, self.look, actions, 'Forget folder', self.forget_folder)
+        self.game_forget.pack(side='left', padx=px(8))
         self.label(actions, 'Close the game first. No online or anti-cheat games: the account can be banned.',
                    'small', CAUTION, CARD).pack(side='right')
 
@@ -248,7 +256,8 @@ class App:
         self.game_install.configure(state='normal' if ready and game and game.can_install else 'disabled',
                                     text='Update' if game and game.installed else 'Install')
         self.game_remove.configure(state='normal' if ready and game and game.installed else 'disabled')
-        self.game_folder.configure(state='normal' if game and game.folder else 'disabled')
+        self.game_folder.configure(state='normal' if game and game.folder and os.path.isdir(game.folder) else 'disabled')
+        self.game_forget.configure(state='normal' if idle and game and game.manual and not game.installed else 'disabled')
         self.update_options(game, idle)
 
     def route_of(self, game):
@@ -348,48 +357,60 @@ class App:
     def on_line(self, text, final=True):
         self.post(self.log_line, text, final)
 
+    def rescan(self):
+        self.failed.clear()
+        self.refresh_games()
+
     def refresh_games(self):
         if self.helixsr is None or self.busy:
             return
         self.set_busy(True, None)
         self.progress.configure(text='Looking for games…')
-        found_with = list(self.extras)
+        extras = list(self.extras)
+        # HelixSR climbs four parent folders to look for a game around a folder with nothing in it, which can take
+        # minutes on a big drive: a folder that failed is not handed over again until Rescan.
+        asked = [extra for extra in extras if extra not in self.failed]
 
         def scan():
-            found = self.helixsr.list_games(found_with)
+            found = gamelist.classify(self.helixsr.list_games(asked), extras)
             for game in found:
-                if game.folder:
+                if game.folder and not game.reason:
                     game.anticheat = gamelist.scan_anticheat(game.folder)
             return found
 
         self.work(scan, self.games_done)
 
     def games_done(self, found):
+        for extra in self.extras:
+            row = next((g for g in found if g.manual and g.folder and gamelist.same_folder(g.folder, extra)), None)
+            if row and extra in self.failed:
+                row.reason = self.failed[extra]   # not scanned this time: it keeps the reason it had
+            elif row and row.reason:
+                self.failed[extra] = row.reason
         self.games = found
         self.set_busy(False)
         self.fill_tree()
-        # A folder added by hand that HelixSR found no game in is dropped, with a message.
-        missing = [f for f in self.extras if not any(g.folder and gamelist.overlaps(g.folder, f) for g in found)]
-        if missing:
-            self.extras = [f for f in self.extras if f not in missing]
-            settings.save_folders(self.data_dir, self.extras)
-            self.messagebox.showinfo('AMDLSS', 'HelixSR found no DLSS, XeSS or FSR files in:\n' + '\n'.join(missing))
 
     def fill_tree(self):
         wanted = self.search.get().strip().lower()
         self.tree.delete(*self.tree.get_children())
-        self.shown = [g for g in self.games if wanted in g.name.lower()]
+        show_all = self.show_all.get()
+        self.shown = [g for g in self.games if gamelist.visible(g, show_all) and wanted in g.name.lower()]
         for number, game in enumerate(self.shown):
-            notes = f'anti-cheat: {", ".join(game.anticheat)}' if game.anticheat else ''
-            tags = ('installed',) if game.installed else ('warn',) if game.anticheat else ()
-            self.tree.insert('', 'end', iid=str(number), tags=tags,
-                             values=(game.name, game.supports, game.state_text, notes))
+            if game.reason:   # not offered: greyed out, with why
+                supports = game.supports if game.fsr31 or game.inputs else ''
+                values, tags = (game.name, supports, '', game.reason), ('hidden',)
+            else:
+                notes = f'anti-cheat: {", ".join(game.anticheat)}' if game.anticheat else ''
+                tags = ('installed',) if game.installed else ('warn',) if game.anticheat else ()
+                values = (game.name, game.supports, game.state_text, notes)
+            self.tree.insert('', 'end', iid=str(number), tags=tags, values=values)
         if self.helixsr is None:
             self.empty.configure(text='Install HelixSR first, then your games show up here.')
         elif not self.games:
             self.empty.configure(text='No game with DLSS, XeSS or FSR found. Use "Add game folder…".')
         else:
-            self.empty.configure(text=f'{len(self.shown)} of {len(self.games)} games')
+            self.empty.configure(text=gamelist.count_text(self.games))
         self.update_buttons()
 
     def add_folder(self):
@@ -400,6 +421,17 @@ class App:
         if folder not in self.extras:
             self.extras.append(folder)
             settings.save_folders(self.data_dir, self.extras)
+        self.failed.pop(folder, None)  # picked again: look at it again
+        self.refresh_games()
+
+    def forget_folder(self):
+        """Drops a folder added by hand from the list and the saved folders (the game's files are not touched)."""
+        game = self.selected()
+        if not (game and game.manual and not self.busy):
+            return
+        self.extras = [f for f in self.extras if not gamelist.same_folder(f, game.folder)]
+        settings.save_folders(self.data_dir, self.extras)
+        self.failed = {f: why for f, why in self.failed.items() if f in self.extras}
         self.refresh_games()
 
     def open_folder(self):

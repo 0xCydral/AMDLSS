@@ -49,6 +49,7 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # Runs inside HelixSR's own Python, read-only: HelixSR's scan, as JSON, with the state of each game.
 BRIDGE = '''
 import contextlib, json, os, sys
+from pathlib import Path
 here, extra = sys.argv[1], sys.argv[2:]
 sys.path.insert(0, os.path.join(here, 'setup'))
 import helixsr_install as h
@@ -64,12 +65,61 @@ def state(g):
     return 'none'
 
 
+def same(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+# HelixSR's games() drops a game it has no route for. To report those too (index 0: not in HelixSR's list, so never
+# the N of `install N`), note every Game it builds from the Steam libraries and the other stores, before the folders
+# given by hand are read; the list itself, and its numbering, stay exactly HelixSR's.
+seen, noting = [], [True]
+real_game, real_from = getattr(h, 'Game', None), getattr(h, 'games_from', None)
+if real_game and real_from:
+    class Noting(real_game):
+        def __init__(self, *args):
+            super().__init__(*args)
+            if noting[0]:
+                seen.append(self)
+
+    def from_folders(folders, listed=()):
+        noting[0] = False
+        return real_from(folders, listed)
+
+    h.Game, h.games_from = Noting, from_folders
 with contextlib.redirect_stdout(sys.stderr):
     found = h.games(extra)
+if real_game and real_from:
+    h.Game, h.games_from = real_game, real_from
+
+
+def unlisted():
+    """The Games HelixSR built but did not list, then the folders given by hand it dropped; one per folder."""
+    out = []
+
+    def add(g):
+        if not any(same(g.folder, o.folder) for o in found + out):
+            out.append(g)
+
+    for g in seen:
+        if not g.route:
+            add(g)
+    for folder in extra:
+        d = Path(h.clean_path(folder)).resolve()
+        if d.is_dir() and not any(h.overlaps(g.folder, d) for g in found + out):
+            add(real_game(d.name, d, h.walk(d, 7)))
+    return out
+
+
+try:
+    hidden = unlisted() if real_game and real_from else []
+except Exception as error:
+    print('hidden games skipped: %r' % (error,), file=sys.stderr)
+    hidden = []
+rows = [(i, g) for i, g in enumerate(found, 1)] + [(0, g) for g in hidden]
 rows = [{'index': i, 'name': g.name, 'folder': str(g.folder), 'inputs': list(g.inputs), 'fsr31': bool(g.fsr_targets),
-         'can_opti': bool(getattr(g, 'can_opti', False)), 'route': g.route, 'state': state(g),
+         'can_opti': bool(getattr(g, 'can_opti', False)), 'route': g.route or '', 'state': state(g),
          'fsr_targets': [str(t) for t in g.fsr_targets],
-         'exe_folder': str(g.target) if g.target else ''} for i, g in enumerate(found, 1)]
+         'exe_folder': str(g.target) if g.target else ''} for i, g in rows]
 print('@SENTINEL@' + json.dumps(rows))
 '''.replace('@SENTINEL@', gamelist.SENTINEL)
 
@@ -404,6 +454,8 @@ class HelixSR:
         fresh = gamelist.match_game(self.list_games(extras), game)
         if fresh is None:
             raise HelixSRError(f'{game.name} is no longer in HelixSR\'s list: refresh the list and try again')
+        if not fresh.index:  # a game HelixSR does not list has no number to install or remove by
+            raise HelixSRError(f'HelixSR does not list {game.name}, so it cannot be changed from here')
         code, tail = run_streaming(build_command(fresh.index, extras), self.folder, on_line)
         if code != 0:
             raise HelixSRError(f'HelixSR failed for {game.name} (exit {code}): {tail[-1] if tail else "no output"}')

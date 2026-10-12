@@ -32,6 +32,8 @@ class Game:
     exe_folder: str = ''
     index: int = 0              # 1-based position in HelixSR's list: the N of `install N`
     anticheat: list = field(default_factory=list)
+    reason: str = ''            # why the list hides this game ('' = ready); set by classify()
+    manual: bool = False        # the folder was added by hand with "Add game folder"
 
     @property
     def supports(self):
@@ -48,7 +50,7 @@ class Game:
     @property
     def can_install(self):
         # The experimental DLSS loader is never offered: a game already on it can only be removed.
-        return self.state != 'dlss'
+        return self.state != 'dlss' and not self.reason
 
     @property
     def route_choice(self):
@@ -77,7 +79,7 @@ def from_json(entries):
         games.append(Game(name=str(entry['name']), folder=str(entry.get('folder') or ''),
                           inputs=list(entry.get('inputs') or []), fsr31=bool(entry.get('fsr31')),
                           can_opti=bool(entry.get('can_opti')),
-                          route=str(entry.get('route') or 'optiscaler'), state=str(entry.get('state') or 'none'),
+                          route='optiscaler' if entry.get('route') is None else str(entry['route']), state=str(entry.get('state') or 'none'),
                           fsr_targets=list(entry.get('fsr_targets') or []),
                           exe_folder=str(entry.get('exe_folder') or ''), index=int(entry.get('index') or 0)))
     return games
@@ -123,6 +125,53 @@ def parse_list_output(text):
             game.inputs = re.findall(_INPUT, status.split(' (')[0])
         games.append(game)
     return games
+
+
+# --- which games the list shows ---------------------------------------------------------------------------------
+NOT_INSTALLED = 'not installed'
+NO_UPSCALER = 'no DLSS, FSR 3.1 or XeSS found'
+NO_FOLDER = 'folder not found'
+
+
+def hidden_reason(game):
+    """Why `game` is not offered, or '' when it is. A game HelixSR already runs in always passes, so Remove stays
+    reachable. Otherwise its folder and the folder of its .exe (HelixSR's `target`) must exist, and HelixSR must have
+    something to work with: an FSR 3.1 DLL, or DLSS, XeSS or FSR 2. A game known only from the printed list has no
+    folder to check and passes."""
+    if game.installed or not game.folder:
+        return ''
+    if not (os.path.isdir(game.folder) and game.exe_folder and os.path.isdir(game.exe_folder)):
+        return NOT_INSTALLED
+    if not (game.fsr_targets or game.inputs):
+        return NO_UPSCALER
+    return ''
+
+
+def classify(found, extras=()):
+    """Sets `reason` on every game of HelixSR's list and returns the list plus a row for each folder added by hand
+    that HelixSR did not list at all, so a bad folder is shown with its reason instead of vanishing."""
+    rows = list(found)
+    for game in rows:
+        game.reason = hidden_reason(game)
+    for extra in extras:
+        mine = [g for g in rows if g.folder and same_folder(g.folder, extra)]
+        for game in mine:
+            game.manual = True
+        if not any(g.folder and overlaps(g.folder, extra) for g in rows):
+            name = os.path.basename(os.path.normpath(extra)) or str(extra)
+            rows.append(Game(name=name, folder=str(extra), manual=True, route='',
+                             reason=NO_UPSCALER if os.path.isdir(extra) else NO_FOLDER))
+    return rows
+
+
+def visible(game, show_all=False):
+    """Ready games, folders added by hand (with their reason) and, with `show_all`, every hidden game."""
+    return show_all or not game.reason or game.manual
+
+
+def count_text(rows):
+    ready = sum(1 for g in rows if not g.reason)
+    return f'{ready} games ready, {sum(1 for g in rows if g.reason and not g.manual)} hidden'
 
 
 def same_folder(a, b):

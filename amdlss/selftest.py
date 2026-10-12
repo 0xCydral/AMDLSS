@@ -51,6 +51,21 @@ def check_routes():
     assert "g.route, g.chosen = 'optiscaler', g.can_opti" in helixsr.BRIDGE_INSTALL
 
 
+def check_visibility():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        (root / 'Ok').mkdir()
+        (root / 'Ok' / 'Ok.exe').write_bytes(b'MZ')
+        ok = games.Game(name='Ok', folder=str(root / 'Ok'), exe_folder=str(root / 'Ok'), inputs=['XeSS'])
+        leftover = games.Game(name='Left', folder=str(root / 'Left'), exe_folder=str(root / 'Left'), inputs=['DLSS'])
+        plain = games.Game(name='Plain', folder=str(root / 'Ok'), exe_folder=str(root / 'Ok'))
+        kept = games.Game(name='Kept', folder=str(root / 'Left'), state='optiscaler')
+        rows = games.classify([ok, leftover, plain, kept], [str(root / 'Typo')])
+        assert [g.reason for g in rows] == ['', 'not installed', 'no DLSS, FSR 3.1 or XeSS found', '', 'folder not found']
+        assert [g.name for g in rows if games.visible(g)] == ['Ok', 'Kept', 'Typo']
+        assert games.count_text(rows) == '2 games ready, 2 hidden' and not leftover.can_install
+
+
 def check_framegen():
     ini = b'[FrameGen]\r\n; c\r\nFGInput = nofg\r\nFGOutput=auto\r\n[Other]\r\nFGInput=keep\r\n'
     on = framegen.set_values(ini, framegen.ON)
@@ -96,7 +111,7 @@ def check_zip_slip():
 
 
 def run():
-    for check in (check_parsing, check_game_rules, check_routes, check_framegen, check_helixsr, check_zip_slip):
+    for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_helixsr, check_zip_slip):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

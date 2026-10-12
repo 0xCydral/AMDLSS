@@ -39,7 +39,8 @@ def network_ready(here):
 
 
 class Game:
-    def __init__(self, name, folder, fsr, inputs):
+    def __init__(self, name, folder, spec):
+        fsr, inputs = spec
         self.name, self.folder = name, Path(folder)
         self.fsr_targets = [self.folder / 'amd_fidelityfx_upscaler_dx12.dll'] if fsr else []
         self.inputs, self.target = inputs, self.folder
@@ -47,7 +48,7 @@ class Game:
         self.dlss_installed = False
         self.opti_installed = (self.folder / 'opti.marker').exists()
         self.chosen = self.opti_installed
-        self.route = 'direct' if fsr and not self.chosen else 'optiscaler'
+        self.route = 'direct' if fsr and not self.chosen else 'optiscaler' if inputs else None
 
     def installed(self):
         return self.opti_installed or any(original(t).exists() and is_helixsr(t) for t in self.fsr_targets)
@@ -58,12 +59,30 @@ class Game:
         return ' / '.join(self.inputs) + ' (through OptiScaler: select DLSS in the game)'
 
 
+def walk(folder, depth):
+    return (False, [])   # a folder that holds nothing HelixSR can use
+
+
+def overlaps(a, b):
+    a, b = Path(a), Path(b)
+    return a == b or a in b.parents or b in a.parents
+
+
+def clean_path(f):
+    return str(f)
+
+
+def games_from(folders, listed=()):
+    # like HelixSR: a folder with nothing it can use ("Plain...") is dropped with a message
+    return [Game(Path(f).name, f, (True, ['DLSS'])) for f in folders
+            if Path(f).is_dir() and not Path(f).name.startswith('Plain')]
+
+
 def games(extra):
     here = Path(__file__).resolve().parent.parent
     rows = json.loads((here / 'games.json').read_text())
-    out = [Game(r['name'], r['folder'], r['fsr'], r['inputs']) for r in rows]
-    out += [Game(Path(f).name, f, True, ['DLSS']) for f in extra]
-    return out
+    out = [g for g in (Game(r['name'], r['folder'], (r['fsr'], r['inputs'])) for r in rows) if g.route]
+    return out + games_from(extra, out)
 
 
 def install(g, here):

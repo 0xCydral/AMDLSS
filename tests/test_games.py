@@ -90,3 +90,89 @@ def test_anticheat_scan_finds_nested_files_only_within_depth(tmp_path):
     assert games.scan_anticheat(tmp_path) == ['Easy Anti-Cheat']
     assert games.scan_anticheat(tmp_path, depth=0) == []
     assert games.scan_anticheat(tmp_path / 'missing') == []
+
+
+# --- which games the list shows ---------------------------------------------------------------------------------
+
+def installed_game(tmp_path, name, exe=True, **fields):
+    """A Game whose folder exists (with a .exe unless exe=False), as HelixSR's bridge would report it."""
+    folder = tmp_path / name
+    folder.mkdir(exist_ok=True)
+    if exe:
+        (folder / f'{name}.exe').write_bytes(b'MZ')
+    fields.setdefault('inputs', ['DLSS'])
+    return games.Game(name=name, folder=str(folder), exe_folder=str(folder) if exe else '', **fields)
+
+
+def test_a_game_with_an_exe_and_something_to_work_with_is_ready(tmp_path):
+    ready = installed_game(tmp_path, 'Ready')
+    fsr_only = installed_game(tmp_path, 'FsrOnly', inputs=[], fsr31=True, fsr_targets=['x.dll'])
+    rows = games.classify([ready, fsr_only])
+    assert [g.reason for g in rows] == ['', ''] and games.count_text(rows) == '2 games ready, 0 hidden'
+    assert all(games.visible(g) for g in rows) and ready.can_install
+
+
+def test_a_steam_leftover_whose_folder_is_gone_is_hidden_as_not_installed(tmp_path):
+    leftover = games.Game(name='Gone', folder=str(tmp_path / 'Gone'), exe_folder=str(tmp_path / 'Gone'),
+                          inputs=['DLSS'])
+    games.classify([leftover])
+    assert leftover.reason == games.NOT_INSTALLED == 'not installed'
+    assert not games.visible(leftover) and games.visible(leftover, show_all=True) and not leftover.can_install
+
+
+def test_a_folder_without_an_exe_is_hidden_as_not_installed(tmp_path):
+    no_exe = installed_game(tmp_path, 'NoExe', exe=False)
+    stale_exe = installed_game(tmp_path, 'Stale')
+    stale_exe.exe_folder = str(tmp_path / 'Stale' / 'bin')  # HelixSR's exe folder is not on disk
+    games.classify([no_exe, stale_exe])
+    assert no_exe.reason == stale_exe.reason == games.NOT_INSTALLED
+
+
+def test_a_game_with_no_dlss_fsr_or_xess_is_hidden_with_that_reason(tmp_path):
+    plain = installed_game(tmp_path, 'Minecraft', inputs=[])
+    games.classify([plain])
+    assert plain.reason == 'no DLSS, FSR 3.1 or XeSS found' and not games.visible(plain)
+    assert not plain.can_install
+
+
+def test_an_installed_game_is_kept_whatever_the_check_says(tmp_path):
+    kept = games.Game(name='Kept', folder=str(tmp_path / 'Gone'), state='optiscaler')  # no folder, no exe, no inputs
+    games.classify([kept])
+    assert kept.reason == '' and games.visible(kept) and kept.installed
+    assert games.count_text([kept]) == '1 games ready, 0 hidden'
+
+
+def test_a_game_known_only_from_the_printed_list_is_not_judged():
+    printed = games.parse_list_output(PRINTED)
+    games.classify(printed)
+    assert all(g.reason == '' for g in printed)
+
+
+def test_a_folder_added_by_hand_that_fails_is_shown_with_its_reason(tmp_path):
+    bare = installed_game(tmp_path, 'Bare', inputs=[])  # HelixSR gave a row for it, with nothing to work with
+    rows = games.classify([bare], [str(bare.folder), str(tmp_path / 'Typo')])
+    assert [g.manual for g in rows] == [True, True]
+    assert rows[0].reason == games.NO_UPSCALER and rows[1].reason == games.NO_FOLDER == 'folder not found'
+    assert rows[1].name == 'Typo' and rows[1].folder == str(tmp_path / 'Typo') and not rows[1].can_install
+    assert all(games.visible(g) for g in rows)  # shown without "Show all games"
+    assert games.count_text(rows) == '0 games ready, 0 hidden'  # shown, so not counted as hidden
+
+
+def test_a_folder_added_by_hand_that_is_already_listed_is_not_added_twice(tmp_path):
+    ready = installed_game(tmp_path, 'Ready')
+    inside = str(tmp_path / 'Ready' / 'bin')  # a folder inside a listed game is that game, as for HelixSR
+    rows = games.classify([ready], [str(ready.folder), str(ready.folder) + '\\', inside])
+    assert rows == [ready] and ready.manual and ready.reason == ''
+
+
+def test_the_status_line_counts_ready_and_hidden(tmp_path):
+    rows = games.classify([installed_game(tmp_path, 'A'), installed_game(tmp_path, 'B', inputs=[]),
+                           games.Game(name='C', folder=str(tmp_path / 'C'), inputs=['DLSS'])])
+    assert games.count_text(rows) == '1 games ready, 2 hidden'
+    assert [g.name for g in rows if games.visible(g)] == ['A']
+    assert [g.name for g in rows if games.visible(g, show_all=True)] == ['A', 'B', 'C']
+
+
+def test_bridge_json_keeps_an_empty_route_for_a_game_helixsr_does_not_list():
+    row = {'index': 0, 'name': 'Nope', 'folder': 'C:\\g', 'route': '', 'inputs': [], 'state': 'none'}
+    assert games.from_json([row])[0].route == '' and games.from_json([{'name': 'x'}])[0].route == 'optiscaler'

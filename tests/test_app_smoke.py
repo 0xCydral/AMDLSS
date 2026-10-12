@@ -57,6 +57,7 @@ def test_games_are_listed_and_buttons_follow_the_selection(window, monkeypatch):
     one = tmp / 'One'
     one.mkdir()
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    (tmp / 'Three').mkdir()
     folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']},
                         {'name': 'Three', 'folder': str(tmp / 'Three'), 'fsr': False, 'inputs': ['XeSS']}])
     (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
@@ -149,6 +150,7 @@ def two_game_app(window, monkeypatch, answers=None):
     one = tmp / 'One'
     one.mkdir()
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    (tmp / 'Three').mkdir()
     folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']},
                         {'name': 'Three', 'folder': str(tmp / 'Three'), 'fsr': False, 'inputs': ['XeSS']}])
     (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
@@ -215,3 +217,59 @@ def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch
     wait(top, app, lambda: len(answers.told) == 4)
     assert not (one / 'OptiScaler.ini').exists() and not (one / 'opti.marker').exists()
     assert not (window[2] / 'data' / 'framegen.json').exists()
+
+
+def rows_of(app):
+    return [app.tree.item(i, 'values') for i in app.tree.get_children()]
+
+
+def test_leftovers_and_games_without_upscalers_are_hidden_until_show_all(window, monkeypatch):
+    root, make_app, tmp = window
+    ready, bare = tmp / 'Ready', tmp / 'Bare'
+    for folder in (ready, bare):
+        folder.mkdir()
+    helix = make(tmp, [{'name': 'Ready', 'folder': str(ready), 'fsr': True, 'inputs': ['DLSS']},
+                       {'name': 'Leftover', 'folder': str(tmp / 'Leftover'), 'fsr': True, 'inputs': ['DLSS']},
+                       {'name': 'Bare', 'folder': str(bare), 'fsr': False, 'inputs': []}])
+    (helix / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    (helix / helixsr.BUILT).write_text('{}')
+    monkeypatch.setenv('AMDLSS_HELIXSR', str(helix))
+    app = make_app()
+    app.extras = [str(tmp / 'Typo')]  # a folder added by hand that is not there
+    pump(root, app)
+    wait(root, app, lambda: not app.busy and len(rows_of(app)) == 2)
+    assert [r[0] for r in rows_of(app)] == ['Ready', 'Typo']  # the leftover and Bare stay out
+    assert rows_of(app)[1][3] == 'folder not found' and rows_of(app)[1][2] == ''
+    assert app.empty.cget('text') == '1 games ready, 2 hidden'
+
+    app.tree.selection_set('1')  # Typo: shown with its reason, nothing to install, only to forget
+    root.update()
+    assert app.game_install.state == 'disabled' and app.game_remove.state == 'disabled'
+    assert app.game_forget.state == 'normal' and app.game_folder.state == 'disabled'
+
+    app.show_all.set(True)
+    app.fill_tree()
+    rows = {r[0]: r for r in rows_of(app)}
+    assert sorted(rows) == ['Bare', 'Leftover', 'Ready', 'Typo']
+    assert rows['Leftover'][3] == 'not installed' and rows['Bare'][3] == 'no DLSS, FSR 3.1 or XeSS found'
+    assert rows['Ready'][3] == ''
+    names = [app.tree.item(i, 'values')[0] for i in app.tree.get_children()]
+    assert [app.tree.item(i, 'tags') for i in app.tree.get_children()].count(('hidden',)) == 3  # greyed out
+    app.tree.selection_set(str(names.index('Leftover')))
+    root.update()
+    assert app.game_install.state == 'disabled' and app.game_forget.state == 'disabled'
+    assert app.empty.cget('text') == '1 games ready, 2 hidden'
+
+    asked, real = [], app.helixsr.list_games  # a failed folder is not handed to HelixSR again until Rescan
+    monkeypatch.setattr(app.helixsr, 'list_games', lambda extras=(): (asked.append(list(extras)), real(extras))[1])
+    app.refresh_games()
+    wait(root, app, lambda: not app.busy)
+    assert asked == [[]] and 'folder not found' in [r[3] for r in rows_of(app)]
+    app.rescan()
+    wait(root, app, lambda: not app.busy)
+    assert asked[-1] == [str(tmp / 'Typo')]
+
+    app.tree.selection_set(str(names.index('Typo')))
+    app.forget_folder()
+    wait(root, app, lambda: not app.busy and app.extras == [])
+    assert app.extras == [] and 'Typo' not in [r[0] for r in rows_of(app)]

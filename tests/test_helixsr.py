@@ -249,3 +249,44 @@ def test_the_bridge_refuses_a_game_that_cannot_use_the_optiscaler_route(fake):
     assert code != 0 and 'cannot use the OptiScaler route' in tail[-1]
     code, tail = helixsr.run_streaming(client.optiscaler_command(three.folder + 'x'), client.folder)
     assert code != 0 and 'no longer in the list' in tail[-1]
+
+
+def test_the_bridge_also_reports_games_helixsr_does_not_list_without_changing_its_numbering(tmp_path):
+    plain, one = tmp_path / 'Plain', game_folder(tmp_path, 'One')
+    plain.mkdir()
+    folder = make(tmp_path, [{'name': 'Plain', 'folder': str(plain), 'fsr': False, 'inputs': []},
+                             {'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}])
+    client = helixsr.HelixSR(folder, python=sys.executable)
+    listed = client.list_games()
+    assert [(g.name, g.index) for g in listed] == [('One', 1), ('Plain', 0)]  # `install 1` is still One
+    assert listed[1].route == '' and not listed[1].inputs and not listed[1].fsr_targets
+    assert client.install(listed[0]).state == 'direct'  # the numbering the installer sees is unchanged
+
+
+def test_a_folder_added_by_hand_that_helixsr_drops_comes_back_as_an_unlisted_game(fake, tmp_path):
+    client, _one, _two = fake
+    dropped = tmp_path / 'PlainExtra'
+    dropped.mkdir()
+    listed = client.list_games([dropped])
+    assert listed[-1].name == 'PlainExtra' and listed[-1].index == 0 and listed[-1].route == ''
+    assert [g.index for g in listed[:-1]] == [1, 2, 3]
+    assert [g.reason for g in games.classify(listed, [str(dropped)])][-1] == games.NO_UPSCALER
+
+
+def test_a_game_helixsr_does_not_list_cannot_be_installed_from_here(tmp_path):
+    plain = tmp_path / 'Plain'
+    plain.mkdir()
+    folder = make(tmp_path, [{'name': 'Plain', 'folder': str(plain), 'fsr': False, 'inputs': []}])
+    client = helixsr.HelixSR(folder, python=sys.executable)
+    (row,) = client.list_games()
+    assert row.index == 0
+    with pytest.raises(helixsr.HelixSRError, match='does not list Plain'):
+        client.install(row)
+
+
+def test_a_helixsr_without_the_scan_hooks_still_lists_its_games(fake, monkeypatch):
+    client, _one, _two = fake
+    installer = client.installer
+    installer.write_text(installer.read_text(encoding='utf-8').replace('def games_from', 'def games_from_unused')
+                         .replace('return out + games_from(extra, out)', 'return out'), encoding='utf-8')
+    assert [g.name for g in client.list_games()] == ['One', 'Two', 'Three']

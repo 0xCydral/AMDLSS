@@ -92,7 +92,7 @@ def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
                  'HelixSR/amd_fidelityfx_framegeneration_dx12.dll'):
         assert (game / name).is_file(), name
     assert any('Done. Start the game' in line for line in lines), lines
-    assert client.list_games([game])[-1].state == 'optiscaler'
+    assert [g for g in client.list_games([game]) if Path(g.folder) == game][0].state == 'optiscaler'
 
     ini = (game / 'OptiScaler.ini').read_bytes()
     assert framegen.apply(game, True, tmp_path)
