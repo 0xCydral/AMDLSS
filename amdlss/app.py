@@ -12,8 +12,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, framegen, games as gamelist, helixsr, logs, settings
-from .ui import (BAD, BG, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, GOLD, LINE, MUTED, OK, TEXT, Bar, FlatButton,
+from . import VERSION, framegen, games as gamelist, helixsr, logs, settings, update
+from .ui import (BAD, BG, BLOOD, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, GOLD, LINE, MUTED, OK, TEXT, Bar, FlatButton,
                  Look, mix, short_path)
 
 LINKS = (('HelixSR', 'https://github.com/lonewolf0622/HelixSR'),
@@ -47,6 +47,9 @@ class App:
         self.route_var = tk.StringVar(value='optiscaler')
         self.fg_var = tk.BooleanVar(value=False)
         self.show_all = tk.BooleanVar(value=False)   # also list the games that are not offered, greyed out
+        # a beta user keeps getting betas unless they say no
+        self.beta_var = tk.BooleanVar(value=settings.load_beta(self.data_dir, update.is_prerelease(update.current_version())))
+        self.update_card = None     # the "AMDLSS x is available" card, once an update was found
         self.calls = queue.Queue()  # work for the Tk thread from worker threads
         root.title(f'AMDLSS {VERSION}')
         root.configure(bg=BG)
@@ -62,6 +65,7 @@ class App:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(50, self.pump)
         root.after(100, self.refresh_helixsr)
+        root.after(300, self.start_update_check)
 
     # ---- look -----------------------------------------------------------------------------------
     def style(self):
@@ -95,7 +99,7 @@ class App:
 
     def build(self):
         tk, px = self.tk, self.look.px
-        page = tk.Frame(self.root, bg=BG, padx=px(22), pady=px(16))
+        page = self.page = tk.Frame(self.root, bg=BG, padx=px(22), pady=px(16))
         page.pack(fill='both', expand=True)
 
         head = tk.Frame(page, bg=BG)
@@ -105,7 +109,7 @@ class App:
             side='left', padx=px(14), pady=(px(8), 0))
 
         # HelixSR itself
-        status = self.card(page)
+        status = self.status_card = self.card(page)
         row = tk.Frame(status, bg=CARD)
         row.pack(fill='x')
         self.glyph = self.label(row, '•', 'body_bold', DIM, CARD)
@@ -210,6 +214,10 @@ class App:
             link.bind('<Button-1>', lambda _e, url=url: webbrowser.open(url))
             link.bind('<Enter>', lambda _e, link=link: link.configure(fg=TEXT))
             link.bind('<Leave>', lambda _e, link=link: link.configure(fg=GOLD))
+        FlatButton(tk, self.look, links, 'Check for updates', lambda: self.check_updates(True), bg=BG).pack(side='right')
+        tk.Checkbutton(links, text='Beta versions', variable=self.beta_var, command=self.beta_changed, bg=BG, fg=TEXT,
+                       selectcolor=FIELD, activebackground=BG, activeforeground=TEXT, font=self.look.fonts['small'],
+                       bd=0, highlightthickness=0).pack(side='right', padx=(0, px(12)))
         self.label(page, FOOTER, 'small', DIM, BG, anchor='w', justify='left', wraplength=px(900)).pack(
             fill='x', pady=(px(8), 0))
         self.update_buttons()
@@ -551,6 +559,105 @@ class App:
             self.set_status(f'✓ HelixSR {self.helixsr.version or "?"} is installed and built '
                             f'({short_path(self.helixsr_folder)})')
 
+    # ---- updates --------------------------------------------------------------------------------
+    def start_update_check(self):
+        if not os.environ.get('AMDLSS_NO_UPDATE_CHECK'):
+            self.check_updates(False)
+
+    def beta_changed(self):
+        settings.save_beta(self.data_dir, self.beta_var.get())
+
+    def check_updates(self, manual):
+        """Asks GitHub off the window's thread. A failure is one log line (and a box when the user asked)."""
+        beta = bool(self.beta_var.get())
+
+        def run():
+            try:
+                release = update.fetch_release(beta)
+            except update.UpdateError as error:
+                self.post(self.update_check_failed, str(error), manual)
+                return
+            self.post(self.update_checked, release, manual)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def update_check_failed(self, message, manual):
+        self.log_line(f'update check failed: {message}')
+        if manual:
+            self.messagebox.showerror('AMDLSS', f'Could not check for updates: {message}')
+
+    def update_checked(self, release, manual):
+        found = update.newer(release)
+        if found:
+            self.offer_update(found)
+        elif manual:
+            self.messagebox.showinfo('AMDLSS', f'You have the latest version ({update.current_version()}).')
+
+    def offer_update(self, release):
+        """A card above the HelixSR status: the new version, Update (an installed exe only) and the release notes."""
+        if self.update_card:
+            self.update_card.destroy()
+        tk, px = self.tk, self.look.px
+        card = self.update_card = tk.Frame(self.page, bg=CARD, highlightthickness=1, highlightbackground=BLOOD,
+                                           padx=px(14), pady=px(8))
+        card.pack(fill='x', pady=(0, px(10)), before=self.status_card)
+        self.update_label = self.label(card, f'AMDLSS {release.version} is available.', 'body_bold', TEXT, CARD)
+        self.update_label.pack(side='left')
+        notes = FlatButton(tk, self.look, card, 'Release notes', lambda: webbrowser.open(release.page))
+        notes.pack(side='right')
+        if update.FROZEN:
+            self.update_button = FlatButton(tk, self.look, card, 'Update', lambda: self.install_update(release),
+                                            'primary')
+            self.update_button.pack(side='right', padx=px(8))
+            self.update_bar = Bar(tk, self.look, card, 120)
+
+    def install_update(self, release):
+        if self.busy:
+            self.messagebox.showinfo('AMDLSS', 'Wait until HelixSR is done, then update.')
+            return
+        if not self.messagebox.askyesno(f'Update to {release.version}', f'Install AMDLSS {release.version} now? AMDLSS '
+                                        'closes, installs it and opens again. Your games and settings are kept.'):
+            return
+        self.busy = True   # no HelixSR work meanwhile
+        self.update_buttons()
+        self.update_button.configure(state='disabled')
+        self.update_bar.pack(side='right', padx=(0, self.look.px(12)))
+        exe = update.exe_path()
+
+        def progress(done, total):
+            self.post(self.update_progress, release, done / total)
+
+        def run():
+            try:
+                update.apply(release, exe, progress)
+            except update.UpdateError as error:
+                self.post(self.update_failed, release, str(error))
+                return
+            self.post(self.update_installed, exe)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def update_progress(self, release, fraction):
+        self.update_label.configure(text=f'Downloading AMDLSS {release.version}… {int(fraction * 100)}%')
+        self.update_bar.set(fraction)
+
+    def update_failed(self, release, message):
+        self.busy = False
+        self.update_buttons()
+        self.update_button.configure(state='normal')
+        self.update_bar.pack_forget()
+        self.update_label.configure(text=f'AMDLSS {release.version} is available.')
+        self.log_line(f'update failed: {message}')
+        self.messagebox.showerror('AMDLSS', f'Update failed: {message}')
+
+    def update_installed(self, exe):
+        try:
+            update.restart(exe, sys.argv[1:])
+        except OSError as error:
+            self.busy = False
+            self.messagebox.showinfo('AMDLSS', f'AMDLSS is updated but did not start again ({error}). Start it yourself.')
+        self.root.destroy()
+
     def close(self):
         if self.busy and not self.messagebox.askyesno(
                 'AMDLSS', 'HelixSR is still working. Closing now can leave a half-finished install. Close anyway?',
@@ -560,9 +667,14 @@ class App:
 
 
 def main(argv):
-    if '--selftest' in argv:
+    if '--selftest' in argv and '--update' not in argv:
         from .selftest import run
         return run()
+    if '--update' in argv:   # the update without a window; the arguments after it go to the new exe
+        beta = settings.load_beta(settings.data_dir(), update.is_prerelease(update.current_version()))
+        return update.command(argv, beta)
+    if update.FROZEN:   # what the last update left beside the exe; the old exe may still be closing
+        threading.Thread(target=update.cleanup_old, args=(update.exe_path(),), daemon=True).start()
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
     except (AttributeError, OSError):

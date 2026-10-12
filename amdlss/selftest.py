@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """`python AMDLSS.pyw --selftest`: plain asserts on the logic that can break, no window, no network, no HelixSR."""
+import hashlib
 import io
 import json
 import tempfile
 import zipfile
 from pathlib import Path
 
-from . import framegen, games, helixsr, logs
+from . import framegen, games, helixsr, logs, update
 
 
 def check_parsing():
@@ -136,9 +137,29 @@ def check_zip_slip():
     raise AssertionError('a zip with a path outside the folder was accepted')
 
 
+def check_update():
+    order = ['0.1.0-beta.3', '0.1.0-beta.4', '0.1.0-beta.10', '0.1.0']
+    assert [update.version_tuple(v) for v in order] == sorted(update.version_tuple(v) for v in order)
+    sha = hashlib.sha256(b'new').hexdigest()
+    asset = {'name': 'AMDLSS.exe', 'browser_download_url': 'https://x/AMDLSS.exe', 'digest': f'sha256:{sha}'}
+    listed = [{'tag_name': 'v0.1.0-beta.5', 'prerelease': True, 'assets': [asset]},
+              {'tag_name': 'v0.1.0-beta.4', 'prerelease': True, 'assets': [{**asset, 'digest': None}]}]
+    assert update.newest_release(listed, beta=False) is None
+    best = update.newest_release(listed, beta=True)
+    assert best.version == '0.1.0-beta.5' and best.sha256 == sha and update.newer(best, '0.1.0-beta.4')
+    assert update.newest_release(listed[1:], beta=True).sha256 is None   # a missing digest is never installed
+    with tempfile.TemporaryDirectory() as folder:
+        exe, new = Path(folder) / 'AMDLSS.exe', Path(folder) / 'AMDLSS.exe.download'
+        exe.write_bytes(b'old')
+        new.write_bytes(b'new')
+        update.swap(exe, new)
+        assert exe.read_bytes() == b'new' and (Path(folder) / 'AMDLSS.exe.old').read_bytes() == b'old'
+        assert update.cleanup_old(exe, tries=1) and sorted(p.name for p in Path(folder).iterdir()) == ['AMDLSS.exe']
+
+
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_helixsr, check_zip_slip):
+                  check_collect_logs, check_helixsr, check_zip_slip, check_update):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

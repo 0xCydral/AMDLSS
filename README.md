@@ -55,6 +55,14 @@ Your Windows user name is replaced by `<user>` in every path and text, and nothi
 
 For a game installed through the OptiScaler route, AMDLSS turns OptiScaler's file logging on after the install (`LogToFile=true` and `LogLevel=2` in the `[Log]` section of `OptiScaler.ini`, the same way as the frame generation values: nothing else in the file changes). **Remove** puts the file back through HelixSR's own uninstall, drops AMDLSS's record and deletes the `OptiScaler.log` that this switch made. Only a game run after the install has an `OptiScaler.log`: start the game, play a minute, close it, then press Collect logs.
 
+## Updates
+
+When AMDLSS opens it asks GitHub in the background whether a newer release exists. If one does, a card appears at the top: **Update** and **Release notes**. **Check for updates** (bottom right) asks again on demand. Pre-releases are only offered while **Beta versions** is ticked; it starts ticked when you run a beta, and a beta is always older than its final release (`0.1.0-beta.4` < `0.1.0`).
+
+Update downloads the release's `AMDLSS.exe` next to the running one and compares its SHA-256 with the digest GitHub lists for that file. With no digest, or a different one, nothing changes. Then AMDLSS renames itself to `AMDLSS.exe.old`, moves the new file into place, starts it with the same arguments and closes; the next start deletes `AMDLSS.exe.old`. The exe must sit in a folder you can write to. Any failure (no network, GitHub's rate limit, a bad hash) shows one line and leaves everything as it was. Your games and settings are not touched.
+
+Run from source, AMDLSS only shows the card with a link to the release page. `AMDLSS.exe --update` does the whole update without a window.
+
 ## Warnings
 
 - Do not use this in online games or games with anti-cheat. The account can be banned, or the game can refuse to start. AMDLSS looks for anti-cheat files in each game folder and flags the game, but it cannot know every game. Check it yourself.

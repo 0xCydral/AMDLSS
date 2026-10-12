@@ -305,3 +305,109 @@ def test_leftovers_and_games_without_upscalers_are_hidden_until_show_all(window,
     app.forget_folder()
     wait(root, app, lambda: not app.busy and app.extras == [])
     assert app.extras == [] and 'Typo' not in [r[0] for r in rows_of(app)]
+
+
+def new_release(version='0.1.0-beta.5'):
+    from amdlss import update
+    return update.Release(version, 'https://example.test/AMDLSS.exe', 'a' * 64, 10, 'https://example.test/notes')
+
+
+def test_an_update_is_a_card_with_a_link_and_from_source_no_update_button(window, monkeypatch):
+    from amdlss import update
+    top, make_app, _tmp = window
+    app = make_app()
+    pump(top, app, 0.3)
+    monkeypatch.setattr(update, 'FROZEN', False)
+    app.update_checked(None, manual=False)   # nothing newer: no card, no box
+    assert app.update_card is None
+    app.update_checked(new_release('0.1.0-beta.1'), manual=False)   # older than the running one
+    assert app.update_card is None
+    app.update_checked(new_release(), manual=False)
+    top.update()
+    assert shown(app.update_card) and 'AMDLSS 0.1.0-beta.5 is available.' in app.update_label.cget('text')
+    assert not hasattr(app, 'update_button')   # from source nothing is replaced
+
+
+def test_the_manual_check_answers_and_a_failure_is_one_log_line(window, monkeypatch):
+    from amdlss import update
+    top, make_app, _tmp = window
+    answers = Answers()
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    app = App(top, tk, ttk, filedialog, answers, font)
+    app.update_checked(None, manual=True)
+    assert answers.told == [f'You have the latest version ({update.VERSION}).']
+    app.update_check_failed('GitHub refused the request (rate limit, try later)', manual=False)
+    assert 'update check failed: GitHub refused' in app.log.get('1.0', 'end') and len(answers.told) == 1
+    app.update_check_failed('could not ask GitHub: offline', manual=True)
+    assert answers.told[-1] == 'ERROR Could not check for updates: could not ask GitHub: offline'
+
+
+def test_the_check_runs_off_the_window_thread_with_the_beta_switch(window, monkeypatch):
+    from amdlss import update
+    top, make_app, tmp = window
+    app = make_app()
+    asked = []
+    monkeypatch.setattr(update, 'fetch_release', lambda beta: asked.append(beta) or new_release())
+    assert app.beta_var.get() is True   # the running version is a beta: the switch starts on
+    app.check_updates(False)
+    wait(top, app, lambda: app.update_card is not None)
+    assert asked == [True] and app.update_card is not None
+    app.beta_var.set(False)
+    app.beta_changed()
+    from amdlss import settings
+    assert settings.load_beta(tmp / 'data', True) is False
+    app.check_updates(False)
+    wait(top, app, lambda: len(asked) == 2)
+    assert asked == [True, False]
+
+
+def test_update_replaces_the_exe_and_restarts_it_then_the_window_closes(window, monkeypatch):
+    from amdlss import update
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    top, _make, tmp = window
+    answers = Answers()
+    app = App(top, tk, ttk, filedialog, answers, font)
+    monkeypatch.setattr(update, 'FROZEN', True)
+    monkeypatch.setattr(update, 'exe_path', lambda: tmp / 'AMDLSS.exe')
+    done = []
+    monkeypatch.setattr(update, 'apply', lambda release, exe, progress: (progress(5, 10), done.append((release, exe))))
+    monkeypatch.setattr(update, 'restart', lambda exe, args: done.append(('restart', exe)))
+    destroyed = []
+    monkeypatch.setattr(app.root, 'destroy', lambda: destroyed.append(1))
+    app.offer_update(new_release())
+    app.busy = True   # HelixSR is working: no update now
+    app.install_update(new_release())
+    assert answers.told == ['Wait until HelixSR is done, then update.'] and not done
+    app.busy = False
+    app.install_update(new_release())
+    assert answers.asked[-1][0] == 'Update to 0.1.0-beta.5'
+    wait(top, app, lambda: destroyed)
+    assert done[-1] == ('restart', tmp / 'AMDLSS.exe') and destroyed == [1]
+
+
+def test_a_failed_update_is_one_line_and_the_card_is_usable_again(window, monkeypatch):
+    from amdlss import update
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    top, _make, tmp = window
+    answers = Answers()
+    app = App(top, tk, ttk, filedialog, answers, font)
+    monkeypatch.setattr(update, 'FROZEN', True)
+    monkeypatch.setattr(update, 'exe_path', lambda: tmp / 'AMDLSS.exe')
+
+    def bad_hash(release, exe, progress):
+        raise update.UpdateError('the download does not match the SHA-256 GitHub lists, nothing was changed')
+
+    monkeypatch.setattr(update, 'apply', bad_hash)
+    monkeypatch.setattr(update, 'restart', lambda *a: (_ for _ in ()).throw(AssertionError('restarted')))
+    app.offer_update(new_release())
+    app.install_update(new_release())
+    wait(top, app, lambda: any(t.startswith('ERROR') for t in answers.told))
+    assert answers.told == ['ERROR Update failed: the download does not match the SHA-256 GitHub lists, '
+                            'nothing was changed']
+    assert not app.busy and app.update_button.state == 'normal' and 'is available.' in app.update_label.cget('text')
