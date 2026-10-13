@@ -18,9 +18,10 @@ from test_logs import INFO, USER, fake  # noqa: F401  (the fixture: a game folde
 GOOD = {'app': 'AMDLSS', 'version': '0.1.0-beta.9', 'game': 'Fake Game', 'files': {'files.txt': 'ok\n'}}
 GOOD_NAMES = ['files.txt', 'system.txt', 'amdlss-install.log', 'Far-Cry-6/exe-folder/OptiScaler.log',
               'Far-Cry-6/exe-folder/HelixSR/helixsr-install.json', 'fsr-dll-folder-2/helixsr.ini', 'a/b/c.LOG',
-              'a/b/c/d/e.log', 'a' * 156 + '.log']
+              'a/b/c/d/e.log', 'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log', 'a/b/c/d/e/f/g.log',
+              'crashes.txt', 'Game/crashes.txt', 'Game/proton.log', 'a' * 156 + '.log']
 BAD_NAMES = ['', '../x.log', 'a/../x.log', '/etc/passwd.txt', '.hidden.log', 'a/.x.log', 'a/./x.log', 'a//x.log',
-             'a/b/c/d/e/f.log', 'a\\b.log', 'C:/x.log', 'x.log ', 'x .log', 'x.log.', 'x..log', 'noext', '.log',
+             'a/b/c/d/e/f/g/h.log', 'a\\b.log', 'C:/x.log', 'x.log ', 'x .log', 'x.log.', 'x..log', 'noext', '.log',
              'x.exe', 'x.dll', 'x.log.exe', 'x.sh', 'x.zip', 'x.log/', 'a./b.log', 'nul.log', 'COM1.txt', 'a/aux.ini',
              'caf\u00e9.log', 'x\x00.log', 'x\n.log', 'a' * 157 + '.log', '__proto__']
 GOOD_TEXTS = ['a\tb\r\nc\n', 'caf\u00e9 \u2014 \U0001F600', '']
@@ -39,8 +40,10 @@ def test_the_names_of_a_zip_of_logs_are_accepted_and_odd_ones_are_not():
         assert reports.name_problem(name), repr(name)
 
 
-def test_a_name_has_at_most_five_parts():
-    assert reports.name_problem('a/b/c/d/e.log') is None and 'more than 5 parts' in reports.name_problem('a/b/c/d/e/f.log')
+def test_a_name_has_at_most_seven_parts():
+    history = 'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log'
+    assert reports.name_problem(history) is None and reports.name_problem('a/b/c/d/e/f/g.log') is None
+    assert 'more than 7 parts' in reports.name_problem('a/b/c/d/e/f/g/h.log')
 
 
 def test_text_may_hold_tab_newline_and_carriage_return_and_no_other_control_character():
@@ -55,22 +58,23 @@ def test_a_report_is_exactly_app_version_game_and_files():
     bad = [None, [], 'x', {}, {**GOOD, 'extra': 1}, {**GOOD, 'app': 'Other'}, {k: v for k, v in GOOD.items() if k != 'game'},
            {**GOOD, 'files': {}}, {**GOOD, 'files': []}, {**GOOD, 'files': many(201)}, entries(**{'../x.log': 'x'}),
            entries(**{'a.exe': 'x'}), entries(**{'a.log': 'x\x00'}), entries(**{'a.log': 5}),
-           entries(**{'a/b/c/d/e/f.log': 'x'})]
+           entries(**{'a/b/c/d/e/f/g/h.log': 'x'})]
     bad += [{**GOOD, key: value} for key in ('version', 'game') for value in ('', 'x' * 121, 'a\nb', 'a\x00b', 5, None)]
     for report in bad:
         with pytest.raises(ReportError):
             reports.validate(report)
     reports.validate({**GOOD, 'files': many(200), 'game': 'x' * 120, 'version': 'Caf\u00e9'})
     reports.validate(entries(**{'a/b/c/d/e.log': 'x'}))
+    reports.validate(entries(**{'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log': 'x'}))
 
 
 NODE_CHECK = """
-import { MAX_BODY_BYTES, MAX_FILES, nameProblem, textProblem } from './receiver/validate.js';
+import { MAX_BODY_BYTES, MAX_FILES, MAX_SEGMENTS, nameProblem, textProblem } from './receiver/validate.js';
 const cases = JSON.parse(process.argv[1]);
 console.log(JSON.stringify({
   names: cases.names.map((n) => nameProblem(n) === null),
   texts: cases.texts.map((t) => textProblem(t) === null),
-  limits: [MAX_BODY_BYTES, MAX_FILES],
+  limits: [MAX_BODY_BYTES, MAX_FILES, MAX_SEGMENTS],
 }));
 """
 
@@ -85,7 +89,7 @@ def test_python_and_the_receivers_javascript_agree_on_every_name_text_and_limit(
     said = json.loads(done.stdout)
     assert said['names'] == [reports.name_problem(n) is None for n in names]
     assert said['texts'] == [reports.text_problem(t) is None for t in texts]
-    assert said['limits'] == [reports.MAX_BODY, reports.MAX_FILES]
+    assert said['limits'] == [reports.MAX_BODY, reports.MAX_FILES, reports.MAX_SEGMENTS]
 
 
 NODE_REPORTS = """
@@ -99,12 +103,14 @@ def test_the_receiver_accepts_what_the_app_builds_and_the_two_sides_share_the_fi
     many = lambda count: {f'f{i}.txt': 'x' for i in range(count)}   # noqa: E731
     built = build(fake, add_game(fake, 'Second Game', log='x'))
     cases = [built, entries(**many(200)), entries(**many(201)), entries(**{'a/b/c/d/e.log': 'x'}),
-             entries(**{'a/b/c/d/e/f.log': 'x'}), {**built, 'game': 'x' * 121}]
+             entries(**{'a/b/c/d/e/f/g/h.log': 'x'}), {**built, 'game': 'x' * 121},
+             entries(**{'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log': 'x'})]
     root = Path(reports.__file__).resolve().parent.parent
     done = subprocess.run(['node', '--input-type=module', '-e', NODE_REPORTS, json.dumps(cases)], cwd=root,
                           capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
-    assert json.loads(done.stdout) == [reports.problem_of(case) is None for case in cases] == [True, True, False, True, False, False]
+    assert json.loads(done.stdout) == [reports.problem_of(case) is None for case in cases] == \
+        [True, True, False, True, False, False, True]
 
 
 # --- building the report -----------------------------------------------------------------------------------------

@@ -110,7 +110,7 @@ def check_reports():
     files = {'G/exe-folder/helixsr.log': 'ok\n', 'system.txt': 'x'}
     sample = {'app': 'AMDLSS', 'version': '0.1.0', 'game': 'G', 'files': files}
     assert reports.problem_of(sample) is None
-    for bad in ({'../x.log': 'x'}, {'G/a.exe': 'x'}, {'a.log': 'x\x00'}, {'a/b/c/d/e/f.log': 'x'}):
+    for bad in ({'../x.log': 'x'}, {'G/a.exe': 'x'}, {'a.log': 'x\x00'}, {'a/b/c/d/e/f/g/h.log': 'x'}):
         assert reports.problem_of({**sample, 'files': bad}), bad
     assert reports.valid_code('ABCD2345') and not reports.ReportClient('').configured
     assert reports.folder_names([games.Game(name='Far Cry 6'), games.Game(name='far cry 6')]) == ['Far-Cry-6', 'far-cry-6-2']

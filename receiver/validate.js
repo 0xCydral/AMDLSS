@@ -5,7 +5,7 @@
 export const MAX_BODY_BYTES = 8 << 20;
 export const MAX_FILES = 200;
 export const MAX_NAME_CHARS = 160;
-export const MAX_SEGMENTS = 5;
+export const MAX_SEGMENTS = 7;
 export const MAX_LABEL_CHARS = 120;
 export const ALLOWED_EXTENSIONS = new Set(['log', 'ini', 'json', 'txt']);
 
@@ -22,7 +22,7 @@ export function nameProblem(name) {
     return 'a file name is empty or too long';
   }
   const segments = name.split('/');
-  if (segments.length > MAX_SEGMENTS) return 'a file name has more than 5 parts';
+  if (segments.length > MAX_SEGMENTS) return `a file name has more than ${MAX_SEGMENTS} parts`;
   for (const segment of segments) {
     if (!SEGMENT.test(segment) || segment.includes('..')) return 'a file name has characters that are not allowed';
     if (DEVICE.test(segment.split('.')[0])) return 'a file name is a reserved device name';

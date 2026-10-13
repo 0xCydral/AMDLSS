@@ -174,7 +174,7 @@ def test_nothing_in_a_report_is_run_or_unpacked(server, tmp_path, capsys):  # no
 
 
 def test_a_server_answer_that_breaks_the_rules_writes_nothing(server, tmp_path, capsys):  # noqa: F811
-    for answer in (b'not json', {**FULL, 'extra': 1}, report(**{'a.log': 'x\x00y'}), report(**{'a/b/c/d/e/f.log': 'x'}),
+    for answer in (b'not json', {**FULL, 'extra': 1}, report(**{'a.log': 'x\x00y'}), report(**{'a/b/c/d/e/f/g/h.log': 'x'}),
                    report(**{'x.dll': 'x'}), report()):
         stub = server((200, answer))
         status, out, err = fetch(tmp_path, stub.url, capsys)
