@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The window builds and fills its list. The root window is withdrawn before anything is drawn, so nothing shows."""
+import json
 import sys
 import time
 
@@ -471,7 +472,8 @@ def test_a_card_with_a_cached_cover_draws_it_and_one_without_keeps_the_tint(wind
     cache = tmp / 'data' / 'covers'
     cache.mkdir(parents=True)
     image.new('RGB', (460, 215), '#c03040').save(cache / '123.jpg', 'JPEG')
-    (cache / 'names.json').write_text('{"one": {"appid": 123, "at": 0}}')
+    (cache / 'names.json').write_text(json.dumps({'names': {'one': 'title:one'},
+                                                  'entries': {'title:one': {'source': 'steam:123', 'at': 0}}}))
     settings.save_covers(tmp / 'data', True)
     monkeypatch.setattr(covers, 'download', lambda url, limit: None)   # Steam knows nothing about Three
     top, app, _one = two_game_app(window, monkeypatch)
@@ -486,13 +488,13 @@ def test_a_card_with_a_cached_cover_draws_it_and_one_without_keeps_the_tint(wind
 def test_a_cover_that_arrives_later_is_drawn_without_losing_the_selection(window, monkeypatch):
     image = pytest.importorskip('PIL.Image')
     import io
-    import json
     stream = io.BytesIO()
     image.new('RGB', (460, 215), '#3040c0').save(stream, 'JPEG')
 
-    def steam(url, limit):   # the store knows Three as app 77 and has its header image
-        return json.dumps({'items': [{'id': 77, 'name': 'Three'}]}).encode() if 'storesearch' in url \
-            else stream.getvalue()
+    def steam(url, limit):   # Steam knows Three as app 77 and has its header image
+        if 'SearchApps' in url:
+            return json.dumps([{'appid': '77', 'name': 'Three'}] if url.endswith('/Three') else []).encode()
+        return stream.getvalue() if '/apps/77/' in url else None
 
     settings.save_covers(window[2] / 'data', True)
     monkeypatch.setattr(covers, 'download', steam)

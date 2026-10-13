@@ -65,9 +65,22 @@ Run from source, AMDLSS only shows the card with a link to the release page. `AM
 
 ## Game covers
 
-The game cards show each game's Steam header image when Steam has one. The images come from Steam's public store API and CDN (`store.steampowered.com` and `cdn.akamai.steamstatic.com`), with no account or key. When the game sits in a Steam library, AMDLSS reads its `appmanifest_*.acf` files to find the Steam app id, and the only thing sent to Steam is that app id, in the request for the image (and, for newer games, in one request for the store's app details, which gives the image's address). Only for a game it cannot find that way (Epic, GOG or a folder you added) does it send the game's name to Steam's store search, and it uses the result only when Steam's name is the same as the game's name. Otherwise the card keeps its colour. Downloads run in the background, so offline the window opens and works as before.
+The game cards show the game's cover when AMDLSS can tell which game it is and Steam or GOG has art for it. Nothing is sent until the game is known: AMDLSS first works out what the game is from files already on your disk, and reads only these (nothing is changed or uploaded):
 
-Covers are saved in `%LOCALAPPDATA%\AMDLSS\covers`, with a small `names.json` that remembers the game names already looked up (a game Steam does not know is asked again after 7 days). The box **Show game covers (downloads from Steam)** at the bottom is on by default; turn it off to stop all requests and show the plain cards. Covers need Pillow, which the exe includes (from source: `pip install pillow`); without it the box is hidden and no cover is fetched. The images belong to their owners. AMDLSS is not affiliated with Valve or Steam.
+- Steam: the `appmanifest_*.acf` file of the library the game is in (its app id and name).
+- GOG: `goggame-<id>.info` in the game's folder or a folder above it (its GOG id and name).
+- Epic: the launcher's manifests in `%PROGRAMDATA%\Epic\EpicGamesLauncher\Data\Manifests` whose install folder holds the game (its name).
+- Xbox / Game Pass: `MicrosoftGame.config` or `appxmanifest.xml` in the game's folder or above (its name).
+- EA app: `__Installer\installerdata.xml` (its name).
+- The main exe's version information (its product name, ignored when it only names an engine such as Unreal Engine), then the name HelixSR lists and the folder's name.
+
+What is sent, and where:
+
+- A game with a Steam manifest: only its Steam app id, to `cdn.akamai.steamstatic.com` for the image (and, for newer games, to `store.steampowered.com` for the image's address).
+- Any other game: its titles from the list above, one at a time, to `steamcommunity.com` and `store.steampowered.com` (their search), until Steam has a game of that name. AMDLSS takes a result only when its name is the title, or continues the title with whole words (for example "The Witcher 3" and "The Witcher 3: Wild Hunt - Remastered") and the store says it is a game, not DLC or a soundtrack. When there is any doubt the card keeps its colour.
+- A GOG game that Steam does not have: its GOG id to `api.gog.com`, and the image from `gog-statics.com`.
+
+Downloads run in the background, so offline the window opens and works as before. Covers are saved in `%LOCALAPPDATA%\AMDLSS\covers`, with a small `names.json` that remembers which game each cover belongs to (a game nothing was found for is looked up again after 7 days). The box **Show game covers (downloads from Steam and GOG)** is on by default; turn it off to stop all requests and show the plain cards. Covers need Pillow, which the exe includes (from source: `pip install pillow`); without it the box is hidden and no cover is fetched. The images belong to their owners. AMDLSS is not affiliated with Valve, Steam or GOG.
 
 ## Warnings
 

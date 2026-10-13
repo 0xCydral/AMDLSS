@@ -62,7 +62,7 @@ class App:
         self.beta_var = tk.BooleanVar(value=settings.load_beta(self.data_dir, update.is_prerelease(update.current_version())))
         self.update_card = None     # the "AMDLSS x is available" card, once an update was found
         self.covers_var = tk.BooleanVar(value=settings.load_covers(self.data_dir))
-        self.covers = covers.SteamCovers(self.data_dir, self.covers_var.get() and COVER_ART,
+        self.covers = covers.CoverClient(self.data_dir, self.covers_var.get() and COVER_ART,
                                          lambda text: self.post(self.log_line, text))
         self.cover_jobs, self.cover_tried, self.cover_redraw = queue.Queue(), set(), None
         self.cover_threads = []
@@ -239,7 +239,7 @@ class App:
                        selectcolor=FIELD, activebackground=BG, activeforeground=TEXT, font=self.look.fonts['small'],
                        bd=0, highlightthickness=0).pack(side='right')
         if COVER_ART:   # covers are JPEG: Tk cannot read those, Pillow does
-            tk.Checkbutton(foot, text='Show game covers (downloads from Steam)', variable=self.covers_var,
+            tk.Checkbutton(foot, text='Show game covers (downloads from Steam and GOG)', variable=self.covers_var,
                            command=self.covers_changed, bg=BG, fg=TEXT, selectcolor=FIELD, activebackground=BG,
                            activeforeground=TEXT, font=self.look.fonts['small'], bd=0,
                            highlightthickness=0).pack(side='right', padx=(0, px(12)))
@@ -627,8 +627,8 @@ class App:
 
     # ---- covers ---------------------------------------------------------------------------------
     def fetch_covers(self):
-        """Asks Steam, off the window's thread and COVER_WORKERS at a time, for the covers of the games on show that
-        are not on disk yet. Each game is asked once until Rescan or the switch is turned on again."""
+        """Asks Steam or GOG, off the window's thread and COVER_WORKERS at a time, for the covers of the games on
+        show that are not on disk yet. Each game is asked once until Rescan or the switch is turned on again."""
         if not self.covers.enabled:
             return
         wanted = [g for g in self.shown

@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import covers, framegen, games, helixsr, logs, update
+from . import covers, framegen, games, helixsr, identify, logs, update
 
 
 def check_parsing():
@@ -158,33 +158,54 @@ def check_update():
         assert update.cleanup_old(exe, tries=1) and sorted(p.name for p in Path(folder).iterdir()) == ['AMDLSS.exe']
 
 
+def check_identify():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder) / 'TheWitcher3_WildHunt'
+        (root / 'bin' / 'x64').mkdir(parents=True)
+        (root / 'goggame-1207664663.info').write_text(json.dumps({'gameId': '1207664663', 'name': 'Witcher: Complete'}))
+        game = games.Game(name='The Witcher 3', folder=str(root), exe_folder=str(root / 'bin' / 'x64'))
+        found = identify.identify(game)
+        assert found.gog_id == 1207664663 and found.steam_appid is None and found.source == 'gog'
+        assert found.titles == ['Witcher: Complete', 'The Witcher 3', 'The Witcher 3 Wild Hunt'], found.titles
+    assert identify.tidy_folder_name('Cyberpunk2077') == 'Cyberpunk 2077' and identify.generic_product('UE4')
+
+
 def check_covers():
     jpeg = b'\xff\xd8\xff\xe0' + b'x' * 50
     asked = []
+    found = [{'appid': '292030', 'name': 'The Witcher 3: Wild Hunt \u2014 Remastered'},
+             {'appid': '5', 'name': 'The Witcher 3: Wild Hunt \u2014 Soundtrack'}]
 
-    def steam(url, limit):   # a store that knows one game, and one cover that is not a JPEG
+    def hosts(url, limit):   # Steam knows The Witcher 3 (and a soundtrack), GOG knows one more game
         asked.append(url)
-        if 'storesearch' in url:
-            return json.dumps({'items': [{'id': 7, 'name': "Dragon’s Dogma™ 2"},
-                                         {'id': 8, 'name': 'Dragon\'s Dogma 2: Dark Arisen'}]}).encode()
-        return jpeg if '/apps/7/' in url else b'<html>'
+        if 'SearchApps' in url:
+            return json.dumps(found if 'Witcher' in url else []).encode()
+        if 'appdetails' in url:
+            appid = url.split('appids=')[1].split('&')[0]
+            return json.dumps({appid: {'data': {'type': 'game' if appid == '292030' else 'dlc'}}}).encode()
+        if 'api.gog.com' in url:
+            return json.dumps({'images': {'background': '//images-1.gog-statics.com/b.jpg'}}).encode()
+        return jpeg if '/292030/' in url or 'gog-statics.com' in url else None
 
-    assert covers.normalise("Dragon's  Dogma® 2") == covers.normalise('dragon’s dogma 2')
+    assert identify.normalise("Dragon's  Dogma\u00ae 2") == identify.normalise('dragon\u2019s dogma 2')
     with tempfile.TemporaryDirectory() as folder:
-        client = covers.SteamCovers(folder, fetch=steam)
-        assert client.get(games.Game(name="Dragon's Dogma 2")).read_bytes() == jpeg
-        assert client.get(games.Game(name="Dragon's Dogma 2: Dark")) is None   # a near miss is no match
+        client = covers.CoverClient(folder, fetch=hosts)
+        assert client.steam_match('The Witcher 3') == 292030   # a game that continues the title, never DLC
+        assert client.steam_match('Witcher') is None and client.steam_match('Wild Hunt') is None   # not from the middle
+        assert client.get(games.Game(name='The Witcher 3')).name == '292030.jpg'
         assert client.get(games.Game(name='Unlisted')) is None and client.cached(games.Game(name='Unlisted')) is None
         asked.clear()
         assert client.get(games.Game(name='Unlisted')) is None and not asked   # a miss is remembered
-        assert sorted(p.name for p in (Path(folder) / 'covers').iterdir()) == ['7.jpg', 'names.json']
+        gog = identify.Identity(gog_id=7, titles=['Only On GOG'])
+        assert client.fetch_cover(client.resolve(gog)).name == 'gog-7.jpg'
+        assert sorted(p.name for p in (Path(folder) / 'covers').iterdir()) == ['292030.jpg', 'gog-7.jpg', 'names.json']
         client.enabled = False
-        assert client.get(games.Game(name="Dragon's Dogma 2")) is None
+        assert client.get(games.Game(name='The Witcher 3')) is None
 
 
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_helixsr, check_zip_slip, check_update, check_covers):
+                  check_collect_logs, check_helixsr, check_zip_slip, check_update, check_identify, check_covers):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')
