@@ -38,7 +38,11 @@ The two install routes matter in every bug report:
 ## Getting a tester's logs
 
 Testers press **Send logs**. One report holds every game that has HelixSR or OptiScaler installed or any log, and
-they paste `AMDLSS report <CODE>` in the chat. Pull it:
+they paste `AMDLSS report <CODE>` in the chat.
+
+On the owner's PC, open **AMDLSS Logs** from the app menu (`tools/amdlss-logs-gui.sh`) and paste the tester's message:
+it finds the code, downloads the report, shows the summary and opens the folder. The read token is asked once and
+kept in `~/.config/amdlss-logs/token` (0600); never read that file. From a shell:
 
 ```bash
 cd ~/Projects/AMDLSS
