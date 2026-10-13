@@ -35,6 +35,11 @@ The two install routes matter in every bug report:
   exists only on this route and is FSR frame generation (OptiScaler's `FGOutput = FSRFG`); there is no DLSS frame
   generation. Never in games with anti-cheat.
 
+Install, Update and Remove first check that no process runs from inside the game's folder (Windows: PowerShell
+process paths; Linux: `/proc`, Proton included; `helixsr.running_from`) and refuse in plain words when one does.
+A failed run whose output names a locked file (`PermissionError`, `WinError 5`, `Errno 13`, access denied in
+English or Spanish) reads the same way in the window; the raw output stays in the game's `amdlss-install.log`.
+
 ## Getting a tester's logs
 
 Testers press **Send logs**. One report holds every game that has HelixSR or OptiScaler installed or any log, and
@@ -95,6 +100,7 @@ Anything that is not text is not an AMDLSS log: stop and say so.
 | `OptiScaler.log` lines with `[E]` | OptiScaler errors. `rg '\[E\]' OptiScaler.log \| cut -c1-200 \| sort \| uniq -c \| sort -rn` |
 | `OptiScaler.log` `nvngx_update.exe` errors from Streamline | Noise on AMD, ignore |
 | `OptiScaler.log` `FFX FG Callback ... SwapChainVersionDX12` then `allocator->Reset() error: 80004005` | FSR frame generation broke after the game rebuilt its swapchain (settings change, fullscreen toggle, Alt+Tab). Unconfirmed lead, 2026-10-13 |
+| `files.txt` with an OptiScaler `dxgi.dll` while `games.txt` says `install: none` | Someone else's OptiScaler install in that folder; `report.html` names it as not AMDLSS's, with its version |
 | `files.txt` | Which DLL versions are really there, and whether each upscaler DLL is HelixSR's |
 | `fakenvapi.log` `GetLatency: Not enough data` | Normal |
 
@@ -109,8 +115,9 @@ node --test receiver/
 python AMDLSS.pyw --selftest
 ```
 
-All must pass before a release (254 Python tests and 20 receiver tests as of beta.9). Tests that need the
-unconfigured log path set `reports.REPORT_URL = ''` themselves; the shipped value is the live address.
+All must pass before a release (278 Python tests, 3 skipped, and 23 receiver tests as of the sync reader). Tests
+that need the unconfigured log path set `reports.REPORT_URL = ''` themselves; the shipped value is the live
+address.
 
 ## Building and releasing
 

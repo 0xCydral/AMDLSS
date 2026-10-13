@@ -140,6 +140,24 @@ def check_helixsr():
         assert sorted(p.name for p in Path(folder).iterdir()) == sorted([helixsr.DLL, helixsr.BUILT])
 
 
+def check_running_game():
+    locked = 'PermissionError: [WinError 5] Acceso denegado: "E:\\Games\\One\\dxgi.dll"'
+    assert helixsr.plain_failure(locked, 'One') == helixsr.still_running_message('One')
+    assert helixsr.plain_failure('boom', 'One') is None
+    assert helixsr.running_from(r'E:\Games\One', windows=True, run=lambda command: 'E:\\Games\\One\\game.exe\n')
+    assert not helixsr.running_from(r'E:\Games\One', windows=True, run=lambda command: 'C:\\Windows\\explorer.exe\n')
+    assert not helixsr.inside(r'E:\Games\OneTwo\game.exe', r'E:\Games\One', windows=True)
+    game = games.Game(name='One', folder=r'E:\Games\One', state='optiscaler')
+    client = helixsr.HelixSR('C:/h', python='C:/p/python.exe', running=lambda g: True)
+    for act in (client.install, client.remove):
+        try:
+            act(game)
+        except helixsr.HelixSRError as error:
+            assert 'still running' in str(error)
+        else:
+            raise AssertionError('an install or remove ran while the game was running')
+
+
 def check_zip_slip():
     with tempfile.TemporaryDirectory() as folder:
         stream = io.BytesIO()
@@ -238,7 +256,8 @@ def check_covers():
 
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_reports, check_helixsr, check_zip_slip, check_update, check_identify, check_covers):
+                  check_collect_logs, check_reports, check_helixsr, check_running_game, check_zip_slip, check_update,
+                  check_identify, check_covers):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

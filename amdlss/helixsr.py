@@ -516,14 +516,101 @@ def install_helixsr(data_dir, consented, progress=None, on_line=None, force=Fals
     return folder
 
 
+# --- is the game still running? -----------------------------------------------------------------------------------
+
+# How a locked game file reads in the installer's output, in English and in a Spanish Windows' words.
+LOCKED = ('permissionerror', 'errno 13', 'winerror 5', 'access is denied', 'acceso denegado')
+PROCESS_SCRIPT = ('Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } | '
+                  'Select-Object -ExpandProperty Path')
+
+
+def still_running_message(name):
+    """What the window says when a game's files cannot be touched because the game is open."""
+    return f"Close {name} first. It is still running, so its files can't be replaced."
+
+
+def plain_failure(text, name):
+    """still_running_message(name) when `text` (a failed installer's output) says its file was locked, else None."""
+    return still_running_message(name) if any(marker in text.lower() for marker in LOCKED) else None
+
+
+def inside(path, folder, windows=None):
+    """True when `path` is `folder` or under it, compared the way that system's paths compare."""
+    pathmod = host.path_module(windows)
+    path, folder = (pathmod.normcase(pathmod.normpath(p)) for p in (path, folder))
+    return path == folder or path.startswith(folder if folder.endswith(pathmod.sep) else folder + pathmod.sep)
+
+
+def process_paths(run=None):
+    """The executable path of every running process, asked of PowerShell; [] when the query fails. `run(command)`
+    replaces the subprocess call and returns its output text (tests)."""
+    command = ['powershell', '-NoProfile', '-NonInteractive', '-Command', PROCESS_SCRIPT]
+    if run is not None:
+        out = run(command)
+    else:
+        try:
+            done = subprocess.run(command, capture_output=True, timeout=30, creationflags=NO_WINDOW, env=child_env())
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        out = done.stdout.decode('utf-8', errors='replace')
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _running_from_proc(folder, proc):
+    """The Linux half of running_from(): one /proc entry per process, its exe link and its command line."""
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return False
+    base = str(folder).rstrip('/')
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            exe = os.readlink(entry / 'exe').removesuffix(' (deleted)')
+        except OSError:
+            exe = ''
+        if exe and inside(exe, folder, False):
+            return True
+        try:
+            cmdline = (entry / 'cmdline').read_bytes().decode('utf-8', errors='replace')
+        except OSError:
+            continue
+        for arg in cmdline.split('\x00'):
+            shown = arg.replace('\\', '/')   # Proton names the game by its Windows path (Z:\...)
+            if arg and (base + '/' in shown or shown.endswith(base) or inside(shown, folder, False)):
+                return True
+    return False
+
+
+def running_from(folder, windows=None, run=None, proc=None):
+    """True when a process runs from inside `folder`, best effort: Windows asks PowerShell for every process path,
+    Linux reads /proc (the exe link, else a command line naming the folder, which is how Proton shows). A query
+    that fails answers False, so a broken probe never blocks an install."""
+    if not folder:
+        return False
+    try:
+        if host.is_windows(windows):
+            return any(inside(path, folder, True) for path in process_paths(run))
+        return _running_from_proc(folder, Path(proc) if proc else Path('/proc'))
+    except OSError:
+        return False
+
+
+def game_running(game, windows=None, run=None, proc=None):
+    """True when a process runs from inside `game`'s folder (see running_from)."""
+    return running_from(game.folder or game.exe_folder, windows, run, proc)
+
+
 class HelixSR:
     """A built HelixSR folder and the games it can be installed into. HelixSR's files are only read, except by its
     own installer when AMDLSS runs it."""
 
-    def __init__(self, folder, python=None):
+    def __init__(self, folder, python=None, running=None):
         self.folder = Path(folder)
         self._python_given = python is not None   # an explicit Python is used as given (tests); else find_python()'s
         self.python = Path(python or helixsr_python())
+        self.running = running if running is not None else game_running   # is the game still open? (tests say so)
 
     @property
     def version(self):
@@ -586,6 +673,11 @@ class HelixSR:
             raise HelixSRError(f"HelixSR's game list failed (exit {code}): {lines[-1] if lines else 'no output'}")
         return gamelist.parse_list_output('\n'.join(lines))
 
+    def _need_closed(self, game):
+        """A running game holds its DLLs: name that instead of letting the installer die on a locked file."""
+        if self.running(game):
+            raise HelixSRError(still_running_message(game.name))
+
     def _act(self, build_command, game, extras, on_line):
         fresh = gamelist.match_game(self.list_games(extras), game)
         if fresh is None:
@@ -593,8 +685,9 @@ class HelixSR:
         if not fresh.index:  # a game HelixSR does not list has no number to install or remove by
             raise HelixSRError(f'HelixSR does not list {game.name}, so it cannot be changed from here')
         code, tail = run_streaming(build_command(fresh.index, extras), self.folder, on_line)
-        if code != 0:
-            raise HelixSRError(f'HelixSR failed for {game.name} (exit {code}): {tail[-1] if tail else "no output"}')
+        if code != 0:   # a locked file is said in plain words; the raw output stays in the game's install log
+            raise HelixSRError(plain_failure('\n'.join(tail), game.name) or
+                               f'HelixSR failed for {game.name} (exit {code}): {tail[-1] if tail else "no output"}')
         after = gamelist.match_game(self.list_games(extras), game)
         if after is None:
             raise HelixSRError(f'{game.name} disappeared from the list after the change: refresh the list')
@@ -604,6 +697,7 @@ class HelixSR:
         """Installs into `game`; returns the game as listed afterwards. Raises HelixSRError when HelixSR fails or the
         game does not show the route installed. `route` None or 'direct' runs HelixSR's `install N`, which takes the
         game's default route; 'optiscaler' (only for a game with can_opti) runs the install bridge."""
+        self._need_closed(game)
         if route == 'optiscaler' and game.can_opti and game.folder:
             def command(_index, extra_folders):
                 return self.optiscaler_command(game.folder, extra_folders)
@@ -620,6 +714,7 @@ class HelixSR:
 
     def remove(self, game, extras=(), on_line=None):
         """Removes HelixSR from `game` (HelixSR's own uninstall: everything put back as it was)."""
+        self._need_closed(game)
         _fresh, after = self._act(self.remove_command, game, extras, on_line)
         if after.installed:
             raise HelixSRError(f'HelixSR finished but {game.name} still shows as "{after.state_text}": '
