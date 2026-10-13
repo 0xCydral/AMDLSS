@@ -126,7 +126,7 @@ def add_game(fake_game, name, state='direct', log='', helixsr='1.9.0'):
 
 def build(fake_game, *more):
     game, setup, data, _out = fake_game
-    return reports.build_payload([game, *more], setup, data, INFO)
+    return reports.build_payload([game, *more], setup, data, INFO, windows=False)
 
 
 def test_the_report_holds_the_files_of_every_game_under_its_folder_and_the_system_once(fake):  # noqa: F811
@@ -134,9 +134,10 @@ def test_the_report_holds_the_files_of_every_game_under_its_folder_and_the_syste
     report = build(fake, second)
     assert reports.problem_of(report) is None
     assert sorted(report['files']) == [
-        'Fake-Game/exe-folder/HelixSR/helixsr-install.json', 'Fake-Game/exe-folder/HelixSR/helixsr.log',
-        'Fake-Game/exe-folder/OptiScaler.ini', 'Fake-Game/exe-folder/OptiScaler.log',
-        'Fake-Game/exe-folder/fakenvapi.ini', 'Fake-Game/files.txt', 'Fake-Game/fsr-dll-folder/helixsr.log',
+        'Fake-Game/crashes.txt', 'Fake-Game/exe-folder/HelixSR/helixsr-install.json',
+        'Fake-Game/exe-folder/HelixSR/helixsr.log', 'Fake-Game/exe-folder/OptiScaler.ini',
+        'Fake-Game/exe-folder/OptiScaler.log', 'Fake-Game/exe-folder/fakenvapi.ini', 'Fake-Game/files.txt',
+        'Fake-Game/fsr-dll-folder/helixsr.log', 'Second-Game/crashes.txt',
         'Second-Game/exe-folder/OptiScaler.log', 'Second-Game/files.txt', 'games.txt', 'system.txt']
     assert report['app'] == 'AMDLSS' and report['version'] == reports.VERSION
     assert report['game'] == '2 games: Fake: Game?, Second Game'
@@ -183,13 +184,37 @@ def test_a_game_with_nothing_to_report_is_skipped(fake):  # noqa: F811
     logs.GameLog(fake[2], recorded.folder).write('=== install ===')
     games = [fake[0], empty, installed, logged, recorded]
     assert [g.name for g in reports.reportable(games, fake[2])] == ['Fake: Game?', 'Installed Game', 'Logged Game', 'Recorded Game']
-    names = {n.split('/')[0] for n in reports.build_payload(games, fake[1], fake[2], INFO)['files']}
+    names = {n.split('/')[0] for n in reports.build_payload(games, fake[1], fake[2], INFO, windows=False)['files']}
     assert names == {'Fake-Game', 'Installed-Game', 'Logged-Game', 'Recorded-Game', 'games.txt', 'system.txt'}
     assert 'amdlss-install.log' in ' '.join(build(fake, recorded)['files'])
     with pytest.raises(ReportError, match='anything to report'):
         reports.build_payload([empty], None, fake[2], INFO)
     with pytest.raises(ReportError, match='anything to report'):
         reports.build_payload([], None, fake[2], INFO)
+
+
+def test_kept_history_rides_in_the_report_after_the_current_logs(fake):  # noqa: F811
+    game, _setup, data, _out = fake
+    logs.preserve_history(game, data)
+    Path(game.exe_folder, 'OptiScaler.log').write_text('the later run\n', encoding='utf-8')
+    report = build(fake)
+    assert reports.problem_of(report) is None
+    kept = [name for name in report['files'] if '/history/' in name]
+    assert kept and all(reports.name_problem(name) is None for name in kept)
+    [log] = [name for name in kept if name.endswith('/exe-folder/OptiScaler.log')]
+    assert 'C:\\Users\\<user>' in report['files'][log] and USER not in reports.body_of(report).decode()
+    order = list(report['files'])
+    assert order.index(log) > order.index('Fake-Game/exe-folder/OptiScaler.log')   # current logs first
+
+
+def test_a_game_with_only_kept_history_still_reports(fake):  # noqa: F811
+    gone = add_game(fake, 'Gone Game', state='none', log='the crash run\n')
+    logs.preserve_history(gone, fake[2])
+    Path(gone.folder, 'OptiScaler.log').unlink()   # the remove took the current logs; the kept run stays
+    assert [game.name for game in reports.reportable([gone], fake[2])] == ['Gone Game']
+    report = reports.build_payload([gone], fake[1], fake[2], INFO, windows=False)
+    [log] = [name for name in report['files'] if name.endswith('exe-folder/OptiScaler.log')]
+    assert '/history/' in log and report['files'][log] == 'the crash run\n'
 
 
 def test_folder_names_follow_the_zip_slug_and_are_unique_and_valid():
@@ -294,8 +319,8 @@ def test_the_confirm_text_lists_the_games_and_how_many_files_each_sends(fake):  
     second = add_game(fake, 'Second Game', log='x')
     empty = add_game(fake, 'Empty Game', state='none')
     text = reports.confirm_text([fake[0], second, empty], fake[2])
-    assert 'Fake: Game?: 7 files' in text   # the six files found, plus files.txt
-    assert 'Second Game: 2 files' in text and 'Empty Game' not in text
+    assert 'Fake: Game?: 8 files' in text   # the six files found, plus files.txt and crashes.txt
+    assert 'Second Game: 3 files' in text and 'Empty Game' not in text
     assert 'AMDLSS log server' in text and '30 days' in text and '<user>' in text and text.endswith('Send logs?')
     assert 'system.txt' in text and 'games.txt' in text
 

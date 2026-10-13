@@ -107,7 +107,7 @@ def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     assert framegen.apply(game, True, tmp_path, framegen.LOGGING)   # the real [Log] section has both keys
     assert framegen.is_on(game, framegen.LOGGING) and b'LogToFile=true' in (game / 'OptiScaler.ini').read_bytes()
     (game / 'OptiScaler.log').write_text('[Info] a log the switch made')
-    with zipfile.ZipFile(logs.collect(after, copy, tmp_path / 'data', tmp_path / 'out', {})) as archive:
+    with zipfile.ZipFile(logs.collect(after, copy, tmp_path / 'data', tmp_path / 'out', {}, windows=False)) as archive:
         names = set(archive.namelist())
     assert {'exe-folder/OptiScaler.log', 'exe-folder/OptiScaler.ini', 'exe-folder/HelixSR/helixsr-install.json',
             'files.txt', 'system.txt'} <= names, names

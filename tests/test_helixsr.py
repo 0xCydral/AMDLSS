@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from amdlss import games, helixsr
+from amdlss import games, helixsr, logs
 from fake_helixsr import make
 
 
@@ -153,6 +153,34 @@ def test_install_then_remove_restores_the_original(fake):
     assert (two / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME ORIGINAL'  # the other game is untouched
     client.remove(client.list_games()[0])
     assert dll.read_bytes() == b'GAME ORIGINAL' and not (one / 'amd_fidelityfx_upscaler_dx12.original.dll').exists()
+
+
+def test_install_and_remove_keep_the_games_logs_first(fake, tmp_path):
+    client, one, _two = fake
+    (one / 'OptiScaler.log').write_text('the run before the install\n', encoding='utf-8')
+    data = tmp_path / 'data'
+    keeping = helixsr.HelixSR(client.folder, python=sys.executable,
+                              preserve=lambda game: logs.preserve_history(game, data))
+    target = keeping.list_games()[0]
+    keeping.install(target)
+    kept = logs.history_snapshots(data, target.folder)
+    assert len(kept) == 1 and (kept[0] / 'exe-folder' / 'OptiScaler.log').read_text() == \
+        'the run before the install\n'
+    (one / 'OptiScaler.log').write_text('the run before the remove\n', encoding='utf-8')
+    keeping.remove(keeping.list_games()[0])
+    kept = logs.history_snapshots(data, target.folder)
+    assert len(kept) == 2
+    assert (kept[-1] / 'exe-folder' / 'OptiScaler.log').read_text() == 'the run before the remove\n'
+
+
+def test_a_failing_history_copy_never_stops_an_install(fake):
+    client, _one, _two = fake
+
+    def boom(game):
+        raise RuntimeError('the disk is full')
+
+    keeping = helixsr.HelixSR(client.folder, python=sys.executable, preserve=boom)
+    assert keeping.install(keeping.list_games()[0]).state == 'direct'
 
 
 def test_a_game_that_left_the_list_is_not_touched(fake):

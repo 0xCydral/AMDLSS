@@ -618,11 +618,12 @@ class HelixSR:
     """A built HelixSR folder and the games it can be installed into. HelixSR's files are only read, except by its
     own installer when AMDLSS runs it."""
 
-    def __init__(self, folder, python=None, running=None):
+    def __init__(self, folder, python=None, running=None, preserve=None):
         self.folder = Path(folder)
         self._python_given = python is not None   # an explicit Python is used as given (tests); else find_python()'s
         self.python = Path(python or helixsr_python())
         self.running = running if running is not None else game_running   # is the game still open? (tests say so)
+        self.preserve = preserve   # keep the game's logs before a change (amdlss.logs.preserve_history), or None
 
     @property
     def version(self):
@@ -696,6 +697,11 @@ class HelixSR:
             raise HelixSRError(f'{game.name} is no longer in HelixSR\'s list: refresh the list and try again')
         if not fresh.index:  # a game HelixSR does not list has no number to install or remove by
             raise HelixSRError(f'HelixSR does not list {game.name}, so it cannot be changed from here')
+        if self.preserve:   # the run about to be replaced is evidence: keep its logs, never block on the copy
+            try:
+                self.preserve(fresh)
+            except Exception:   # noqa: BLE001 (a failed copy must not stop the install)
+                pass
         code, tail = run_streaming(build_command(fresh.index, extras), self.folder, on_line)
         if code != 0:   # a locked file is said in plain words; the raw output stays in the game's install log
             raise HelixSRError(plain_failure('\n'.join(tail), game.name) or

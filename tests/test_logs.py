@@ -48,7 +48,7 @@ def fake(tmp_path, monkeypatch):
 
 def collect(fake, **options):
     game, setup, data, out = fake
-    return logs.collect(game, setup, data, out, INFO, **options)
+    return logs.collect(game, setup, data, out, INFO, windows=False, **options)
 
 
 def entries(path):
@@ -60,9 +60,11 @@ def test_the_zip_holds_every_log_from_every_place(fake):
     path = collect(fake, now=time.struct_time((2026, 10, 11, 14, 5, 0, 0, 0, -1)))
     assert path.parent == fake[3] and path.name == 'AMDLSS-logs-Fake-Game-20261011-1405.zip'
     held = entries(path)
-    assert sorted(held) == ['exe-folder/HelixSR/helixsr-install.json', 'exe-folder/HelixSR/helixsr.log',
-                            'exe-folder/OptiScaler.ini', 'exe-folder/OptiScaler.log', 'exe-folder/fakenvapi.ini',
+    assert sorted(held) == ['crashes.txt', 'exe-folder/HelixSR/helixsr-install.json',
+                            'exe-folder/HelixSR/helixsr.log', 'exe-folder/OptiScaler.ini',
+                            'exe-folder/OptiScaler.log', 'exe-folder/fakenvapi.ini',
                             'files.txt', 'fsr-dll-folder/helixsr.log', 'system.txt']
+    assert 'not collected on Linux' in held['crashes.txt'] and 'PROTON_LOG=1' in held['crashes.txt']
     assert held['fsr-dll-folder/helixsr.log'] == 'fsr drop-in log\n'
     assert held['exe-folder/OptiScaler.ini'] == '[Log]\r\nLogToFile=true\r\n'
     assert not list(fake[3].glob('*.part'))
@@ -124,12 +126,12 @@ def test_missing_files_and_folders_are_fine(tmp_path, monkeypatch):
     monkeypatch.setattr(logs, 'user_names', lambda: [])
     nothing = games.Game(name='Gone', folder=str(tmp_path / 'gone'), exe_folder=str(tmp_path / 'gone' / 'bin'),
                          fsr_targets=[str(tmp_path / 'gone' / 'x' / 'amd_fidelityfx_dx12.dll')])
-    held = entries(logs.collect(nothing, None, tmp_path / 'data', tmp_path / 'out', {}))
-    assert sorted(held) == ['files.txt', 'system.txt']
+    held = entries(logs.collect(nothing, None, tmp_path / 'data', tmp_path / 'out', {}, windows=False))
+    assert sorted(held) == ['crashes.txt', 'files.txt', 'system.txt']
     assert 'GPU: could not be read' in held['system.txt'] and 'not found' in held['system.txt']
     empty = games.Game(name='Empty', folder=str(tmp_path), exe_folder='')
-    assert sorted(entries(logs.collect(empty, tmp_path / 'nope', tmp_path / 'data', tmp_path / 'out', {}))) == [
-        'files.txt', 'system.txt']
+    assert sorted(entries(logs.collect(empty, tmp_path / 'nope', tmp_path / 'data', tmp_path / 'out', {},
+                                       windows=False))) == ['crashes.txt', 'files.txt', 'system.txt']
     assert 'no log file exists' in logs.confirm_text(nothing, tmp_path / 'data')
 
 
@@ -158,6 +160,55 @@ def test_the_install_log_of_the_game_is_included_and_listed(fake):
     text = entries(collect(fake))['amdlss-install.log']
     assert 'install Fake ===' in text and 'C:\\Users\\<user>\\Games' in text and 'error: boom' in text
     assert 'progress' not in text
+
+
+def at(hour, minute=0):
+    return time.struct_time((2026, 10, 13, hour, minute, 0, 0, 0, -1))
+
+
+def test_kept_history_survives_the_logs_being_removed_and_rides_in_the_zip(fake):
+    game, setup, data, out = fake
+    snapshot = logs.preserve_history(game, data, now=at(14, 5))
+    assert snapshot is not None and snapshot.name == '20261013-140500'
+    Path(game.exe_folder, 'OptiScaler.log').unlink()   # the remove that used to delete the evidence
+    held = entries(collect(fake))
+    kept = held['history/20261013-140500/exe-folder/OptiScaler.log']
+    assert 'C:\\Users\\<user>\\Games\\Fake Game\\bin' in kept and USER not in kept
+    assert 'history/20261013-140500/exe-folder/OptiScaler.log' in logs.contents(game, data)
+    text = logs.confirm_text(game, data)
+    assert 'history/: the logs AMDLSS kept before 1 earlier install' in text and 'crashes.txt' in text
+
+
+def test_history_is_capped_per_file_and_the_oldest_runs_go_first(fake, monkeypatch):
+    game, _setup, data, _out = fake
+    monkeypatch.setattr(logs, 'HISTORY_KEEP_RUNS', 2)
+    monkeypatch.setattr(logs, 'HISTORY_MAX_FILE_BYTES', 20)
+    (Path(game.exe_folder) / 'OptiScaler.log').write_bytes(b'x' * 50 + b'END')
+    for hour in (10, 11, 12):
+        assert logs.preserve_history(game, data, now=at(hour)) is not None
+    kept = logs.history_snapshots(data, game.folder)
+    assert [folder.name for folder in kept] == ['20261013-110000', '20261013-120000']
+    text = (kept[-1] / 'exe-folder' / 'OptiScaler.log').read_bytes().decode()
+    assert text.startswith('[AMDLSS: the first 33 bytes') and text.endswith('x' * 17 + 'END')
+    names = logs.history_names(game, data, runs=1)
+    assert names and all(name.startswith('history/20261013-120000/') for name in names)
+
+
+def test_preserving_a_game_without_logs_keeps_nothing(tmp_path):
+    game = games.Game(name='Empty', folder=str(tmp_path / 'gone'), exe_folder=str(tmp_path / 'gone'))
+    assert logs.preserve_history(game, tmp_path / 'data') is None
+    assert logs.history_snapshots(tmp_path / 'data', game.folder) == []
+    assert logs.history_snapshots(tmp_path / 'data', '') == []
+
+
+def test_the_proton_log_rides_in_the_zip_redacted(fake, monkeypatch, tmp_path):
+    game = fake[0]
+    proton = tmp_path / 'steam-1234.log'
+    proton.write_bytes(f'proton for C:\\Users\\{USER}\\game\n'.encode())
+    monkeypatch.setattr(logs.crashes, 'proton_log_path', lambda found, home=None: proton)
+    held = entries(collect(fake))
+    assert held['proton.log'] == f'proton for C:\\Users\\<user>\\game\n'
+    assert 'proton.log' in logs.contents(game, fake[2], windows=False)
 
 
 def test_the_confirm_text_lists_what_goes_in_the_zip(fake):

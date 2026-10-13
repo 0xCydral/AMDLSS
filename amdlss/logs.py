@@ -5,6 +5,9 @@ The questions a tester's zip has to answer are: did HelixSR load, did the game c
 route the call to HelixSR, did the network run. HelixSR writes `helixsr.log` and `helixsr_loader.log` (FSR drop-in:
 next to the game's FSR DLL; OptiScaler route: in the HelixSR folder next to the game's .exe; DLSS loader: next to the
 .exe), OptiScaler writes `OptiScaler.log` next to the .exe, and `files.txt` says which DLLs are really in place.
+`crashes.txt` adds Windows' own crash record (amdlss.crashes, on Linux the Proton log beside it), and the logs
+AMDLSS kept before earlier installs ride along under `history/` so a switch of route cannot delete the evidence
+of the run that crashed.
 
 Everything is read-only and every item is optional: a missing file or a failing query never stops the zip. The user
 name is replaced by `<user>` in every path and text (in the Users folder and in /home), and nothing else from the
@@ -21,16 +24,23 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import time
 import uuid
 import zipfile
 from pathlib import Path
 
-from . import VERSION, framegen, helixsr, host
+from . import VERSION, crashes, framegen, helixsr, host
 
 MAX_BYTES = 16 << 20        # a larger file goes in as its last 16 MiB, with a note on top
+HISTORY_MAX_FILE_BYTES = 2 << 20   # one kept log: its last 2 MiB are enough to read a run back
+HISTORY_KEEP_RUNS = 10      # snapshots kept per game in the data folder, oldest deleted first
+HISTORY_MAX_GAME_BYTES = 32 << 20
+HISTORY_SEND_RUNS = 5       # snapshots Collect logs and Send logs carry per game, the newest ones
 SESSION_LOG = 'amdlss-install.log'
+CRASHES = 'crashes.txt'
+PROTON_LOG = 'proton.log'
 # What is collected from every place HelixSR or OptiScaler may write to (matched on the lower-cased name).
 PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'optiscaler*.ini', 'fakenvapi*.ini',
             'helixsr-install*.json', 'helixsr.ini')
@@ -159,6 +169,107 @@ class GameLog:
             self.write(text)
         if self.sink:
             self.sink(text, final)
+
+
+# --- history: the logs of earlier runs, kept across install, update and remove -----------------------------------
+
+def history_root(data_dir, folder):
+    """Where the kept runs of one game folder live: <data folder>/history/<the session log's name>, or None."""
+    return Path(data_dir) / 'history' / session_log_path(data_dir, folder).stem if folder else None
+
+
+def history_snapshots(data_dir, folder):
+    """The kept snapshot folders of a game, oldest first (their names sort by time: YYYYMMDD-HHMMSS)."""
+    root = history_root(data_dir, folder)
+    if root is None:
+        return []
+    try:
+        return sorted((entry for entry in root.iterdir() if entry.is_dir()), key=lambda entry: entry.name)
+    except OSError:
+        return []
+
+
+def _tree_bytes(folder):
+    total = 0
+    for path in folder.rglob('*'):
+        try:
+            total += path.stat().st_size if path.is_file() else 0
+        except OSError:
+            continue
+    return total
+
+
+def _prune_history(data_dir, folder):
+    """Deletes the oldest snapshots until the game is within HISTORY_KEEP_RUNS and HISTORY_MAX_GAME_BYTES."""
+    snapshots = history_snapshots(data_dir, folder)
+    total = sum(_tree_bytes(snapshot) for snapshot in snapshots)
+    while snapshots and (len(snapshots) > HISTORY_KEEP_RUNS or total > HISTORY_MAX_GAME_BYTES):
+        oldest = snapshots.pop(0)
+        total -= _tree_bytes(oldest)
+        shutil.rmtree(oldest, ignore_errors=True)
+
+
+def preserve_history(game, data_dir, redact=None, now=None):
+    """Copies the game's current logs (everything gather() finds) into history/<game>/<stamp>/ in the data
+    folder, the user name replaced as in a report, each file cut to its last HISTORY_MAX_FILE_BYTES. Called
+    before every install, update and remove, so the run a tester is about to replace survives it (a route
+    switch once deleted the OptiScaler.log of the run that crashed). Returns the snapshot folder, or None
+    when there was nothing to keep. A copy that fails never stops the install: OSError answers None."""
+    root = history_root(data_dir, game.folder)
+    if root is None:
+        return None
+    redact = redact or redactor()
+    held = []
+    for name, source in gather(game):
+        data = read_capped(source, HISTORY_MAX_FILE_BYTES)
+        if data is not None:
+            held.append((name, redact_bytes(data, redact)))
+    if not held:
+        return None
+    stamp = time.strftime('%Y%m%d-%H%M%S', now or time.localtime())
+    snapshot, number = root / stamp, 1
+    while snapshot.exists():
+        number += 1
+        snapshot = root / f'{stamp}-{number}'
+    try:
+        for name, data in held:
+            target = snapshot / Path(name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    except OSError:
+        return None
+    try:
+        _prune_history(data_dir, game.folder)
+    except OSError:
+        pass
+    return snapshot
+
+
+def history_names(game, data_dir, runs=HISTORY_SEND_RUNS):
+    """The names the newest `runs` snapshots take in a zip or report: history/<stamp>/<place>/<file>."""
+    names = []
+    for snapshot in history_snapshots(data_dir, game.folder)[-runs:]:
+        for path in sorted(snapshot.rglob('*')):
+            if path.is_file():
+                names.append(f'history/{snapshot.name}/{path.relative_to(snapshot).as_posix()}')
+    return names
+
+
+def history_evidence(game, data_dir, redact, runs=HISTORY_SEND_RUNS):
+    """[(name, bytes)] of the newest `runs` kept snapshots, oldest first, redacted again on the way out (the
+    copies on disk were redacted when kept; a changed user name is replaced too)."""
+    held = []
+    for snapshot in history_snapshots(data_dir, game.folder)[-runs:]:
+        for path in sorted(snapshot.rglob('*')):
+            if not path.is_file():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            held.append((f'history/{snapshot.name}/{path.relative_to(snapshot).as_posix()}',
+                         redact_bytes(data, redact)))
+    return held
 
 
 # --- what is written about the files and the PC ------------------------------------------------------------------
@@ -291,36 +402,54 @@ def system_text(helixsr_folder, info=None, windows=None):
 
 # --- the zip -----------------------------------------------------------------------------------------------------
 
-def read_capped(path):
-    """The file's bytes, or its last MAX_BYTES with a note on top; None when it cannot be read."""
+def read_capped(path, limit=None):
+    """The file's bytes, or its last `limit` bytes (MAX_BYTES by default) with a note on top; None when it
+    cannot be read."""
+    limit = MAX_BYTES if limit is None else limit
     try:
         size = Path(path).stat().st_size
         with open(path, 'rb') as stream:
-            if size > MAX_BYTES:
-                stream.seek(size - MAX_BYTES)
-                return f'[AMDLSS: the first {size - MAX_BYTES} bytes of this file are not included]\n'.encode() + \
+            if size > limit:
+                stream.seek(size - limit)
+                return f'[AMDLSS: the first {size - limit} bytes of this file are not included]\n'.encode() + \
                     stream.read()
             return stream.read()
     except OSError:
         return None
 
 
-def contents(game, data_dir):
-    """The names that go into the zip: the files found, then the three AMDLSS writes."""
+def contents(game, data_dir, windows=None):
+    """The names that go into the zip: the files found, the AMDLSS writes, the crash record, the Proton log
+    when there is one, and the kept history."""
     names = [name for name, _path in gather(game)]
     log = session_log_path(data_dir, game.folder) if game.folder else None
-    return names + ['files.txt', 'system.txt'] + ([SESSION_LOG] if log and log.is_file() else [])
+    proton = [] if host.is_windows(windows) or not crashes.proton_log_path(game) else [PROTON_LOG]
+    return (names + ['files.txt', CRASHES] + proton + ['system.txt']
+            + ([SESSION_LOG] if log and log.is_file() else []) + history_names(game, data_dir))
 
 
 def confirm_text(game, data_dir, windows=None):
-    names = contents(game, data_dir)
-    found = [n for n in names if n not in ('files.txt', 'system.txt', SESSION_LOG)]
+    names = contents(game, data_dir, windows)
+    kept = [n for n in names if n.startswith('history/')]
+    found = [n for n in names if n not in ('files.txt', 'system.txt', SESSION_LOG, CRASHES, PROTON_LOG)
+             and not n.startswith('history/')]
     system = 'Windows' if host.is_windows(windows) else 'Linux'
     lines = [f'AMDLSS writes one zip to your Desktop for {game.name}:', '']
     lines += [f'  {n}' for n in found] or ["  (no log file exists in the game's folders yet: that is a finding too)"]
     lines += ['  files.txt: names, sizes, dates and versions of the .dll and .exe files in those folders, and whether '
               "each upscaler DLL is HelixSR's",
-              f'  system.txt: {system}, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions']
+              f'  system.txt: {system}, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions',
+              f'  {CRASHES}: ' + ("Windows' record of this game's crashes (which DLL faulted), and the names "
+                                  'of its crash dumps (the dumps themselves stay on this PC)'
+                                  if host.is_windows(windows) else
+                                  "a note on the Proton log, this system's crash evidence")]
+    if PROTON_LOG in names:
+        lines.append(f'  {PROTON_LOG}: the Proton log of the last run (PROTON_LOG=1)')
+    if kept:
+        runs = len({n.split('/')[1] for n in kept})
+        lines.append(f'  history/: the logs AMDLSS kept before {runs} earlier install, update or '
+                     f'remove run{"" if runs == 1 else "s"} of this game')
+        lines += [f'  {n}' for n in kept]
     if SESSION_LOG in names:
         lines.append(f"  {SESSION_LOG}: what AMDLSS printed when it installed into this game")
     lines += ['', 'Your user name is replaced by <user> everywhere. Nothing else from your user folder is '
@@ -364,20 +493,27 @@ def zip_name(game, now=None):
     return f'AMDLSS-logs-{slug(game.name)}-{time.strftime("%Y%m%d-%H%M", now or time.localtime())}.zip'
 
 
-def game_evidence(game, data_dir, redact):
-    """[(name, bytes)] for one game, the user name already replaced: the files found, files.txt, and AMDLSS's own
-    record of the installs and removals in the game's folder."""
+def game_evidence(game, data_dir, redact, windows=None, crash_run=None):
+    """[(name, bytes)] for one game, the user name already replaced: the files found, files.txt, the crash
+    record (amdlss.crashes; `crash_run` is its PowerShell seam, tests), the Proton log on Linux when present,
+    AMDLSS's own record of the installs and removals, and the kept history, newest snapshots last."""
     found = []
     for name, source in gather(game):
         data = read_capped(source)
         if data is not None:
             found.append((name, redact_bytes(data, redact)))
     found.append(('files.txt', redact(files_text(game)).encode('utf-8')))
+    found.append(crashes.crashes_evidence(game, redact, windows, crash_run))
+    if not host.is_windows(windows):
+        proton = crashes.proton_log_path(game)
+        data = read_capped(proton) if proton else None
+        if data is not None:
+            found.append((PROTON_LOG, redact_bytes(data, redact)))
     own = session_log_path(data_dir, game.folder) if game.folder else None
     data = read_capped(own) if own else None
     if data is not None:
         found.append((SESSION_LOG, redact_bytes(data, redact)))
-    return found
+    return found + history_evidence(game, data_dir, redact)
 
 
 def system_evidence(helixsr_folder, redact, info=None):
@@ -385,15 +521,16 @@ def system_evidence(helixsr_folder, redact, info=None):
     return 'system.txt', redact(system_text(helixsr_folder, info)).encode('utf-8')
 
 
-def evidence(game, helixsr_folder, data_dir, info=None):
+def evidence(game, helixsr_folder, data_dir, info=None, windows=None, crash_run=None):
     """[(name, bytes)] of everything Collect logs puts in the zip for `game`."""
     redact = redactor()
-    return game_evidence(game, data_dir, redact) + [system_evidence(helixsr_folder, redact, info)]
+    return game_evidence(game, data_dir, redact, windows, crash_run) + \
+        [system_evidence(helixsr_folder, redact, info)]
 
 
-def collect(game, helixsr_folder, data_dir, out_dir=None, info=None, now=None):
-    """Writes the zip for `game` and returns its path. `info` replaces the PowerShell query (tests)."""
-    held = evidence(game, helixsr_folder, data_dir, info)
+def collect(game, helixsr_folder, data_dir, out_dir=None, info=None, now=None, windows=None, crash_run=None):
+    """Writes the zip for `game` and returns its path. `info` replaces the system query (tests)."""
+    held = evidence(game, helixsr_folder, data_dir, info, windows, crash_run)
     target = Path(out_dir) if out_dir else desktop_dir()
     target.mkdir(parents=True, exist_ok=True)
     path = target / zip_name(game, now)

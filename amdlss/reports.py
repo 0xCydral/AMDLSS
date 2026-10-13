@@ -37,7 +37,7 @@ MAX_ANSWER = 64 << 10
 MAX_LIST = 1 << 20        # the report list: one short entry per stored report
 EXTENSIONS = ('log', 'ini', 'json', 'txt')
 KEYS = {'app', 'version', 'game', 'files'}
-OWN_FILES = ('files.txt', logs.SESSION_LOG)   # kept first when there are more files than MAX_FILES
+OWN_FILES = ('files.txt', logs.SESSION_LOG, logs.CRASHES)   # kept first when there are more files than MAX_FILES
 CODE = re.compile(r'[0-9A-HJKMNP-TV-Z]{8}')
 # A name part is letters, digits, "_", "." and "-", and it neither starts nor ends with ".".
 SEGMENT = re.compile(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?')
@@ -204,9 +204,11 @@ def fit(report):
 
 def has_report(game, data_dir):
     """True when `game` has anything to report: HelixSR or OptiScaler is in it, one of their logs is in its folders,
-    or AMDLSS has a record of its installs."""
+    AMDLSS has a record of its installs, or kept history remains after a remove took the current logs away."""
     own = logs.session_log_path(data_dir, game.folder) if game.folder else None
-    return game.installed or bool(own and own.is_file()) or any(name.endswith('.log') for name, _ in logs.gather(game))
+    return (game.installed or bool(own and own.is_file())
+            or any(name.endswith('.log') for name, _ in logs.gather(game))
+            or bool(logs.history_snapshots(data_dir, game.folder)))
 
 
 def reportable(games, data_dir):
@@ -251,9 +253,10 @@ def games_text(games, folders):
     return '\n'.join(lines) + '\n'
 
 
-def build_payload(games, helixsr_folder, data_dir, info=None):
+def build_payload(games, helixsr_folder, data_dir, info=None, windows=None, crash_run=None):
     """The report for the games that have anything to report: system.txt and games.txt, then each game's files
-    (logs.game_evidence()) under its own folder, those with an allowed name only, cut to fit."""
+    (logs.game_evidence(), kept history included) under its own folder, those with an allowed name only, cut
+    to fit. `crash_run` is the crash query's PowerShell seam (tests)."""
     games = reportable(games, data_dir)
     if not games:
         raise ReportError('no game has anything to report yet')
@@ -261,9 +264,17 @@ def build_payload(games, helixsr_folder, data_dir, info=None):
     held = [logs.system_evidence(helixsr_folder, redact, info),
             ('games.txt', redact(games_text(games, folders)).encode('utf-8'))]
     for game, folder in zip(games, folders):
-        held += [(f'{folder}/{name}', data) for name, data in logs.game_evidence(game, data_dir, redact)]
+        held += [(f'{folder}/{name}', data)
+                 for name, data in logs.game_evidence(game, data_dir, redact, windows, crash_run)]
     held = [(name, data) for name, data in held if not name_problem(name)]
-    held.sort(key=lambda item: '/' in item[0] and item[0].rsplit('/', 1)[1] not in OWN_FILES)   # stable: these survive
+
+    def rank(item):   # stable within a rank: AMDLSS's own writes, the current logs, then kept history
+        name = item[0]
+        if '/history/' in name:
+            return 2
+        return 1 if '/' in name and name.rsplit('/', 1)[1] not in OWN_FILES else 0
+
+    held.sort(key=rank)
     files = {name: decode(data) for name, data in held[:MAX_FILES]}
     names = [game.name for game in games]
     label = names[0] if len(names) == 1 else f'{len(names)} games: {", ".join(names)}'
@@ -277,8 +288,10 @@ def confirm_text(games, data_dir):
         count = sum(1 for name in logs.contents(game, data_dir) if name != 'system.txt' and not name_problem(name))
         lines.append(f'  {game.name}: {count} file{"" if count == 1 else "s"}')
     lines += ['', "Per game: the HelixSR, OptiScaler and fakenvapi logs and settings found in the game's folders, "
-              'files.txt (names, sizes, dates and versions of its .dll and .exe files) and, when AMDLSS installed into '
-              'it, what AMDLSS printed then. Once for all: system.txt (the system, graphics card and driver, CPU, RAM, '
+              'files.txt (names, sizes, dates and versions of its .dll and .exe files), crashes.txt (on Windows, '
+              "Windows' record of this game's crashes and the names of its crash dumps, never the dumps "
+              'themselves), the logs AMDLSS kept before earlier installs (history/), and, when AMDLSS installed '
+              'into it, what AMDLSS printed then. Once for all: system.txt (the system, graphics card and driver, CPU, RAM, '
               'the AMDLSS and HelixSR versions) and games.txt (each game, its folder and install mode).',
               '', 'Your user name is replaced by <user> everywhere. Nothing else from your user folder is included. '
               'The server keeps the report for 30 days and then deletes it. You get a short code to paste in the '

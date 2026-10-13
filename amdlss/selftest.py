@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import covers, framegen, games, helixsr, identify, logs, reports, update
+from . import covers, crashes, framegen, games, helixsr, identify, logs, reports, update
 
 
 def check_parsing():
@@ -101,10 +101,38 @@ def check_collect_logs():
         (root / 'HelixSR' / 'helixsr.log').write_bytes(b'path C:\\Users\\Jordan\\x')
         (root / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
         game = games.Game(name='G: x', folder=str(root), exe_folder=str(root))
-        path = logs.collect(game, None, Path(folder) / 'data', Path(folder) / 'out', {})
+        path = logs.collect(game, None, Path(folder) / 'data', Path(folder) / 'out', {}, windows=False)
         with zipfile.ZipFile(path) as archive:
-            assert sorted(archive.namelist()) == ['exe-folder/HelixSR/helixsr.log', 'files.txt', 'system.txt']
+            assert sorted(archive.namelist()) == ['crashes.txt', 'exe-folder/HelixSR/helixsr.log',
+                                                  'files.txt', 'system.txt']
             assert b'HelixSR 1.8.1' in archive.read('files.txt')
+
+def check_history_and_crashes():
+    import base64
+    import time as clock
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder) / 'Game'
+        root.mkdir()
+        (root / 'One.exe').write_bytes(b'MZ')
+        (root / 'OptiScaler.log').write_bytes(b'run one C:\\Users\\Jordan\\x')
+        game = games.Game(name='One', folder=str(root), exe_folder=str(root))
+        data = Path(folder) / 'data'
+        when = clock.struct_time((2026, 10, 13, 14, 5, 0, 0, 0, -1))
+        kept = logs.preserve_history(game, data, logs.redactor(['Jordan']), when)
+        assert kept is not None and kept.name == '20261013-140500'
+        (root / 'OptiScaler.log').unlink()
+        held = dict(logs.game_evidence(game, data, logs.redactor(['Jordan']), windows=False))
+        assert held['history/20261013-140500/exe-folder/OptiScaler.log'] == b'run one C:\\Users\\<user>\\x'
+        assert b'PROTON_LOG=1' in held['crashes.txt'] and reports.has_report(game, data)
+        event = {'time': '2026-10-13 14:20:11', 'id': 1000, 'message': '',
+                 'props': ['One.exe', '1.0', '0x1', 'dxgi.dll', '0.9.4.0', '0x2', '0xc0000005', '0x99',
+                           '0x1', '0x1', 'E:\\One.exe', 'E:\\dxgi.dll']}
+        answer = base64.b64encode(json.dumps([event]).encode()).decode()
+        entries, why = crashes.crash_entries(['One.exe'], run=lambda command: answer)
+        assert why is None and entries[0]['module'] == 'dxgi.dll' and entries[0]['exception'] == '0xc0000005'
+        assert crashes.game_exes(game) == ['One.exe']
+        assert 'Get-WinEvent -FilterHashtable' in crashes.event_command()[4]
+
 
 def check_reports():
     files = {'G/exe-folder/helixsr.log': 'ok\n', 'system.txt': 'x'}
@@ -256,8 +284,8 @@ def check_covers():
 
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_reports, check_helixsr, check_running_game, check_zip_slip, check_update,
-                  check_identify, check_covers):
+                  check_collect_logs, check_history_and_crashes, check_reports, check_helixsr, check_running_game,
+                  check_zip_slip, check_update, check_identify, check_covers):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

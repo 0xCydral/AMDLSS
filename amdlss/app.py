@@ -425,7 +425,8 @@ class App:
                             'network is not built yet.')
             self.install_button.configure(text='Build HelixSR')
         else:
-            self.helixsr = helixsr.HelixSR(folder)
+            self.helixsr = helixsr.HelixSR(
+                folder, preserve=lambda game: logs.preserve_history(game, self.data_dir))
             self.helixsr_version = self.helixsr.version
             self.helixsr_stale = not override and helixsr.older(self.helixsr_version, helixsr.VERSION)
             self.set_status(self.helixsr_text())
