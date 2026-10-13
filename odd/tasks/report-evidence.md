@@ -74,3 +74,12 @@ Decisions:
 
 Route: delegated direct (multi-file feature).
 - [x] T6 shipped 2026-10-13: receiver redeployed (version b06c5440) before the client; released v0.1.0-beta.11 (exe 65e79552, linux ec37799f); updater offers it on both hosts; real report TFTKA6A3 re-read through the new page answers FG Yes / crash No for AC Shadows and 10512 frames / crash No for Monster Hunter
+- [x] T7 tester report GZ633MDH fixes (2026-10-13): Event 1001 is read from its replacement strings, not the
+  localized message (`crashes._wer_fields`: event name [2], P1..P10 from [5]; APPCRASH P7 exception and P8 offset,
+  BEX64 the other way round, AppHang* no module), so a Spanish Windows no longer yields `faulting module: P5:`;
+  a 1001 within 10 s of a 1000 for the same exe is shown once; the reader says an old `P5:` line is "crash
+  recorded by Windows Error Reporting; this AMDLSS version could not read the faulting module" and a hang
+  "stopped responding". Drop-in route is detected from any HelixSR session, then from games.txt (latest run) or
+  the install log (kept run), so Monster Hunter's latest run answers frame generation No like its earlier run;
+  "Yes" cites the counts line. Linux 313 passed and 3 skipped; wine 306 passed and 10 skipped; `--selftest`
+  exit 0. Not released.

@@ -190,7 +190,7 @@ def test_the_timeline_answers_the_three_questions_for_an_optiscaler_run():
     run = page.timeline_of(files, 'Latest run', '2026-10-13')
     assert run['started'] == '14:14:17' and run['last'] == '14:16:39' and run['route'] == 'OptiScaler route'
     assert run['helix_ran']['verdict'] == 'Yes' and 'create:' in run['helix_ran']['evidence']
-    assert run['framegen']['verdict'] == 'Yes' and 'DispatchCallback' in run['framegen']['evidence']
+    assert run['framegen'] == {'verdict': 'Yes', 'evidence': '1 frames delivered by FSR frame generation, 1 activation'}
     assert run['crashed'] == {'verdict': 'No', 'evidence': '[14:16:39.811637] [W] MenuCommon::WndProc IsShuttingDown = true'}
     assert run['opti']['fg_dispatch_lines'] == 3 and run['opti']['fg_delivered'] == 1 and run['opti']['fg_skipped'] == 1
     joined = '\n'.join(page.timeline_lines(run))
@@ -281,3 +281,69 @@ def test_the_index_links_relative_pages_with_a_badge_per_game():
     assert 'href="ABCD2345/report.html"' in index
     assert 'badge red' in index and '&lt;script&gt;' in index and EVIL not in index
     assert '<a ' in index and 'http' not in index
+
+
+# --- an older AMDLSS's unread WER line, and the route of a run whose logs do not name it -------------------------
+
+OLD_1001 = ('Windows crashes for One (Application log, last 14 days, Event ID 1000 and 1001)\n'
+            'Game executables checked: One.exe\n\n'
+            '2026-10-13 14:19:36 | One.exe | faulting module: P5: | module version:  | exception:  | offset:  | '
+            'Event ID: 1001 | module path: \n')
+UNREAD = 'crash recorded by Windows Error Reporting; this AMDLSS version could not read the faulting module'
+
+
+def test_an_unread_wer_label_is_never_shown_as_a_module_and_a_hang_says_so():
+    [old] = page.parse_crashes(OLD_1001)['entries']
+    assert page.crash_plain(old) == f'2026-10-13 14:19:36: {UNREAD}: One.exe (Event ID 1001)'
+    hang = OLD_1001.replace('faulting module: P5: ', 'faulting module: unknown').replace(
+        'module path: \n', 'module path:  | event name: AppHangB1\n')
+    [stopped] = page.parse_crashes(hang)['entries']
+    assert stopped['name'] == 'AppHangB1'
+    assert page.crash_plain(stopped).startswith('2026-10-13 14:19:36: the game stopped responding (hang): One.exe')
+    note = page.timeline_of({'G/exe-folder/OptiScaler.log': OPTI_RUN}, 'Latest run', '2026-10-14',
+                            page.parse_crashes(OLD_1001))['crash_note']
+    assert 'inside P5' not in note and UNREAD in note
+
+
+# The last session of a drop-in run can have no `create:` line (the game recreated its upscaler and HelixSR only
+# logged the dispatches and the destroy), as in a real Monster Hunter run of GZ633MDH.
+DROP_IN_TAIL = (HELIX_RUN.split('[14:17:25.577]')[0] +
+                '[14:18:00.100] destroy after 40 frames (kept for 1000 ms in case the game creates the same '
+                'upscaler again)\n'
+                '[14:19:00.100] dispatch 9: render 1920x1080 -> 1920x1080, jitter 0,0, reset 0, sharpness 0.10\n'
+                '[14:19:36.367] destroy after 5322 frames (kept for 1000 ms in case the game creates the same '
+                'upscaler again)\n')
+NO_CREATE = '[14:19:00.100] dispatch 9: render 1920x1080 -> 1920x1080, jitter 0,0, reset 0, sharpness 0.10\n' \
+            '[14:19:36.367] destroy after 5322 frames (kept for 1000 ms in case the game creates the same ' \
+            'upscaler again)\n'
+
+
+def test_a_drop_in_run_is_a_drop_in_run_whichever_session_the_log_ends_with():
+    assert page.timeline_of({'G/exe-folder/helixsr.log': DROP_IN_TAIL})['route'] == 'FSR drop-in'
+    bare = page.timeline_of({'G/exe-folder/helixsr.log': NO_CREATE})   # no session names its DLL at all
+    assert bare['route'] == 'HelixSR' and bare['framegen']['verdict'] == 'Unknown'
+    hinted = page.timeline_of({'G/exe-folder/helixsr.log': NO_CREATE}, drop_in=True)
+    assert hinted['route'] == 'FSR drop-in' and hinted['framegen']['verdict'] == 'No'
+    assert 'Upscaler: FSR drop-in' in '\n'.join(page.timeline_lines(hinted))
+
+
+def test_the_install_record_names_the_route_for_the_latest_run_and_for_a_kept_one():
+    install_log = ('=== 2026-10-13 13:00:00 install (optiscaler) One ===\nok\n'
+                   '=== 2026-10-13 13:10:00 install (direct) One ===\nok\n'
+                   '=== 2026-10-13 14:30:00 update (direct) One ===\nok\n')
+    files = {'games.txt': 'G/ | One | E:\\One | install: drop-in DLL | HelixSR: 1.9.0\n',
+             'G/amdlss-install.log': install_log,
+             'G/exe-folder/helixsr.log': NO_CREATE,
+             'G/history/20261013-143001/exe-folder/helixsr.log': NO_CREATE,
+             'G/history/20261013-130001/exe-folder/helixsr.log': NO_CREATE}
+    latest, kept_drop_in, kept_opti = page.runs_of(files, 'G', '2026-10-13')[0]
+    assert latest['route'] == 'FSR drop-in' and latest['framegen']['verdict'] == 'No'
+    assert kept_drop_in['route'] == 'FSR drop-in'   # the 13:10 install (direct) was in place before the 14:30 update
+    assert kept_opti['route'] == 'HelixSR'          # before the 13:10 install the OptiScaler route was in place
+    files['games.txt'] = files['games.txt'].replace('drop-in DLL', 'OptiScaler as dxgi.dll')
+    assert page.runs_of(files, 'G', '2026-10-13')[0][0]['route'] == 'HelixSR'
+
+
+def test_frame_generation_yes_cites_the_counts_not_an_arbitrary_log_line():
+    run = page.timeline_of({'G/exe-folder/OptiScaler.log': OPTI_RUN + '[14:16:40.000000] [I] Upscaling paused!\n'})
+    assert run['framegen']['evidence'] == '1 frames delivered by FSR frame generation, 1 activation'
