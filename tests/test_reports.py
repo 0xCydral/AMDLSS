@@ -405,6 +405,7 @@ def test_no_connection_is_a_report_error():
 
 
 def test_without_an_address_or_with_a_plain_http_one_nothing_is_sent(monkeypatch):
+    monkeypatch.setattr(reports, 'REPORT_URL', '')
     assert not ReportClient().configured
     with pytest.raises(ReportError, match='not set up'):
         ReportClient().send(GOOD)

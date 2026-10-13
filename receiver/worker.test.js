@@ -6,20 +6,21 @@ import worker, { newCode, sameSecret } from './worker.js';
 const TOKEN = 'a-long-secret-read-token';
 const GOOD = { app: 'AMDLSS', version: '0.1.0-beta.8', game: 'Fake Game', files: { 'exe-folder/OptiScaler.log': 'hooked\n' } };
 
-/** An R2 stand-in: a Map, with the "only if no object has that key" condition of put(). */
+/** A KV stand-in: a Map of key to text; `options` keeps the last put's options. */
 function bucket() {
   const objects = new Map();
-  return {
+  const store = {
     objects,
+    options: null,
     async put(key, body, options = {}) {
-      if (options.onlyIf?.etagDoesNotMatch === '*' && objects.has(key)) return null;
       objects.set(key, body);
-      return { key };
+      store.options = options;
     },
     async get(key) {
-      return objects.has(key) ? { text: async () => objects.get(key) } : null;
+      return objects.has(key) ? objects.get(key) : null;
     },
   };
+  return store;
 }
 
 const env = (extra = {}) => ({ REPORTS: bucket(), READ_TOKEN: TOKEN, ...extra });
@@ -39,6 +40,7 @@ test('a good report is stored re-serialized under a Crockford code and answers i
   const { code } = await response.json();
   assert.match(code, /^[0-9A-HJKMNP-TV-Z]{8}$/);
   assert.deepEqual([...e.REPORTS.objects.keys()], [`reports/${code}.json`]);
+  assert.deepEqual(e.REPORTS.options, { expirationTtl: 30 * 24 * 60 * 60 });
   assert.deepEqual(JSON.parse(e.REPORTS.objects.get(`reports/${code}.json`)), GOOD);
 });
 
@@ -91,7 +93,7 @@ test('a code that is taken is not overwritten: the Worker tries another', async 
   const other = await (await worker.fetch(post({ ...GOOD, game: 'Other' }), e)).json();
   assert.notEqual(first.code, other.code);
   assert.equal(JSON.parse(e.REPORTS.objects.get(`reports/${first.code}.json`)).game, 'Fake Game');
-  const full = env({ REPORTS: { put: async () => null } });   // every key taken
+  const full = env({ REPORTS: { get: async () => '{}', put: async () => assert.fail('overwrote a report') } });   // every key taken
   assert.equal((await worker.fetch(post(GOOD), full)).status, 503);
 });
 

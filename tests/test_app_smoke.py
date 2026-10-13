@@ -330,6 +330,7 @@ def test_a_failed_or_impossible_send_offers_the_zip_of_the_selected_game(window,
         raise reports.ReportError('could not reach the log server (offline)')
 
     monkeypatch.setattr(reports.ReportClient, 'send', refused)
+    monkeypatch.setattr(reports, 'REPORT_URL', '')
     app.tree.selection_set('0')
     top.update()
     app.send_logs()   # the build has no server address: no confirmation of a send, the zip is offered at once

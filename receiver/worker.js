@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// AMDLSS log receiver (Cloudflare Worker + R2).
-//   POST /reports        a validated report goes to R2 as reports/<code>.json; answers {"code": "..."}
+// AMDLSS log receiver (Cloudflare Worker + Workers KV).
+//   POST /reports        a validated report goes to KV as reports/<code>.json, deleted after 30 days; answers {"code": "..."}
 //   GET  /reports/<code> the stored report, for whoever holds READ_TOKEN
-// Bindings: REPORTS (R2 bucket), READ_TOKEN (secret), UPLOAD_LIMITER (rate limit, optional).
+// Bindings: REPORTS (KV namespace), READ_TOKEN (secret), UPLOAD_LIMITER (rate limit, optional).
 import { MAX_BODY_BYTES, validateReport } from './validate.js';
 
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';   // Crockford base32
 const CODE = /^[0-9A-HJKMNP-TV-Z]{8}$/;
 const CODE_TRIES = 5;
+const KEEP_SECONDS = 30 * 24 * 60 * 60;   // the app tells the tester reports are deleted after 30 days
 
 function reply(status, body, extra = {}) {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
@@ -87,12 +88,11 @@ async function upload(request, env) {
   const stored = JSON.stringify(checked.report);
   for (let attempt = 0; attempt < CODE_TRIES; attempt++) {
     const code = newCode();
-    // etagDoesNotMatch "*": R2 stores the object only when no object has that key yet, and answers null otherwise.
-    const put = await env.REPORTS.put(`reports/${code}.json`, stored, {
-      httpMetadata: { contentType: 'application/json' },
-      onlyIf: { etagDoesNotMatch: '*' },
-    });
-    if (put) return reply(200, { code });
+    // KV has no conditional put; with 32^8 codes a race between the get and the put is not worth more than this.
+    const key = `reports/${code}.json`;
+    if ((await env.REPORTS.get(key)) !== null) continue;
+    await env.REPORTS.put(key, stored, { expirationTtl: KEEP_SECONDS });
+    return reply(200, { code });
   }
   return refuse(503, 'could not pick a free code, try again');
 }
@@ -103,8 +103,8 @@ async function download(request, env, code) {
     return refuse(401, 'a read token is needed', { 'WWW-Authenticate': 'Bearer' });
   }
   if (!CODE.test(code)) return refuse(404, 'not found');
-  const object = await env.REPORTS.get(`reports/${code}.json`);
-  return object ? reply(200, await object.text()) : refuse(404, 'not found');
+  const stored = await env.REPORTS.get(`reports/${code}.json`);
+  return stored !== null ? reply(200, stored) : refuse(404, 'not found');
 }
 
 export default {

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import VERSION, framegen, logs
 
-REPORT_URL = ''   # the receiver's address (receiver/README.md); empty: sending is not set up in this build
+REPORT_URL = 'https://amdlss-reports.amdlss-reports.workers.dev'   # the receiver's address (receiver/README.md); empty: sending is not set up in this build
 TIMEOUT = 30
 MAX_BODY = 8 << 20
 MAX_FILES = 200

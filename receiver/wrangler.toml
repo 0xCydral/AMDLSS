@@ -2,9 +2,10 @@ name = "amdlss-reports"
 main = "worker.js"
 compatibility_date = "2026-10-01"
 
-[[r2_buckets]]
+# Reports expire after 30 days (expirationTtl in worker.js). Created with `npx wrangler kv namespace create REPORTS`.
+[[kv_namespaces]]
 binding = "REPORTS"
-bucket_name = "amdlss-reports"
+id = "ff964d371e884450a874059bca2f6ef9"
 
 # 10 uploads per minute per IP and Cloudflare location. READ_TOKEN is a secret: `npx wrangler secret put READ_TOKEN`.
 [[ratelimits]]

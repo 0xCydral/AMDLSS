@@ -1,6 +1,6 @@
 # AMDLSS log receiver
 
-A Cloudflare Worker with an R2 bucket. The AMDLSS window's **Send logs** button posts a report here and shows the
+A Cloudflare Worker with a Workers KV namespace. The AMDLSS window's **Send logs** button posts a report here and shows the
 tester an 8-character code. You read the report with `tools/amdlss-logs.py`.
 
 | Route | Who | What |
@@ -27,24 +27,20 @@ The Worker stores the object it rebuilt from these values, never the raw body. T
 
 ## Deploy
 
-Needs Node 20 or newer and a Cloudflare account with R2 enabled. From this folder:
+Needs Node 20 or newer and a free Cloudflare account (Workers KV needs no card). From this folder:
 
 ```bash
 npx wrangler login
-npx wrangler r2 bucket create amdlss-reports
-npx wrangler secret put READ_TOKEN        # paste a long random string; keep a copy for the fetch tool
+npx wrangler kv namespace create REPORTS   # put the printed id into wrangler.toml
 npx wrangler deploy
+npx wrangler secret put READ_TOKEN         # paste a long random string; keep a copy for the fetch tool
 ```
 
 `deploy` prints the Worker's URL (`https://amdlss-reports.<account>.workers.dev`). Put that URL into `REPORT_URL` in
 `amdlss/reports.py` (no trailing slash) and release a build.
 
-Delete reports after 30 days, which is what the app tells the tester:
-
-```bash
-npx wrangler r2 bucket lifecycle add amdlss-reports expire-30-days reports/ --expire-days 30 --force
-npx wrangler r2 bucket lifecycle list amdlss-reports      # check the rule is there
-```
+Each report is stored with a 30-day `expirationTtl`, so KV deletes it by itself, which is what the app tells the
+tester. KV's free plan allows 1,000 writes a day.
 
 ## Rate limit
 
@@ -66,4 +62,4 @@ python tools/amdlss-logs.py fetch <code>
 node --test receiver/
 ```
 
-No dependencies. The tests run the Worker against an in-memory stand-in for R2.
+No dependencies. The tests run the Worker against an in-memory stand-in for KV.
