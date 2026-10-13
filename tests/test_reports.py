@@ -114,7 +114,7 @@ def add_game(fake_game, name, state='direct', log='', helixsr='1.9.0'):
     root = fake_game[3].parent / 'Users' / USER / 'Games' / name
     root.mkdir(parents=True)
     if log:
-        (root / 'OptiScaler.log').write_text(log, 'utf-8')
+        (root / 'OptiScaler.log').write_text(log, 'utf-8', newline='')   # exact bytes: text mode rewrites \n on Windows
     return gamelist.Game(name=name, folder=str(root), exe_folder=str(root), state=state, helixsr=helixsr)
 
 
@@ -217,7 +217,7 @@ def test_a_name_the_receiver_would_refuse_is_left_out(fake):  # noqa: F811
 def test_a_huge_log_goes_in_as_its_tail_and_the_rest_stays_whole(fake):  # noqa: F811
     exe = Path(fake[0].exe_folder)
     lines = ''.join(f'[Info] line {n} hooked "x" \t\n' for n in range(400_000))   # about 11 MB; escapes make it larger
-    (exe / 'OptiScaler.log').write_text(lines + 'THE LAST LINE\n', 'utf-8')
+    (exe / 'OptiScaler.log').write_text(lines + 'THE LAST LINE\n', 'utf-8', newline='')
     report = build(fake)
     assert len(reports.body_of(report)) <= reports.MAX_BODY and reports.problem_of(report) is None
     text = report['files']['Fake-Game/exe-folder/OptiScaler.log']
@@ -231,8 +231,8 @@ def test_a_big_log_in_one_game_does_not_push_another_game_out(fake, monkeypatch)
     monkeypatch.setattr(reports, 'MAX_BODY', 1 << 20)
     monkeypatch.setattr(reports, 'MAX_FILE_CHARS', 1 << 20)
     exe = Path(fake[0].exe_folder)
-    (exe / 'OptiScaler.log').write_text('a' * 800_000 + '\nEND-A\n')
-    (exe / 'HelixSR' / 'helixsr.log').write_text('h' * 300_000 + '\nEND-H\n')
+    (exe / 'OptiScaler.log').write_text('a' * 800_000 + '\nEND-A\n', newline='')
+    (exe / 'HelixSR' / 'helixsr.log').write_text('h' * 300_000 + '\nEND-H\n', newline='')
     big = add_game(fake, 'Big Game', log='b' * 800_000 + '\nEND-B\n')
     small = add_game(fake, 'Small Game', log='tiny log\n')
     files = build(fake, big, small)['files']
@@ -250,7 +250,7 @@ def test_a_big_log_in_one_game_does_not_push_another_game_out(fake, monkeypatch)
 def test_many_games_with_big_logs_all_arrive_within_the_real_budget(fake):  # noqa: F811
     more = [add_game(fake, f'Game {n}', log=('x' * 99 + '\n') * 25_000 + f'END-{n}\n') for n in range(5)]   # 2.5 MB each
     exe = Path(fake[0].exe_folder)
-    (exe / 'OptiScaler.log').write_text(('y' * 99 + '\n') * 25_000 + 'END-0\n')
+    (exe / 'OptiScaler.log').write_text(('y' * 99 + '\n') * 25_000 + 'END-0\n', newline='')
     report = build(fake, *more)
     assert len(reports.body_of(report)) <= reports.MAX_BODY == 8 << 20
     logs_of = {n.split('/')[0]: t for n, t in report['files'].items() if n.endswith('exe-folder/OptiScaler.log')}
@@ -263,7 +263,7 @@ def test_many_games_with_big_logs_all_arrive_within_the_real_budget(fake):  # no
 
 def test_one_file_may_not_take_more_than_its_share(fake, monkeypatch):  # noqa: F811
     monkeypatch.setattr(reports, 'MAX_FILE_CHARS', 1000)
-    (Path(fake[0].exe_folder) / 'OptiScaler.log').write_text('x' * 5000 + '\nEND\n')
+    (Path(fake[0].exe_folder) / 'OptiScaler.log').write_text('x' * 5000 + '\nEND\n', newline='')
     text = build(fake)['files']['Fake-Game/exe-folder/OptiScaler.log']
     assert text.startswith('[AMDLSS: the first ') and text.endswith('END\n') and len(text) < 1200
 

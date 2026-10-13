@@ -86,6 +86,9 @@ def fetch(tmp_path, server_url, capsys, answer=None, code=CODE, out=None):  # no
     return status, shown.out, shown.err
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='0600/0700 modes are the Linux reader contract: tools/amdlss-logs.py '
+                                            'is supported on Linux (tools/amdlss-logs-gui.sh, ~/.config token file) '
+                                            'and Windows os.chmod cannot set POSIX modes; the script warns there')
 def test_every_file_lands_in_the_reports_own_folder_private_and_not_executable(server, tmp_path, capsys):  # noqa: F811
     stub = server((200, FULL))
     status, out, err = fetch(tmp_path, stub.url, capsys)
@@ -189,6 +192,11 @@ def test_the_default_folder_is_amdlss_reports_in_the_home_folder():
     assert tool.DEFAULT_OUT == Path.home() / 'amdlss-reports'
 
 
+def test_a_windows_run_is_warned_that_the_linux_permissions_cannot_be_set():
+    assert 'supported on Linux' in tool.platform_warning('nt') and '0600' in tool.platform_warning('nt')
+    assert tool.platform_warning('posix') == ''
+
+
 # --- the summary -------------------------------------------------------------------------------------------------
 
 def test_the_summary_groups_by_game_with_sizes_and_the_first_problem_lines(server, tmp_path, capsys):  # noqa: F811
@@ -246,6 +254,9 @@ def sync_it(tmp_path, url, environ, capsys):
     return status, shown.out, shown.err
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='0600 modes are the Linux reader contract: tools/amdlss-logs.py '
+                                            'is supported on Linux (tools/amdlss-logs-gui.sh, ~/.config token file) '
+                                            'and Windows os.chmod cannot set POSIX modes; the script warns there')
 def test_sync_downloads_every_new_report_once_and_builds_the_pages(server, tmp_path, capsys):  # noqa: F811
     environ = {'AMDLSS_LOGS_TOKEN': 'tok', 'XDG_CONFIG_HOME': str(tmp_path / 'cfg')}
     stub = server((200, LISTED), (200, FULL), (200, OTHER))

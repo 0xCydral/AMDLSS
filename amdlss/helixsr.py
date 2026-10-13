@@ -556,29 +556,41 @@ def process_paths(run=None):
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _proc_path(path):
+    """`path` spelled the Linux way: backslashes become slashes and a Windows extended-length prefix (\\?\\,
+    which a readlink under wine returns) comes off. Proton names a game by its Windows path (Z:\...), and this
+    Linux check is itself tested on Windows, where every path arrives Windows-spelled."""
+    path = str(path).replace('\\', '/')
+    if path.startswith('//?/UNC/'):
+        path = '//' + path[8:]
+    elif path.startswith('//?/'):
+        path = path[4:]
+    return path
+
+
 def _running_from_proc(folder, proc):
     """The Linux half of running_from(): one /proc entry per process, its exe link and its command line."""
     try:
         entries = list(proc.iterdir())
     except OSError:
         return False
-    base = str(folder).rstrip('/')
+    base = _proc_path(folder).rstrip('/')
     for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
-            exe = os.readlink(entry / 'exe').removesuffix(' (deleted)')
+            exe = _proc_path(os.readlink(entry / 'exe').removesuffix(' (deleted)'))
         except OSError:
             exe = ''
-        if exe and inside(exe, folder, False):
+        if exe and inside(exe, base, False):
             return True
         try:
             cmdline = (entry / 'cmdline').read_bytes().decode('utf-8', errors='replace')
         except OSError:
             continue
         for arg in cmdline.split('\x00'):
-            shown = arg.replace('\\', '/')   # Proton names the game by its Windows path (Z:\...)
-            if arg and (base + '/' in shown or shown.endswith(base) or inside(shown, folder, False)):
+            shown = _proc_path(arg)
+            if arg and (base + '/' in shown or shown.endswith(base) or inside(shown, base, False)):
                 return True
     return False
 

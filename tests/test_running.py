@@ -52,6 +52,7 @@ def test_on_linux_the_exe_link_and_the_cmdline_decide(tmp_path):
     os.symlink(game / 'game.exe', proc / '123' / 'exe')
     (proc / '123' / 'cmdline').write_bytes(b'game.exe\x00')
     assert helixsr.running_from(str(game), windows=False, proc=proc)
+    assert helixsr.running_from(str(game).replace('/', '\\'), windows=False, proc=proc)   # Windows spelling decides too
     # Proton: the process is wine outside the folder and only the command line names the game
     (proc / '123' / 'exe').unlink()
     os.symlink('/usr/bin/wine', proc / '123' / 'exe')

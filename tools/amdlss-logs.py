@@ -17,6 +17,10 @@ plain bytes, mode 0600 in folders of mode 0700, to a path resolved and checked t
 never over an existing file, never marked executable, and nothing in it is run, opened or unpacked. The summary names
 each game, lists its files with their sizes and shows the first lines that mention an error, exception, crash or
 failure (at most 20 per game), with .ini files, comments and known noise left out.
+
+The supported reader is Linux: the desktop front end is tools/amdlss-logs-gui.sh, the token file lives under
+~/.config, and the 0600/0700 modes are POSIX permissions. On Windows the script warns and still runs, but
+os.chmod cannot set those modes there, so downloaded reports get the permissions of the folder they land in.
 """
 import argparse
 import os
@@ -37,6 +41,16 @@ PROBLEM = re.compile(r'error|exception|crash|fail', re.IGNORECASE)
 MAX_PROBLEMS = 20
 LINE_CHARS = 160
 SHARED = '(shared)'
+
+
+def platform_warning(name=None):
+    """What a Windows run is told before anything else, or '' on the supported system (see the module text:
+    the 0600/0700 modes are POSIX permissions and Windows os.chmod cannot set them). `name` replaces os.name
+    (tests)."""
+    if (os.name if name is None else name) != 'nt':
+        return ''
+    return ('this report reader is supported on Linux: on Windows it cannot set the 0600 file and 0700 folder '
+            'permissions it sets there, so downloaded reports get the permissions of the folder they land in')
 
 
 def make_dir(path):
@@ -260,4 +274,6 @@ def main(argv=None, environ=os.environ):
 
 
 if __name__ == '__main__':
+    if warning := platform_warning():
+        print(f'warning: {warning}', file=sys.stderr)
     sys.exit(main())

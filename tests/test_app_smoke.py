@@ -302,7 +302,7 @@ def test_send_logs_button_sends_every_game_in_one_report_and_shows_the_code(wind
     top.update()
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
-    (window[2] / 'Three' / 'OptiScaler.log').write_text('[Info] three\n')
+    (window[2] / 'Three' / 'OptiScaler.log').write_text('[Info] three\n', newline='')
     app.send_logs()
     title, text, _options = answers.asked[-1]
     assert title == 'Send logs' and 'One: ' in text and 'Three: 2 files' in text and 'AMDLSS log server' in text
