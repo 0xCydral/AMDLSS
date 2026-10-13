@@ -201,10 +201,12 @@ class CoverClient:
             return None
         quoted = urllib.parse.quote(title, safe='')
         apps = self.listed(COMMUNITY_URL.format(term=quoted), lambda data: data)
-        for appid, name in apps:
-            if normalise(name) == wanted:
-                return appid
-        for appid, name in self.listed(SEARCH_URL.format(term=quoted), lambda data: data['items']):
+        found = apps + self.listed(SEARCH_URL.format(term=quoted), lambda data: data['items'])
+        # Another game holding the title after other words ('Wildlands' in "Tom Clancy's Ghost Recon Wildlands")
+        # makes it ambiguous: an exact hit could be an unrelated game of that name, so this title proves nothing.
+        if any(f' {wanted} ' in f' {normalise(name)} ' and not normalise(name).startswith(wanted) for _, name in found):
+            return None
+        for appid, name in found:
             if normalise(name) == wanted:
                 return appid
         if len(wanted.split()) < 2:   # one word is too short to tell a sequel from the game

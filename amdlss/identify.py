@@ -18,7 +18,7 @@ from . import games as gamelist
 
 # ProductNames that name the engine or the OS, not the game
 GENERIC_PRODUCTS = {'', 'ue4', 'ue5', 'unrealgame', 'unity', 'unity player', 'microsoft windows operating system'}
-SKIPPED_EXES = re.compile(r'crash|launcher|setup|unins|redist|helper', re.I)
+SKIPPED_EXES = re.compile(r'crash|launcher|setup|install|unins|redist|helper|uplay|prereq', re.I)
 
 
 @dataclass
@@ -216,7 +216,8 @@ def read_product_name(path):
 def generic_product(name):
     """True for a ProductName that names an engine or the OS ('Unreal Engine', 'Microsoft Windows...'), not a game."""
     plain = normalise(name)
-    return plain in GENERIC_PRODUCTS or plain.startswith('unreal engine')
+    return (plain in GENERIC_PRODUCTS or plain.startswith('unreal engine')
+            or re.search(r'\b(installer|launcher|setup|ubisoft connect|uplay|ea app|origin|battle net|epic games)\b', plain) is not None)
 
 
 def identify(game):

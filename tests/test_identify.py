@@ -3,11 +3,15 @@
 reader are all stand-ins)."""
 import json
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 from amdlss import identify
 from amdlss.games import Game
+
+REAL_READER = identify.read_product_name   # before the autouse stub below replaces it
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +118,8 @@ def test_ea_installerdata(tmp_path):
 
 
 @pytest.mark.parametrize('product', ['Unreal Engine', 'UE4', 'UnrealGame', 'Microsoft\u00ae Windows\u00ae Operating System',
-                                     '', 'Unreal Engine 5', 'Unity'])
+                                     '', 'Unreal Engine 5', 'Unity', 'Ubisoft Connect 174.2.13389 installer',
+                                     'EA app', 'Battle.net Launcher'])
 def test_a_generic_product_name_is_discarded(tmp_path, monkeypatch, product):
     game = game_in(tmp_path / 'G')
     (tmp_path / 'G' / 'Game.exe').write_bytes(b'MZ')
@@ -135,10 +140,23 @@ def test_the_product_name_comes_from_the_biggest_ordinary_exe(tmp_path, monkeypa
     assert identify.main_exe(tmp_path / 'empty') is None
 
 
+def test_installers_next_to_the_game_are_not_the_main_exe(tmp_path):
+    # Far Cry 6 and Wildlands ship UbisoftConnectInstaller.exe in the game folder (seen on a real Steam library)
+    for name, size in (('UbisoftConnectInstaller.exe', 900000), ('UplayInstaller.exe', 800000),
+                       ('UEPrereqSetup_x64.exe', 700000), ('GRW.exe', 1000)):
+        (tmp_path / name).write_bytes(b'M' * size)
+    assert identify.main_exe(tmp_path).name == 'GRW.exe'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='needs Windows version.dll')
+def test_on_windows_the_version_reader_names_a_real_exe():
+    assert REAL_READER(sys.executable) == 'Python'
+    assert REAL_READER(str(Path(sys.executable).with_name('missing.exe'))) is None
+
+
 @pytest.mark.skipif(os.name == 'nt', reason='the real reader runs on Windows')
-def test_off_windows_the_version_reader_gives_nothing(monkeypatch):
-    monkeypatch.undo()
-    assert identify.read_product_name('Game.exe') is None
+def test_off_windows_the_version_reader_gives_nothing():
+    assert REAL_READER('Game.exe') is None
 
 
 @pytest.mark.parametrize('folder, title', [('TheWitcher3_WildHunt', 'The Witcher 3 Wild Hunt'),

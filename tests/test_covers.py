@@ -133,6 +133,15 @@ def test_a_title_in_the_middle_of_a_name_is_never_taken(tmp_path):
     assert not steam.asked('appdetails')   # nothing even looked like a candidate
 
 
+def test_a_title_another_game_holds_after_other_words_is_ambiguous(tmp_path):
+    # Real answers for the folder name "Wildlands" (2026-10-13): the exact hit is an unrelated indie game.
+    steam = Steam({'WILDLANDS': 1261370},
+                  apps={"Tom Clancy's Ghost Recon® Wildlands": 460930, 'Wildlands Resurgence': 2, 'Sushi Wildlands': 3})
+    assert make(tmp_path, steam).steam_match('Wildlands') is None
+    sequel = Steam(apps={'Hades': 1, 'Hades II': 2})   # a name that only continues the title is no doubt
+    assert make(tmp_path / 'b', sequel).steam_match('Hades') == 1
+
+
 def test_a_one_word_title_has_no_prefix_rule(tmp_path):
     steam = Steam(apps={'Doom Eternal': 1})
     assert make(tmp_path, steam).steam_match('Doom') is None and not steam.asked('appdetails')
