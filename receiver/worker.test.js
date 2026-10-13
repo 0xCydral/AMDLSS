@@ -6,18 +6,33 @@ import worker, { newCode, sameSecret } from './worker.js';
 const TOKEN = 'a-long-secret-read-token';
 const GOOD = { app: 'AMDLSS', version: '0.1.0-beta.8', game: 'Fake Game', files: { 'exe-folder/OptiScaler.log': 'hooked\n' } };
 
-/** A KV stand-in: a Map of key to text; `options` keeps the last put's options. */
+/** A KV stand-in: a Map of key to text (and one of key to metadata); `options` keeps the last put's options.
+ * list() answers two keys a page, so the Worker has to follow the cursor. */
 function bucket() {
   const objects = new Map();
+  const metas = new Map();
   const store = {
     objects,
+    metas,
     options: null,
     async put(key, body, options = {}) {
       objects.set(key, body);
+      metas.set(key, options.metadata ?? null);
       store.options = options;
     },
     async get(key) {
       return objects.has(key) ? objects.get(key) : null;
+    },
+    async list({ prefix = '', cursor } = {}) {
+      const names = [...objects.keys()].filter((name) => name.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const page = names.slice(start, start + 2);
+      const complete = start + page.length >= names.length;
+      return {
+        keys: page.map((name) => ({ name, metadata: metas.get(name) ?? null, expiration: 9999999999 })),
+        list_complete: complete,
+        ...(complete ? {} : { cursor: String(start + page.length) }),
+      };
     },
   };
   return store;
@@ -40,7 +55,10 @@ test('a good report is stored re-serialized under a Crockford code and answers i
   const { code } = await response.json();
   assert.match(code, /^[0-9A-HJKMNP-TV-Z]{8}$/);
   assert.deepEqual([...e.REPORTS.objects.keys()], [`reports/${code}.json`]);
-  assert.deepEqual(e.REPORTS.options, { expirationTtl: 30 * 24 * 60 * 60 });
+  assert.equal(e.REPORTS.options.expirationTtl, 30 * 24 * 60 * 60);
+  assert.equal(e.REPORTS.options.metadata.app_version, GOOD.version);
+  assert.equal(e.REPORTS.options.metadata.games, 1);   // no games.txt in GOOD: one game
+  assert.ok(Math.abs(e.REPORTS.options.metadata.created - Date.now() / 1000) < 60);
   assert.deepEqual(JSON.parse(e.REPORTS.objects.get(`reports/${code}.json`)), GOOD);
 });
 
@@ -144,11 +162,58 @@ test('other paths and methods are 404 or 405', async () => {
   assert.equal((await send('GET', '/reports/')).status, 404);
   assert.equal((await send('GET', '/reports/A/B')).status, 404);
   assert.equal((await send('GET', '/admin')).status, 404);
-  assert.equal((await send('GET', '/reports')).status, 405);
+  assert.equal((await send('GET', '/reports')).status, 401);   // the list exists but needs the token
   assert.equal((await send('PUT', '/reports')).status, 405);
   assert.equal((await send('DELETE', '/reports/ABCDEFGH')).status, 405);
   assert.equal((await send('POST', '/reports/ABCDEFGH')).status, 405);
   assert.equal((await send('HEAD', '/reports/ABCDEFGH')).status, 405);
+});
+
+test('listing the reports needs the Bearer [REDACTED] and reveals no code without it', async () => {
+  const e = env();
+  const { code } = await (await worker.fetch(post(GOOD), e)).json();
+  for (const request of [get('/reports'), get('/reports', 'wrong')]) {
+    const response = await worker.fetch(request, e);
+    assert.equal(response.status, 401);
+    assert.ok(!(await response.text()).includes(code));
+  }
+  const ok = await worker.fetch(get('/reports', TOKEN), e);
+  assert.equal(ok.status, 200);
+  const { reports } = await ok.json();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].code, code);
+  assert.ok(Math.abs(reports[0].created - Date.now() / 1000) < 60);
+  assert.equal((await worker.fetch(get('/reports', TOKEN), env({ READ_TOKEN: undefined }))).status, 401);
+});
+
+test('the list is newest first, follows the cursor, and a key without metadata has no date', async () => {
+  const e = env();
+  const seed = (code, created) => e.REPORTS.put(`reports/${code}.json`, '{}',
+    created === null ? {} : { metadata: { created, app_version: '1', games: 1 } });
+  await seed('AAAA2222', 100);
+  await seed('BBBB3333', 300);
+  await seed('CCCC4444', 200);
+  await seed('DDDD5555', null);   // stored before metadata existed
+  await seed('EEEE6666', 400);
+  e.REPORTS.objects.set('other/FFFF7777.json', '{}');   // outside the prefix: never listed
+  const { reports } = await (await worker.fetch(get('/reports', TOKEN), e)).json();
+  assert.deepEqual(reports, [
+    { code: 'EEEE6666', created: 400 },
+    { code: 'BBBB3333', created: 300 },
+    { code: 'CCCC4444', created: 200 },
+    { code: 'AAAA2222', created: 100 },
+    { code: 'DDDD5555', created: null },
+  ]);
+});
+
+test('an upload stores when it arrived, the app version and the game count as KV metadata', async () => {
+  const e = env();
+  const two = { ...GOOD, files: { 'games.txt': 'A/ | A\nB/ | B\n', 'system.txt': 'x\n' } };
+  const { code } = await (await worker.fetch(post(two), e)).json();
+  const metadata = e.REPORTS.metas.get(`reports/${code}.json`);
+  assert.equal(metadata.app_version, GOOD.version);
+  assert.equal(metadata.games, 2);
+  assert.equal(typeof metadata.created, 'number');
 });
 
 test('sameSecret compares by value', async () => {

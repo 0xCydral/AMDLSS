@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // AMDLSS log receiver (Cloudflare Worker + Workers KV).
 //   POST /reports        a validated report goes to KV as reports/<code>.json, deleted after 30 days; answers {"code": "..."}
+//   GET  /reports        the codes and arrival times of every stored report, newest first, for whoever holds READ_TOKEN
 //   GET  /reports/<code> the stored report, for whoever holds READ_TOKEN
 // Bindings: REPORTS (KV namespace), READ_TOKEN (secret), UPLOAD_LIMITER (rate limit, optional).
 import { MAX_BODY_BYTES, validateReport } from './validate.js';
@@ -63,6 +64,19 @@ export async function sameSecret(given, secret) {
   return different === 0;
 }
 
+/** True when the request carries the read token (compared in constant time). No token, no hint. */
+async function authorized(request, env) {
+  const token = (request.headers.get('Authorization') || '').match(/^Bearer (\S+)$/)?.[1];
+  return Boolean(env.READ_TOKEN && token && (await sameSecret(token, env.READ_TOKEN)));
+}
+
+/** How many games a report holds: the lines of its games.txt, and 1 when it has none (before games.txt existed). */
+function gameCount(report) {
+  const games = report.files['games.txt'];
+  if (typeof games !== 'string') return 1;
+  return games.split('\n').filter((line) => line.trim()).length || 1;
+}
+
 async function upload(request, env) {
   if (!/^application\/json\s*(;|$)/i.test(request.headers.get('Content-Type') || '')) {
     return refuse(415, 'send application/json');
@@ -91,15 +105,17 @@ async function upload(request, env) {
     // KV has no conditional put; with 32^8 codes a race between the get and the put is not worth more than this.
     const key = `reports/${code}.json`;
     if ((await env.REPORTS.get(key)) !== null) continue;
-    await env.REPORTS.put(key, stored, { expirationTtl: KEEP_SECONDS });
+    // The metadata is what the list answers from, so listing never has to read a report's body.
+    const metadata = { created: Math.floor(Date.now() / 1000), app_version: checked.report.version,
+                       games: gameCount(checked.report) };
+    await env.REPORTS.put(key, stored, { expirationTtl: KEEP_SECONDS, metadata });
     return reply(200, { code });
   }
   return refuse(503, 'could not pick a free code, try again');
 }
 
 async function download(request, env, code) {
-  const token = (request.headers.get('Authorization') || '').match(/^Bearer (\S+)$/)?.[1];
-  if (!env.READ_TOKEN || !token || !(await sameSecret(token, env.READ_TOKEN))) {
+  if (!(await authorized(request, env))) {
     return refuse(401, 'a read token is needed', { 'WWW-Authenticate': 'Bearer' });
   }
   if (!CODE.test(code)) return refuse(404, 'not found');
@@ -107,11 +123,36 @@ async function download(request, env, code) {
   return stored !== null ? reply(200, stored) : refuse(404, 'not found');
 }
 
+/** {"reports": [{"code", "created"}]} newest first; `created` is null for a report stored before metadata existed. */
+async function listReports(request, env) {
+  if (!(await authorized(request, env))) {
+    return refuse(401, 'a read token is needed', { 'WWW-Authenticate': 'Bearer' });
+  }
+  const reports = [];
+  let cursor;
+  for (;;) {
+    const page = await env.REPORTS.list(cursor ? { prefix: 'reports/', cursor } : { prefix: 'reports/' });
+    for (const key of page.keys) {
+      if (!key.name.endsWith('.json')) continue;
+      const code = key.name.slice('reports/'.length, -'.json'.length);
+      if (!CODE.test(code)) continue;
+      const created = key.metadata?.created;
+      reports.push({ code, created: typeof created === 'number' ? created : null });
+    }
+    if (page.list_complete || !page.cursor) break;
+    cursor = page.cursor;
+  }
+  reports.sort((a, b) => (b.created ?? -1) - (a.created ?? -1) || b.code.localeCompare(a.code));
+  return reply(200, { reports });
+}
+
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
     if (pathname === '/reports') {
-      return request.method === 'POST' ? upload(request, env) : refuse(405, 'use POST', { Allow: 'POST' });
+      if (request.method === 'POST') return upload(request, env);
+      if (request.method === 'GET') return listReports(request, env);
+      return refuse(405, 'use GET or POST', { Allow: 'GET, POST' });
     }
     const match = pathname.match(/^\/reports\/([^/]+)$/);
     if (!match) return refuse(404, 'not found');

@@ -6,6 +6,7 @@ tester an 8-character code. You read the report with `tools/amdlss-logs.py`.
 | Route | Who | What |
 |---|---|---|
 | `POST /reports` | anyone | Stores a validated report as `reports/<code>.json`, answers `{"code": "..."}` |
+| `GET /reports` | holder of `READ_TOKEN` | `{"reports": [{"code", "created"}]}` newest first (`created` is null for a report stored before KV metadata) |
 | `GET /reports/<code>` | holder of `READ_TOKEN` | Returns the stored report |
 
 Everything else is 404 or 405.
@@ -40,7 +41,8 @@ npx wrangler secret put READ_TOKEN         # paste a long random string; keep a 
 `amdlss/reports.py` (no trailing slash) and release a build.
 
 Each report is stored with a 30-day `expirationTtl`, so KV deletes it by itself, which is what the app tells the
-tester. KV's free plan allows 1,000 writes a day.
+tester. KV's free plan allows 1,000 writes a day. The put also stores KV metadata (`created` in Unix seconds, the
+app version and the game count), which is all the list route reads.
 
 ## Rate limit
 
@@ -53,6 +55,7 @@ exactly. The Worker skips the check when the binding is missing.
 ```bash
 export AMDLSS_LOGS_URL=https://amdlss-reports.<account>.workers.dev
 export AMDLSS_LOGS_TOKEN=<the READ_TOKEN you set>
+python tools/amdlss-logs.py sync        # every new report, plus index.html in ~/amdlss-reports
 python tools/amdlss-logs.py fetch <code>
 ```
 
