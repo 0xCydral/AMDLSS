@@ -10,6 +10,9 @@ Version order, the beta switch and the release lookup are adapted from launcher/
      moved into its place, the new exe starts with the same arguments and the old one exits;
   3. the next start deletes AMDLSS.exe.old.
 
+On Linux the asset is `AMDLSS-linux-x86_64` and step 2 is one os.replace over the running file (it keeps running
+from the old inode), the new file taking the old one's mode; there is no .old to clean up.
+
 From source nothing is replaced: the window only offers the release page. `AMDLSS.exe --update` does the whole thing
 without a window. AMDLSS_FAKE_VERSION makes the running version look like another one (tests only).
 """
@@ -17,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -25,11 +29,19 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from . import VERSION
+from . import VERSION, host
 
 RELEASES_API = 'https://api.github.com/repos/0xCydral/AMDLSS/releases?per_page=100'
 RELEASES_PAGE = 'https://github.com/0xCydral/AMDLSS/releases'
-ASSET_NAME = 'AMDLSS.exe'
+ASSET_WINDOWS, ASSET_LINUX = 'AMDLSS.exe', 'AMDLSS-linux-x86_64'
+
+
+def asset_name(windows=None):
+    """The release file this system runs."""
+    return ASSET_WINDOWS if host.is_windows(windows) else ASSET_LINUX
+
+
+ASSET_NAME = asset_name()
 OLD_SUFFIX, PART_SUFFIX = '.old', '.download'
 CHUNK = 1 << 20
 FROZEN = bool(getattr(sys, 'frozen', False))
@@ -41,7 +53,7 @@ class UpdateError(Exception):
 
 class Release(NamedTuple):
     version: str
-    url: Optional[str]     # the AMDLSS.exe asset; None when the release has none
+    url: Optional[str]     # this system's asset (asset_name()); None when the release has none
     sha256: Optional[str]  # from the asset's `digest`; None when GitHub lists none
     size: int
     page: str
@@ -78,11 +90,12 @@ def digest_of(asset):
     return match.group(1).lower() if match else None
 
 
-def newest_release(releases, beta):
+def newest_release(releases, beta, windows=None):
     """The newest Release in GitHub's /releases list that may be offered: final ones, and pre-releases only when
     BETA. None when there is none. Only v<version> tags count; drafts never do."""
     if not isinstance(releases, list):
         raise ValueError('GitHub did not return a list of releases')
+    wanted = asset_name(windows).lower()
     best = None
     for release in releases:
         tag = release.get('tag_name') if isinstance(release, dict) else None
@@ -94,7 +107,7 @@ def newest_release(releases, beta):
         if best is None or version_tuple(version) > version_tuple(best.version):
             assets = release.get('assets')
             asset = next((a for a in assets if isinstance(a, dict) and isinstance(a.get('name'), str)
-                          and a['name'].lower() == ASSET_NAME.lower()), None) if isinstance(assets, list) else None
+                          and a['name'].lower() == wanted), None) if isinstance(assets, list) else None
             url = asset.get('browser_download_url') if asset else None
             size = asset.get('size') if asset and isinstance(asset.get('size'), int) else 0
             best = Release(version, url if isinstance(url, str) else None, digest_of(asset) if asset else None, size,
@@ -109,13 +122,13 @@ def newer(release, running=None):
     return None
 
 
-def fetch_release(beta):
+def fetch_release(beta, windows=None):
     """newest_release() of what GitHub lists now. Raises UpdateError (one readable line) on any failure."""
     request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
                                                             'User-Agent': 'AMDLSS'})
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return newest_release(json.load(response), beta)
+            return newest_release(json.load(response), beta, windows)
     except urllib.error.HTTPError as error:
         limited = error.code in (403, 429)
         raise UpdateError(f'GitHub refused the request ({"rate limit, try later" if limited else error.code})')
@@ -124,7 +137,7 @@ def fetch_release(beta):
 
 
 def exe_path():
-    """The running AMDLSS.exe, or None when running from source."""
+    """The running executable (AMDLSS.exe, or AMDLSS-linux-x86_64), or None when running from source."""
     return Path(sys.executable) if FROZEN else None
 
 
@@ -155,9 +168,16 @@ def download(url, part, sha256, progress=None):
         raise
 
 
-def swap(exe, new):
-    """Renames the running exe to <exe>.old and moves `new` to its place; puts the old one back if that fails."""
-    exe, old = Path(exe), sibling(exe, OLD_SUFFIX)
+def swap(exe, new, windows=None):
+    """Puts `new` where the running exe is. Windows: rename it to <exe>.old first, and put it back when the move
+    fails. Linux: one rename over the running file (this process keeps the old inode), the new file first taking
+    the old one's mode so it stays executable."""
+    exe = Path(exe)
+    if not host.is_windows(windows):
+        os.chmod(new, stat.S_IMODE(os.stat(exe).st_mode))
+        os.replace(new, exe)
+        return
+    old = sibling(exe, OLD_SUFFIX)
     os.replace(exe, old)
     try:
         os.replace(new, exe)
@@ -166,28 +186,32 @@ def swap(exe, new):
         raise
 
 
-def apply(release, exe, progress=None):
+def apply(release, exe, progress=None, windows=None):
     """Downloads `release`, checks it and replaces `exe` with it. Fails closed: no digest, no change."""
     if not release.url:
-        raise UpdateError(f'{release.version} has no {ASSET_NAME} to download')
+        raise UpdateError(f'{release.version} has no {asset_name(windows)} to download')
     if not release.sha256:
         raise UpdateError(f'GitHub lists no SHA-256 for {release.version}, so it is not installed')
     part = sibling(exe, PART_SUFFIX)
     try:
         download(release.url, part, release.sha256, progress)
-        swap(exe, part)
+        swap(exe, part, windows)
     except OSError as error:
         raise UpdateError(f'could not replace {Path(exe).name}: {error}')
     finally:
         part.unlink(missing_ok=True)
 
 
-def restart(exe, args):
+def restart(exe, args, windows=None):
     """Starts `exe` with `args`, detached from this process. PyInstaller's reset variable makes the new one-file exe
     unpack itself instead of reusing this process's soon-deleted folder."""
-    flags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+    if host.is_windows(windows):
+        flags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+        return subprocess.Popen([str(exe), *args], cwd=str(Path(exe).parent), stdin=subprocess.DEVNULL,
+                                close_fds=True, env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'},
+                                creationflags=flags)
     return subprocess.Popen([str(exe), *args], cwd=str(Path(exe).parent), stdin=subprocess.DEVNULL, close_fds=True,
-                            env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'}, creationflags=flags)
+                            env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'}, start_new_session=True)
 
 
 def cleanup_old(exe, tries=10, delay=1.0):

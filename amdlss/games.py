@@ -7,10 +7,11 @@ bridge cannot run) and never decides a route itself. Pure functions, no Tk, no s
 exercise them directly.
 """
 import json
-import ntpath  # game folders are Windows paths, whatever the host
 import os
 import re
 from dataclasses import dataclass, field
+
+from . import host
 
 SENTINEL = 'AMDLSS-GAMES '  # the bridge prints one line: this prefix and a JSON list
 
@@ -177,22 +178,26 @@ def count_text(rows):
     return f'{ready} games ready, {sum(1 for g in rows if g.reason and not g.manual)} hidden'
 
 
-def same_folder(a, b):
-    return ntpath.normcase(ntpath.realpath(a)) == ntpath.normcase(ntpath.realpath(b))
+def same_folder(a, b, pathmod=None):
+    """`pathmod` is the paths' own module (the host's by default): ntpath folds case and separators, posixpath
+    does neither, which is how the two systems' folders compare."""
+    path = pathmod or host.path_module()
+    return path.normcase(path.realpath(a)) == path.normcase(path.realpath(b))
 
 
-def match_game(fresh, wanted):
+def match_game(fresh, wanted, pathmod=None):
     """The entry of a fresh list that is `wanted`: same folder when known, else the only one with the same name."""
     if wanted.folder:
-        return next((game for game in fresh if game.folder and same_folder(game.folder, wanted.folder)), None)
+        return next((game for game in fresh if game.folder and same_folder(game.folder, wanted.folder, pathmod)), None)
     same = [g for g in fresh if g.name == wanted.name]
     return same[0] if len(same) == 1 else None
 
 
-def overlaps(a, b):
+def overlaps(a, b, pathmod=None):
     """True when folder a is folder b, inside it, or contains it (the way HelixSR decides a game is already listed)."""
-    a, b = (ntpath.normcase(ntpath.normpath(p)) for p in (a, b))
-    return a == b or a.startswith(b + ntpath.sep) or b.startswith(a + ntpath.sep)
+    path = pathmod or host.path_module()
+    a, b = (path.normcase(path.normpath(p)) for p in (a, b))
+    return a == b or a.startswith(b + path.sep) or b.startswith(a + path.sep)
 
 
 # --- anti-cheat -------------------------------------------------------------------------------------------------
@@ -252,7 +257,7 @@ def plan_text(game, route=None):
     else:
         where = game.exe_folder or "the game's .exe folder"
         what = (f"HelixSR puts OptiScaler 0.9.4 next to the game's .exe ({where}) and points it at HelixSR. "
-                "Files it replaces go to the HelixSR\\backup folder there.")
+                f"Files it replaces go to the HelixSR{host.path_module().sep}backup folder there.")
     text = f'{what}\n\n{WARNINGS}'
     if game.anticheat:
         text += (f"\n\nAMDLSS found anti-cheat files in this game ({', '.join(game.anticheat)}). Installing here "

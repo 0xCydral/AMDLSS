@@ -45,13 +45,14 @@ def test_versions_order_with_betas_below_their_final_release():
 
 
 def test_prereleases_are_offered_only_with_the_beta_switch():
-    assert update.newest_release(LISTED, beta=False) is None
-    assert update.newest_release(LISTED, beta=True).version == '0.1.0-beta.3'
+    # LISTED carries the Windows asset, so these ask for Windows explicitly (they run on either host)
+    assert update.newest_release(LISTED, beta=False, windows=True) is None
+    assert update.newest_release(LISTED, beta=True, windows=True).version == '0.1.0-beta.3'
     mixed = [release('v0.1.0'), *LISTED, release('v0.0.9')]
-    assert update.newest_release(mixed, beta=False).version == '0.1.0'
-    assert update.newest_release(mixed, beta=True).version == '0.1.0'   # the final release wins over its betas
-    assert update.newest_release([release('v0.1.0', prerelease=True)], beta=False) is None   # the flag counts alone
-    assert update.newest_release(list(reversed(LISTED)), beta=True).version == '0.1.0-beta.3'
+    assert update.newest_release(mixed, beta=False, windows=True).version == '0.1.0'
+    assert update.newest_release(mixed, beta=True, windows=True).version == '0.1.0'   # the final release wins
+    assert update.newest_release([release('v0.1.0', prerelease=True)], beta=False, windows=True) is None
+    assert update.newest_release(list(reversed(LISTED)), beta=True, windows=True).version == '0.1.0-beta.3'
 
 
 def test_drafts_other_tags_and_junk_are_skipped():
@@ -62,24 +63,24 @@ def test_drafts_other_tags_and_junk_are_skipped():
 
 
 def test_the_release_carries_url_digest_size_and_page():
-    found = update.newest_release(LISTED, beta=True)
+    found = update.newest_release(LISTED, beta=True, windows=True)
     assert found == update.Release('0.1.0-beta.3', 'https://example.test/v0.1.0-beta.3/AMDLSS.exe', SHA, len(EXE),
                                    'https://example.test/v0.1.0-beta.3')
-    assert update.newest_release([release('v0.1.0', assets=('notes.txt',))], False).url is None
+    assert update.newest_release([release('v0.1.0', assets=('notes.txt',))], False, windows=True).url is None
 
 
 def test_a_missing_or_malformed_digest_is_none():
     for digest in (None, '', 'sha256:abc', 'md5:' + SHA, 'sha256:' + 'z' * 64, 5):
-        assert update.newest_release([release('v0.1.0', digest=digest)], False).sha256 is None
+        assert update.newest_release([release('v0.1.0', digest=digest)], False, windows=True).sha256 is None
     assert update.digest_of({'digest': 'sha256:' + SHA.upper()}) == SHA
 
 
 def test_only_a_newer_release_is_an_update():
-    found = update.newest_release(LISTED, beta=True)
+    found = update.newest_release(LISTED, beta=True, windows=True)
     assert update.newer(found, '0.1.0-beta.2') is found
     assert update.newer(found, '0.1.0-beta.3') is None and update.newer(found, '0.1.0') is None
     assert update.newer(None, '0.1.0') is None
-    final = update.newest_release([release('v0.1.0')], beta=False)
+    final = update.newest_release([release('v0.1.0')], beta=False, windows=True)
     assert update.newer(final, '0.1.0-beta.4') is final   # a beta moves to its final release
 
 
@@ -143,7 +144,8 @@ def test_a_good_download_replaces_the_exe_and_keeps_the_old_one_as_dot_old(tmp_p
     exe = fake_exe(tmp_path)
     serve(monkeypatch, EXE)
     seen = []
-    update.apply(update.newest_release(LISTED, True), exe, lambda done, total: seen.append((done, total)))
+    update.apply(update.newest_release(LISTED, True, windows=True), exe,
+                 lambda done, total: seen.append((done, total)), windows=True)
     assert exe.read_bytes() == EXE
     assert (tmp_path / 'AMDLSS.exe.old').read_bytes() == b'MZ old amdlss'
     assert beside(tmp_path) == ['AMDLSS.exe', 'AMDLSS.exe.old'] and seen[-1] == (len(EXE), len(EXE))
@@ -153,7 +155,7 @@ def test_a_digest_mismatch_is_rejected_and_nothing_changes(tmp_path, monkeypatch
     exe = fake_exe(tmp_path)
     serve(monkeypatch, EXE + b'tampered')
     with pytest.raises(update.UpdateError, match='SHA-256'):
-        update.apply(update.newest_release(LISTED, True), exe)
+        update.apply(update.newest_release(LISTED, True, windows=True), exe, windows=True)
     assert exe.read_bytes() == b'MZ old amdlss' and beside(tmp_path) == ['AMDLSS.exe']
 
 
@@ -165,9 +167,10 @@ def test_a_missing_digest_is_rejected_before_anything_is_downloaded(tmp_path, mo
 
     monkeypatch.setattr(update.urllib.request, 'urlopen', boom)
     with pytest.raises(update.UpdateError, match='no SHA-256'):
-        update.apply(update.newest_release([release('v0.1.0', digest=None)], False), exe)
+        update.apply(update.newest_release([release('v0.1.0', digest=None)], False, windows=True), exe, windows=True)
     with pytest.raises(update.UpdateError, match='no AMDLSS.exe'):
-        update.apply(update.newest_release([release('v0.1.0', assets=('x.txt',))], False), exe)
+        update.apply(update.newest_release([release('v0.1.0', assets=('x.txt',))], False, windows=True), exe,
+                     windows=True)
     assert exe.read_bytes() == b'MZ old amdlss' and beside(tmp_path) == ['AMDLSS.exe']
 
 
@@ -179,7 +182,7 @@ def test_a_failed_download_leaves_no_partial_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr(update.urllib.request, 'urlopen', broken)
     with pytest.raises(update.UpdateError, match='connection reset'):
-        update.apply(update.newest_release(LISTED, True), exe)
+        update.apply(update.newest_release(LISTED, True, windows=True), exe, windows=True)
     assert beside(tmp_path) == ['AMDLSS.exe']
 
 
@@ -190,7 +193,7 @@ def test_the_swap_renames_first_then_moves_and_puts_the_old_exe_back_when_the_mo
     calls = []
     real = update.os.replace
     monkeypatch.setattr(update.os, 'replace', lambda a, b: (calls.append((a.name, b.name)), real(a, b))[1])
-    update.swap(exe, new)
+    update.swap(exe, new, windows=True)
     assert calls == [('AMDLSS.exe', 'AMDLSS.exe.old'), ('AMDLSS.exe.download', 'AMDLSS.exe')]
     assert exe.read_bytes() == EXE and (tmp_path / 'AMDLSS.exe.old').read_bytes() == b'MZ old amdlss'
 
@@ -206,7 +209,7 @@ def test_the_swap_renames_first_then_moves_and_puts_the_old_exe_back_when_the_mo
 
     monkeypatch.setattr(update.os, 'replace', second_move_fails)
     with pytest.raises(PermissionError):
-        update.swap(exe2, new2)
+        update.swap(exe2, new2, windows=True)
     assert exe2.read_bytes() == b'MZ old amdlss' and not (again / 'AMDLSS.exe.old').exists()   # rolled back
 
 
@@ -219,7 +222,7 @@ def test_a_folder_that_cannot_be_written_is_one_line_and_changes_nothing(tmp_pat
 
     monkeypatch.setattr(update.os, 'replace', denied)
     with pytest.raises(update.UpdateError, match='could not replace AMDLSS.exe'):
-        update.apply(update.newest_release(LISTED, True), exe)
+        update.apply(update.newest_release(LISTED, True, windows=True), exe, windows=True)
     assert exe.read_bytes() == b'MZ old amdlss' and beside(tmp_path) == ['AMDLSS.exe']
 
 
@@ -264,7 +267,7 @@ def test_restart_passes_the_arguments_and_resets_pyinstaller(monkeypatch, tmp_pa
 def test_the_command_line_update_from_source_only_names_the_release(monkeypatch):
     said = []
     monkeypatch.setenv('AMDLSS_FAKE_VERSION', '0.1.0-beta.2')
-    monkeypatch.setattr(update, 'fetch_release', lambda beta: update.newest_release(LISTED, beta))
+    monkeypatch.setattr(update, 'fetch_release', lambda beta: update.newest_release(LISTED, beta, windows=True))
     monkeypatch.setattr(update, 'FROZEN', False)
     monkeypatch.setattr(update, 'apply', lambda *a: (_ for _ in ()).throw(AssertionError('replaced from source')))
     assert update.command(['--update'], True, said.append) == 0
@@ -276,7 +279,7 @@ def test_the_command_line_update_from_source_only_names_the_release(monkeypatch)
 def test_the_command_line_update_of_an_exe_swaps_and_restarts_without_the_flag(monkeypatch, tmp_path):
     exe, restarted = fake_exe(tmp_path), []
     monkeypatch.setenv('AMDLSS_FAKE_VERSION', '0.1.0-beta.2')
-    monkeypatch.setattr(update, 'fetch_release', lambda beta: update.newest_release(LISTED, beta))
+    monkeypatch.setattr(update, 'fetch_release', lambda beta: update.newest_release(LISTED, beta, windows=True))
     monkeypatch.setattr(update, 'FROZEN', True)
     monkeypatch.setattr(update, 'exe_path', lambda: exe)
     monkeypatch.setattr(update, 'restart', lambda path, args: restarted.append((path, args)))

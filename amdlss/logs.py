@@ -6,10 +6,11 @@ route the call to HelixSR, did the network run. HelixSR writes `helixsr.log` and
 next to the game's FSR DLL; OptiScaler route: in the HelixSR folder next to the game's .exe; DLSS loader: next to the
 .exe), OptiScaler writes `OptiScaler.log` next to the .exe, and `files.txt` says which DLLs are really in place.
 
-Everything is read-only and every item is optional: a missing file or a failing query never stops the zip. The Windows
-user name is replaced by `<user>` in every path and text, and nothing else from the user's profile is read. The zip goes
-to the Desktop; the caller shows it in Explorer. Pure functions plus one subprocess (PowerShell, for the graphics card):
-tests/ and --selftest exercise them directly.
+Everything is read-only and every item is optional: a missing file or a failing query never stops the zip. The user
+name is replaced by `<user>` in every path and text (in the Users folder and in /home), and nothing else from the
+user's profile is read. The zip goes to the Desktop; the caller shows it in the file manager. Pure functions plus one
+subprocess (PowerShell on Windows, for the graphics card; Linux reads /proc): tests/ and --selftest exercise them
+directly.
 """
 import base64
 import ctypes
@@ -26,7 +27,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from . import VERSION, framegen, helixsr
+from . import VERSION, framegen, helixsr, host
 
 MAX_BYTES = 16 << 20        # a larger file goes in as its last 16 MiB, with a note on top
 SESSION_LOG = 'amdlss-install.log'
@@ -49,7 +50,7 @@ SYSTEM_SCRIPT = ("$g=@(Get-CimInstance Win32_VideoController|Select-Object Name,
 # --- privacy -----------------------------------------------------------------------------------------------------
 
 def user_names():
-    """The Windows user name and the name of the profile folder, longest first."""
+    """The user name and the name of the home folder, longest first."""
     names = {os.environ.get('USERNAME', ''), Path(os.environ.get('USERPROFILE', '')).name, Path.home().name}
     try:
         names.add(getpass.getuser())
@@ -59,12 +60,13 @@ def user_names():
 
 
 def redactor(names=None):
-    """A function that replaces the user name by <user>: after `Users\\` always, and as a whole word anywhere when the
-    name has at least four characters (a short name would hit ordinary words)."""
+    """A function that replaces the user name by <user>: after `Users\\` or `/home/` always, and as a whole word
+    anywhere when the name has at least four characters (a short name would hit ordinary words)."""
     names = user_names() if names is None else [n for n in names if n]
     if not names:
         return lambda text: text
-    after_users = re.compile(r'(?i)(Users[\\/]+)(?:%s)(?![A-Za-z0-9_])' % '|'.join(map(re.escape, names)))
+    after_users = re.compile(r'(?i)(Users[\\/]+|(?<![A-Za-z0-9_])/home/)(?:%s)(?![A-Za-z0-9_])'
+                             % '|'.join(map(re.escape, names)))
     long = [n for n in names if len(n) >= 4]
     anywhere = re.compile(r'(?i)(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])' % '|'.join(map(re.escape, long))) \
         if long else None
@@ -162,7 +164,9 @@ class GameLog:
 # --- what is written about the files and the PC ------------------------------------------------------------------
 
 def file_version(path):
-    """The Windows file version of a .dll or .exe ('1.2.3.4'), '' when it has none or cannot be read."""
+    """The Windows file version of a .dll or .exe ('1.2.3.4'), '' when it has none or cannot be read (Linux: '')."""
+    if not host.WINDOWS:
+        return ''
     try:
         version = ctypes.windll.version
         size = version.GetFileVersionInfoSizeW(str(path), None)
@@ -226,8 +230,31 @@ def files_text(game):
     return '\n'.join(lines) + '\n'
 
 
-def system_info():
-    """{'gpu': [{Name, DriverVersion, DriverDate}], 'cpu': str, 'ram': bytes} from PowerShell; {} when it fails."""
+def _linux_system_info():
+    """CPU and RAM from /proc, in the shape of the Windows answer (the graphics card has no one standard place)."""
+    info = {}
+    try:
+        for line in Path('/proc/cpuinfo').read_text(errors='replace').splitlines():
+            if line.startswith('model name'):
+                info['cpu'] = line.split(':', 1)[1].strip()
+                break
+    except OSError:
+        pass
+    try:
+        for line in Path('/proc/meminfo').read_text(errors='replace').splitlines():
+            if line.startswith('MemTotal:'):
+                info['ram'] = int(line.split()[1]) * 1024
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    return info
+
+
+def system_info(windows=None):
+    """{'gpu': [{Name, DriverVersion, DriverDate}], 'cpu': str, 'ram': bytes} from PowerShell (Linux: /proc, without
+    the graphics card); {} when it fails."""
+    if not host.is_windows(windows):
+        return _linux_system_info()
     try:
         done = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', SYSTEM_SCRIPT],
                               capture_output=True, timeout=40, creationflags=NO_WINDOW)
@@ -237,13 +264,14 @@ def system_info():
         return {}
 
 
-def system_text(helixsr_folder, info=None):
-    """system.txt: Windows, graphics card(s) and driver, CPU, RAM, AMDLSS and HelixSR versions, helixsr_setup.json."""
-    info = system_info() if info is None else info
+def system_text(helixsr_folder, info=None, windows=None):
+    """system.txt: the system, graphics card(s) and driver, CPU, RAM, AMDLSS and HelixSR versions, helixsr_setup.json."""
+    info = system_info(windows) if info is None else info
     gpus = info.get('gpu') or []
     gpus = [gpus] if isinstance(gpus, dict) else gpus
     lines = [f'AMDLSS {VERSION}', f'HelixSR {helixsr.version_of(helixsr_folder) or "?"}' if helixsr_folder else
-             'HelixSR folder: unknown', f'Windows: {platform.platform()} ({platform.version()})']
+             'HelixSR folder: unknown',
+             f'{"Windows" if host.is_windows(windows) else "Linux"}: {platform.platform()} ({platform.version()})']
     for number, gpu in enumerate(gpus, 1):
         lines.append(f'GPU {number}: {gpu.get("Name", "?")}, driver {gpu.get("DriverVersion", "?")}, '
                      f'driver date {str(gpu.get("DriverDate") or "?")[:10]}')
@@ -284,23 +312,35 @@ def contents(game, data_dir):
     return names + ['files.txt', 'system.txt'] + ([SESSION_LOG] if log and log.is_file() else [])
 
 
-def confirm_text(game, data_dir):
+def confirm_text(game, data_dir, windows=None):
     names = contents(game, data_dir)
     found = [n for n in names if n not in ('files.txt', 'system.txt', SESSION_LOG)]
+    system = 'Windows' if host.is_windows(windows) else 'Linux'
     lines = [f'AMDLSS writes one zip to your Desktop for {game.name}:', '']
     lines += [f'  {n}' for n in found] or ["  (no log file exists in the game's folders yet: that is a finding too)"]
     lines += ['  files.txt: names, sizes, dates and versions of the .dll and .exe files in those folders, and whether '
               "each upscaler DLL is HelixSR's",
-              '  system.txt: Windows, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions']
+              f'  system.txt: {system}, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions']
     if SESSION_LOG in names:
         lines.append(f"  {SESSION_LOG}: what AMDLSS printed when it installed into this game")
-    lines += ['', 'Your Windows user name is replaced by <user> everywhere. Nothing else from your user folder is '
+    lines += ['', 'Your user name is replaced by <user> everywhere. Nothing else from your user folder is '
               'included and nothing is sent anywhere: you send the zip yourself.', '', 'Collect logs?']
     return '\n'.join(lines)
 
 
-def desktop_dir():
-    """The user's Desktop (it can be moved, for example into OneDrive), else <home>\\Desktop."""
+def desktop_dir(windows=None):
+    """The user's Desktop (it can be moved, for example into OneDrive, or named by the XDG user dirs), else
+    <home>/Desktop."""
+    if not host.is_windows(windows):
+        try:
+            for line in (Path.home() / '.config' / 'user-dirs.dirs').read_text(errors='replace').splitlines():
+                if line.startswith('XDG_DESKTOP_DIR='):
+                    folder = line.split('=', 1)[1].strip().strip('"').replace('$HOME', str(Path.home()))
+                    if os.path.isdir(folder):
+                        return Path(folder)
+        except OSError:
+            pass
+        return Path.home() / 'Desktop'
     try:
         guid = (ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID('B4BFCC3A-DB2C-424C-B029-7FE99A87C641').bytes_le)
         path = ctypes.c_wchar_p()
@@ -349,9 +389,13 @@ def collect(game, helixsr_folder, data_dir, out_dir=None, info=None, now=None):
     return path
 
 
-def reveal(path, say=print):
-    """Opens Explorer with the file selected; a failure is only reported to `say`."""
+def reveal(path, say=print, windows=None):
+    """Shows the file in the file manager (Explorer with it selected; on Linux xdg-open on its folder); a failure
+    is only reported to `say`."""
     try:
-        subprocess.Popen(f'explorer /select,"{path}"')
+        if host.is_windows(windows):
+            subprocess.Popen(f'explorer /select,"{path}"')
+        else:
+            host.xdg_open(Path(path).parent)
     except OSError as error:
-        say(f'could not open Explorer: {error}')
+        say(f'could not open {"Explorer" if host.is_windows(windows) else "the file manager"}: {error}')

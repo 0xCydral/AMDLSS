@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 import tempfile
 import zipfile
 from pathlib import Path
@@ -106,8 +107,12 @@ def check_collect_logs():
             assert b'HelixSR 1.8.1' in archive.read('files.txt')
 
 def check_helixsr():
-    assert helixsr.setup_command() == ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-                                       'helixsr-setup.ps1', '-Yes']
+    assert helixsr.setup_command(windows=True) == ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                                                   'helixsr-setup.ps1', '-Yes']
+    assert helixsr.setup_command(windows=False) == ['bash', 'helixsr-setup.sh', '--yes']
+    assert 'portable' in helixsr.consent_text(windows=False) and 'Proton' in helixsr.consent_text(windows=False)
+    assert '%LOCALAPPDATA%' in helixsr.consent_text(windows=True)
+    assert not helixsr.has_numpy('amdlss-no-such-python')
     client = helixsr.HelixSR('C:/h', python='C:/p/python.exe')
     command = client.install_command(3, ['D:/g'])
     assert command[-4:] == ['install', '3', '--folder', 'D:/g'], command
@@ -144,19 +149,32 @@ def check_update():
     assert [update.version_tuple(v) for v in order] == sorted(update.version_tuple(v) for v in order)
     sha = hashlib.sha256(b'new').hexdigest()
     asset = {'name': 'AMDLSS.exe', 'browser_download_url': 'https://x/AMDLSS.exe', 'digest': f'sha256:{sha}'}
+    linux = {'name': 'AMDLSS-linux-x86_64', 'browser_download_url': 'https://x/AMDLSS-linux-x86_64',
+             'digest': f'sha256:{sha}'}
+    both = [{'tag_name': 'v0.1.0', 'assets': [linux, asset]}]   # each system takes its own file
+    assert update.newest_release(both, beta=False, windows=True).url.endswith('AMDLSS.exe')
+    assert update.newest_release(both, beta=False, windows=False).url.endswith('AMDLSS-linux-x86_64')
     listed = [{'tag_name': 'v0.1.0-beta.5', 'prerelease': True, 'assets': [asset]},
               {'tag_name': 'v0.1.0-beta.4', 'prerelease': True, 'assets': [{**asset, 'digest': None}]}]
-    assert update.newest_release(listed, beta=False) is None
-    best = update.newest_release(listed, beta=True)
+    assert update.newest_release(listed, beta=False, windows=True) is None
+    best = update.newest_release(listed, beta=True, windows=True)
     assert best.version == '0.1.0-beta.5' and best.sha256 == sha and update.newer(best, '0.1.0-beta.4')
-    assert update.newest_release(listed[1:], beta=True).sha256 is None   # a missing digest is never installed
+    assert update.newest_release(listed[1:], beta=True, windows=True).sha256 is None   # no digest: never installed
     with tempfile.TemporaryDirectory() as folder:
         exe, new = Path(folder) / 'AMDLSS.exe', Path(folder) / 'AMDLSS.exe.download'
         exe.write_bytes(b'old')
         new.write_bytes(b'new')
-        update.swap(exe, new)
+        update.swap(exe, new, windows=True)
         assert exe.read_bytes() == b'new' and (Path(folder) / 'AMDLSS.exe.old').read_bytes() == b'old'
         assert update.cleanup_old(exe, tries=1) and sorted(p.name for p in Path(folder).iterdir()) == ['AMDLSS.exe']
+        mine, fresh = Path(folder) / 'AMDLSS-linux-x86_64', Path(folder) / 'AMDLSS-linux-x86_64.download'
+        mine.write_bytes(b'old')
+        if os.name != 'nt':
+            mine.chmod(0o755)
+        fresh.write_bytes(b'new')
+        update.swap(mine, fresh, windows=False)   # one rename over the running file, no .old beside it
+        assert mine.read_bytes() == b'new' and not (Path(folder) / 'AMDLSS-linux-x86_64.old').exists()
+        assert os.name == 'nt' or mine.stat().st_mode & 0o111   # and it stayed executable
 
 
 def check_identify():

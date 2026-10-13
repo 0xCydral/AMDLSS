@@ -231,7 +231,7 @@ def test_collect_logs_button_writes_the_zip_and_shows_it(window, monkeypatch):
     top, app, one = two_game_app(window, monkeypatch, answers)
     desktop, shown_in_explorer = window[2] / 'desktop', []
     monkeypatch.setattr(logs, 'desktop_dir', lambda: desktop)
-    monkeypatch.setattr(logs, 'system_info', lambda: {})
+    monkeypatch.setattr(logs, 'system_info', lambda *args, **kwargs: {})
     monkeypatch.setattr(logs, 'reveal', lambda path, say=print: shown_in_explorer.append(path))
     app.collect_logs()  # nothing selected: nothing asked
     assert not answers.asked and app.game_logs.state == 'disabled'

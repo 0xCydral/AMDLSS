@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The game list: parsing HelixSR's output, states, the warning texts and the anti-cheat check."""
 import json
+import ntpath
+import os
+import posixpath
 
 from amdlss import games
 
@@ -64,15 +67,21 @@ def test_plan_text_warns_and_names_the_files():
 
 def test_match_by_folder_or_unique_name():
     fresh = [games.Game(name='A', folder='C:\\Games\\A'), games.Game(name='B'), games.Game(name='B')]
-    assert games.match_game(fresh, games.Game(name='x', folder='c:/games/a/')) is fresh[0]
+    # Windows paths read as Windows paths (case and separators folded), on either host
+    assert games.match_game(fresh, games.Game(name='x', folder='c:/games/a/'), ntpath) is fresh[0]
     assert games.match_game(fresh, games.Game(name='B')) is None  # two with one name: not guessed
     assert games.match_game(fresh, games.Game(name='A')) is fresh[0]
+    posix = [games.Game(name='A', folder='/games/A')]
+    assert games.match_game(posix, games.Game(name='x', folder='/games/A/'), posixpath) is posix[0]
+    assert games.match_game(posix, games.Game(name='x', folder='/games/a'), posixpath) is None  # case matters
 
 
 def test_overlap_is_whole_folders():
-    assert games.overlaps('C:\\G\\A', 'C:\\G\\A\\Binaries')
-    assert games.overlaps('C:\\G\\A\\Binaries', 'C:\\G\\A')
-    assert not games.overlaps('C:\\G\\A', 'C:\\G\\AB')
+    assert games.overlaps('C:\\G\\A', 'C:\\G\\A\\Binaries', ntpath)
+    assert games.overlaps('C:\\G\\A\\Binaries', 'C:\\G\\A', ntpath)
+    assert not games.overlaps('C:\\G\\A', 'C:\\G\\AB', ntpath)
+    assert games.overlaps('/g/a', '/g/a/bin', posixpath) and games.overlaps('/g/a/bin', '/g/a', posixpath)
+    assert not games.overlaps('/g/a', '/g/ab', posixpath) and not games.overlaps('/Games/A', '/games/a', posixpath)
 
 
 def test_anticheat_names_are_whole_words():
@@ -161,7 +170,7 @@ def test_a_folder_added_by_hand_that_fails_is_shown_with_its_reason(tmp_path):
 def test_a_folder_added_by_hand_that_is_already_listed_is_not_added_twice(tmp_path):
     ready = installed_game(tmp_path, 'Ready')
     inside = str(tmp_path / 'Ready' / 'bin')  # a folder inside a listed game is that game, as for HelixSR
-    rows = games.classify([ready], [str(ready.folder), str(ready.folder) + '\\', inside])
+    rows = games.classify([ready], [str(ready.folder), str(ready.folder) + os.sep, inside])
     assert rows == [ready] and ready.manual and ready.reason == ''
 
 

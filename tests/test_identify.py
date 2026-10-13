@@ -2,7 +2,9 @@
 """identify(): which game is this folder, from files on disk alone (tmp dirs, the environment and the exe version
 reader are all stand-ins)."""
 import json
+import ntpath
 import os
+import posixpath
 import sys
 from pathlib import Path
 
@@ -37,10 +39,26 @@ def test_a_steam_manifest_gives_the_app_id_and_the_name(tmp_path):
 
 
 def test_windows_paths_are_read_as_windows_paths():
-    assert identify.steam_manifest('C:\\Games\\Plain') is None
-    assert identify.steam_manifest('D:\\SteamLibrary\\steamapps\\common') is None   # the library, not a game
+    # ntpath asks for Windows semantics explicitly, so this holds on a Linux host too
+    assert identify.steam_manifest('C:\\Games\\Plain', ntpath) is None
+    assert identify.steam_manifest('D:\\SteamLibrary\\steamapps\\common', ntpath) is None   # the library, not a game
+    assert identify.steam_manifest('', ntpath) is None
+    assert list(identify.ancestors('C:\\Games\\X\\bin\\', ntpath)) == ['C:\\Games\\X\\bin\\', 'C:\\Games\\X', 'C:\\Games', 'C:\\']
     assert identify.steam_manifest('') is None
-    assert list(identify.ancestors('C:\\Games\\X\\bin\\')) == ['C:\\Games\\X\\bin\\', 'C:\\Games\\X', 'C:\\Games', 'C:\\']
+
+
+def test_posix_paths_are_read_as_posix_paths(tmp_path):
+    steamapps = tmp_path / 'media' / 'x' / 'SteamLibrary' / 'steamapps'
+    game = steamapps / 'common' / 'The Witcher 3'
+    (game / 'bin' / 'x64').mkdir(parents=True)
+    (steamapps / 'appmanifest_292030.acf').write_text(
+        '"AppState"\n{\n\t"appid"\t\t"292030"\n\t"name"\t\t"The Witcher 3: Wild Hunt"\n\t"installdir"\t\t"The Witcher 3"\n}\n')
+    folder = str(game).replace(os.sep, '/')   # a POSIX path, on either host
+    assert identify.steam_manifest(folder, posixpath) == (292030, 'The Witcher 3: Wild Hunt')
+    assert identify.steam_manifest(folder + '/bin/x64', posixpath) == (292030, 'The Witcher 3: Wild Hunt')
+    assert identify.steam_manifest('/media/x/SteamLibrary/steamapps/common', posixpath) is None
+    assert list(identify.ancestors('/media/x/Game/bin', posixpath)) == ['/media/x/Game/bin', '/media/x/Game',
+                                                                        '/media/x', '/media', '/']
 
 
 def test_gog_info_in_an_ancestor_folder(tmp_path):

@@ -2,6 +2,7 @@
 """Collect logs: what goes into the zip, that the user name never does, that missing files are fine, and that the
 logging switch in OptiScaler.ini changes two values and is put back."""
 import json
+import os
 import time
 import zipfile
 from pathlib import Path
@@ -91,7 +92,7 @@ def test_files_txt_says_which_dll_is_whose(fake):
 
 def test_system_txt(fake):
     text = entries(collect(fake))['system.txt']
-    assert 'AMDLSS ' in text and 'HelixSR 1.8.1' in text and 'Windows:' in text
+    assert 'AMDLSS ' in text and 'HelixSR 1.8.1' in text and ('Windows:' if os.name == 'nt' else 'Linux:') in text
     assert 'GPU 1: AMD Radeon RX 7800 XT, driver 32.0.21001.9024, driver date 2026-09-01' in text
     assert 'CPU: AMD Ryzen 7 7800X3D' in text and 'RAM: 32.0 GB' in text and '--- helixsr_setup.json ---' in text
 
@@ -236,14 +237,14 @@ def test_system_info_reads_powershells_base64_json_and_survives_a_failure(monkey
     payload = json.dumps({'gpu': {'Name': 'Adaptador básico', 'DriverVersion': '1.0', 'DriverDate': '2006-06-20'},
                           'cpu': 'AMD Ryzen   ', 'ram': 8 * 2**30})
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout=base64.b64encode(payload.encode()) + b'\r\n'))
-    info = logs.system_info()
-    text = logs.system_text(None, info)   # a single GPU arrives as an object, not a list
+    info = logs.system_info(windows=True)
+    text = logs.system_text(None, info, windows=True)   # a single GPU arrives as an object, not a list
     assert 'GPU 1: Adaptador básico, driver 1.0, driver date 2006-06-20' in text and 'CPU: AMD Ryzen\n' in text
-    assert 'RAM: 8.0 GB' in text and 'HelixSR folder: unknown' in text
+    assert 'RAM: 8.0 GB' in text and 'HelixSR folder: unknown' in text and 'Windows:' in text
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout=b'not base64 at all!'))
-    assert logs.system_info() == {}
+    assert logs.system_info(windows=True) == {}
 
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired('powershell', 40)
     monkeypatch.setattr(subprocess, 'run', timeout)
-    assert logs.system_info() == {}
+    assert logs.system_info(windows=True) == {}

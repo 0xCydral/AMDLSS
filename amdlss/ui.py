@@ -12,6 +12,9 @@ import os
 import re
 import zlib
 from collections import namedtuple
+from pathlib import Path
+
+from . import host
 
 try:   # without Pillow the cards keep their tint: covers are JPEG and Tk cannot read those
     from PIL import Image, ImageDraw, ImageTk
@@ -36,17 +39,24 @@ def mix(a, b, t):
                                    for i in (1, 3, 5))
 
 
-def short_path(path, limit=44):
-    """A path for display: %LOCALAPPDATA% & co. for the usual roots, the middle cut out when still long."""
+def short_path(path, limit=44, windows=None):
+    """A path for display: %LOCALAPPDATA% & co. (or ~) for the usual roots, the middle cut out when still long."""
     text = str(path)
-    for name in ('LOCALAPPDATA', 'APPDATA', 'USERPROFILE'):
-        base = os.environ.get(name)
-        if base and text.lower().startswith(base.lower()):
-            text = f'%{name}%' + text[len(base):]
-            break
-    parts = text.split('\\')
+    if host.is_windows(windows):
+        for name in ('LOCALAPPDATA', 'APPDATA', 'USERPROFILE'):
+            base = os.environ.get(name)
+            if base and text.lower().startswith(base.lower()):
+                text = f'%{name}%' + text[len(base):]
+                break
+        sep = '\\'
+    else:
+        home = str(Path.home())
+        if text == home or text.startswith(home + '/'):
+            text = '~' + text[len(home):]
+        sep = '/'
+    parts = text.split(sep)
     if len(text) > limit and len(parts) > 3:
-        text = '\\'.join([parts[0], '…', *parts[-2:]])
+        text = sep.join([parts[0], '…', *parts[-2:]])
     return text
 
 
@@ -101,10 +111,11 @@ class Look:
     def __init__(self, root, tkfont):
         self.dpi = root.winfo_fpixels('1i') / 96.0
         families = set(tkfont.families(root))
-        sans = 'Segoe UI' if 'Segoe UI' in families else 'Arial'
+        sans = next((f for f in ('Segoe UI', 'Arial', 'DejaVu Sans', 'Liberation Sans') if f in families), 'Arial')
+        mono = next((f for f in ('Consolas', 'DejaVu Sans Mono', 'Liberation Mono') if f in families), 'Consolas')
         self.fonts = {'body': (sans, 10), 'body_bold': (sans, 10, 'bold'), 'small': (sans, 9),
                       'chip': (sans, 8, 'bold'), 'h1': (sans, 24, 'bold'), 'h2': (sans, 14, 'bold'),
-                      'mono': ('Consolas', 9)}
+                      'mono': (mono, 9)}
         self.tkfont = tkfont
 
     def px(self, size):

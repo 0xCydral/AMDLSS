@@ -4,10 +4,10 @@
 GOG id, and the game's titles, best first. Nothing here touches the network; amdlss.covers uses the answer to look the
 game's cover up.
 
-Folders are Windows paths whatever the host (ntpath), as in games.py.
+Folders are the host's paths (Windows paths on Windows, POSIX on Linux), as in games.py; the path functions take
+`pathmod=` so tests can read one system's paths on the other.
 """
 import json
-import ntpath
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import games as gamelist
+from . import host
 
 # ProductNames that name the engine or the OS, not the game
 GENERIC_PRODUCTS = {'', 'ue4', 'ue5', 'unrealgame', 'unity', 'unity player', 'microsoft windows operating system'}
@@ -41,13 +42,14 @@ def tidy_folder_name(name):
     return re.sub(r'\s+', ' ', name).strip()
 
 
-def ancestors(folder):
-    """`folder`, its parent and so on up to the drive root (Windows paths, the separators left as given)."""
+def ancestors(folder, pathmod=None):
+    """`folder`, its parent and so on up to the root (the separators left as given)."""
+    path = pathmod or host.path_module()
     here = str(folder)
     while here:
         yield here
         stripped = here.rstrip('\\/') or here
-        parent = ntpath.dirname(stripped)
+        parent = path.dirname(stripped)
         if parent in (here, stripped):
             return
         here = parent
@@ -79,16 +81,17 @@ def read_xml(path):
     return root
 
 
-def steam_manifest(folder):
-    """(app id, name) of the Steam game in `folder`, a path ...\\steamapps\\common\\<installdir>[\\...]: from the
+def steam_manifest(folder, pathmod=None):
+    """(app id, name) of the Steam game in `folder`, a path .../steamapps/common/<installdir>[/...]: from the
     appmanifest in that steamapps folder whose installdir is <installdir>. None when there is none."""
+    path = pathmod or host.path_module()
     head = str(folder).rstrip('\\/')
     while True:
-        parent, name = ntpath.split(head)
+        parent, name = path.split(head)
         if parent == head or not name:
             return None
-        library, common = ntpath.split(parent)
-        if common.casefold() == 'common' and ntpath.basename(library).casefold() == 'steamapps':
+        library, common = path.split(parent)
+        if common.casefold() == 'common' and path.basename(library).casefold() == 'steamapps':
             break
         head = parent
     try:
@@ -117,8 +120,9 @@ def gog_info(folders):
     return None
 
 
-def epic_title(folders):
+def epic_title(folders, pathmod=None):
     """DisplayName of the Epic launcher manifest whose InstallLocation is the game folder or one above it."""
+    path = pathmod or host.path_module()
     programdata = os.environ.get('PROGRAMDATA')
     if not programdata:
         return ''
@@ -131,8 +135,8 @@ def epic_title(folders):
         data = read_json(item)
         location, title = str(data.get('InstallLocation') or ''), str(data.get('DisplayName') or '')
         for folder in folders:
-            if location and title and gamelist.overlaps(location, folder) and \
-                    len(ntpath.normpath(location)) <= len(ntpath.normpath(folder)):
+            if location and title and gamelist.overlaps(location, folder, path) and \
+                    len(path.normpath(location)) <= len(path.normpath(folder)):
                 found.append((data.get('AppName') != data.get('MainGameAppName'), -len(location), title))
     return min(found)[2] if found else ''   # the base game over its DLC, then the most specific folder
 
@@ -247,7 +251,7 @@ def identify(game):
         add('exe', product)
     add('name', game.name)
     if game.folder:
-        add('name', tidy_folder_name(ntpath.basename(game.folder.rstrip('\\/'))))
+        add('name', tidy_folder_name(host.path_module().basename(game.folder.rstrip('\\/'))))
     seen = set()
     for source, title in found:
         if normalise(title) and normalise(title) not in seen:

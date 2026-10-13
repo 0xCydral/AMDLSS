@@ -1,6 +1,6 @@
 # AMDLSS
 
-AMDLSS is a small Windows program for AMD graphics cards. It installs [HelixSR](https://github.com/lonewolf0622/HelixSR) into your Direct3D 12 games with one click, so a game that offers DLSS (or FSR 3.1) can use HelixSR's upscaler on your card.
+AMDLSS is a small program for Windows and Linux, for AMD graphics cards. It installs [HelixSR](https://github.com/lonewolf0622/HelixSR) into your Direct3D 12 games with one click, so a game that offers DLSS (or FSR 3.1) can use HelixSR's upscaler on your card.
 
 HelixSR runs NVIDIA's DLSS network as Direct3D 12 compute shaders. Its own setup is a console program. AMDLSS is a window around that setup: install HelixSR once, see your games, press Install or Remove.
 
@@ -19,6 +19,18 @@ AMDLSS is unofficial. It is not affiliated with HelixSR, NVIDIA or AMD.
    The list only offers games AMDLSS can do something with: the game's folder and its .exe folder exist, and the game has an FSR 3.1 DLL or DLSS, XeSS or FSR 2 files (or HelixSR is already installed in it, so Remove stays reachable). The line under the list says how many games are ready and how many are hidden, for example "10 games ready, 26 hidden". Tick **Show all games** to see the hidden ones greyed out with the reason ("not installed" for a Steam leftover, "no DLSS, FSR 3.1 or XeSS found"); they have no Install button. A folder you added by hand that fails the check always stays in the list with its reason; **Forget folder** removes it. HelixSR looks around such a folder (up to four parent folders), which can take a while on a large drive, so AMDLSS does not ask again until you press **Rescan**.
 4. Pick a game and press **Install**. AMDLSS shows what will change and asks you to confirm. When it finishes it tells you what to choose in the game. A game that has both an FSR 3.1 DLL and DLSS, XeSS or FSR 2 files works either way, so before you install you pick **Install as: DLSS (OptiScaler)** or **AMD FSR (drop-in)**. DLSS (OptiScaler) is offered first when the game lists DLSS, so the game's DLSS option is usable; otherwise HelixSR's own default is. This is the same choice as the `o` and `f` answers in HelixSR's own setup. Use the FSR drop-in if OptiScaler gives you trouble in that game.
 5. **Remove** runs HelixSR's own uninstall for that game and puts the original files back.
+
+## Linux
+
+HelixSR is developed on Linux (Proton, Mesa RADV), and AMDLSS runs there the same way. Download `AMDLSS-linux-x86_64` from the [Releases](https://github.com/0xCydral/AMDLSS/releases) page, make it executable (`chmod +x AMDLSS-linux-x86_64`) and run it; it needs no Python. From source: `python3 AMDLSS.pyw` (Python 3 with Tk; Pillow for the covers).
+
+What differs from Windows:
+
+- **Install HelixSR** runs HelixSR's own `helixsr-setup.sh --yes`. It needs Python 3 with numpy: your system's `python3` when it has them (for example the `python3-numpy` package), otherwise the setup downloads a portable Python into `~/.local/share/HelixSR`. AMDLSS never installs system packages. The shader compiler runs through Proton, so install Proton in Steam (any Proton game does it) or Wine.
+- Games are Proton games. HelixSR finds them in your Linux or Flatpak Steam libraries, plus Heroic and Lutris games; anything else goes through **Add game folder...**.
+- AMDLSS keeps its files in `~/.local/share/AMDLSS` (or `$XDG_DATA_HOME/AMDLSS`); HelixSR's own downloads go to `~/.local/share/HelixSR`. Delete these folders to remove everything.
+- Self-update replaces the `AMDLSS-linux-x86_64` file in place, SHA-256 checked like on Windows.
+- To build the Linux binary yourself: `bash packaging/build-linux.sh` (needs `uv`).
 
 ## Updating from HelixSR 1.8.1
 

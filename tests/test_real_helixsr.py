@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The real thing, without a real game: HelixSR's own installer (both routes) into a FAKE game folder.
 
-Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json); HelixSR's
-Python must be in %LOCALAPPDATA%\\HelixSR\\python. The folder is copied into %TEMP%\\amdlss-fake first, so HelixSR's
+Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json); the Python
+HelixSR's setup uses must be there (%LOCALAPPDATA%\\HelixSR\\python, or on Linux a python3 with numpy). The folder
+is copied into the temp folder's amdlss-fake first, so HelixSR's
 own files are never written, and the install goes only into the fake game there. AMDLSS_TEST_INSTALLER may name a
 newer setup/helixsr_install.py to lay over the copy. AMDLSS_TEST_ROOT replaces the %TEMP%\\amdlss-fake folder.
 Everything under that folder is deleted at the end.
@@ -20,7 +21,7 @@ import pytest
 from amdlss import framegen, games, helixsr, logs
 
 SOURCE = os.environ.get('AMDLSS_TEST_HELIXSR', '')
-pytestmark = pytest.mark.skipif(not (SOURCE and helixsr.built(SOURCE) and helixsr.helixsr_python().is_file()),
+pytestmark = pytest.mark.skipif(not (SOURCE and helixsr.built(SOURCE) and helixsr.find_python() is not None),
                                 reason='AMDLSS_TEST_HELIXSR does not name a built HelixSR folder')
 FAKE_ROOT = Path(os.environ.get('AMDLSS_TEST_ROOT') or Path(tempfile.gettempdir()) / 'amdlss-fake')
 

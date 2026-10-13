@@ -4,11 +4,13 @@ import json
 import os
 from pathlib import Path
 
+from . import host
 
-def data_dir():
-    """The AMDLSS folder in %LOCALAPPDATA%, or AMDLSS_DATA_DIR."""
+
+def data_dir(windows=None):
+    """The AMDLSS data folder (%LOCALAPPDATA%\\AMDLSS, or $XDG_DATA_HOME/AMDLSS), or AMDLSS_DATA_DIR."""
     override = os.environ.get('AMDLSS_DATA_DIR')
-    return Path(override) if override else Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'AMDLSS'
+    return Path(override) if override else host.data_home(windows) / 'AMDLSS'
 
 
 def _read(folder):

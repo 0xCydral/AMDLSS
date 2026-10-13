@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Command lines, built detection, the game list and the install and remove path, against a fake HelixSR folder."""
+import os
 import sys
 from pathlib import Path
 
@@ -10,8 +11,9 @@ from fake_helixsr import make
 
 
 def test_setup_command_line_and_how_it_is_started(tmp_path, monkeypatch):
-    assert helixsr.setup_command() == ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-                                       'helixsr-setup.ps1', '-Yes']
+    assert helixsr.setup_command(windows=True) == ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                                                   'helixsr-setup.ps1', '-Yes']
+    assert helixsr.setup_command(windows=False) == ['bash', 'helixsr-setup.sh', '--yes']
     seen = {}
 
     class FakeProcess:
@@ -31,13 +33,14 @@ def test_setup_command_line_and_how_it_is_started(tmp_path, monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(helixsr.subprocess, 'Popen', fake_popen)
+    monkeypatch.setattr(helixsr, 'find_python', lambda windows=None: None)  # the probe would run the fake Popen
     (tmp_path / helixsr.BUILT).write_text('{}')
     (tmp_path / helixsr.DLL).write_bytes(b'x')
     with pytest.raises(helixsr.HelixSRError):  # exit 0, but the stale BUILT file was deleted and not rewritten
         helixsr.build(tmp_path)
     assert seen['stdin'] == helixsr.subprocess.DEVNULL
     assert seen['creationflags'] == helixsr.NO_WINDOW
-    assert seen['cwd'] == str(tmp_path) and seen['command'][-1] == '-Yes'
+    assert seen['cwd'] == str(tmp_path) and seen['command'] == helixsr.setup_command()  # the host's own setup
 
 
 def test_a_setup_that_builds_nothing_is_an_error(tmp_path, monkeypatch):
@@ -119,7 +122,7 @@ def test_the_bridge_lists_games_as_json(fake):
     assert [g.index for g in listed] == [1, 2, 3]
     assert listed[0].route == 'direct' and listed[0].fsr31 and listed[0].state == 'none'
     assert listed[2].route == 'optiscaler' and not listed[2].fsr31 and listed[2].supports == 'XeSS'
-    assert games.match_game(listed, games.Game(name='x', folder=str(one) + '\\')).name == 'One'
+    assert games.match_game(listed, games.Game(name='x', folder=str(one) + os.sep)).name == 'One'
 
 
 def test_extra_folders_reach_the_installer(fake, tmp_path):

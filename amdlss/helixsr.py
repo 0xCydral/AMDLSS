@@ -6,11 +6,13 @@ HelixSR (https://github.com/lonewolf0622/HelixSR, closed-source freeware DLL; it
 cards. This module:
 
   - fetches the pinned official release zip (resumable, SHA-256 checked, zip-slip checked) and extracts it;
-  - runs HelixSR's own `helixsr-setup.ps1 -Yes` with stdin closed (`-Yes` accepts NVIDIA's DLSS DLL download, so the
-    caller must have asked the user: install() does nothing unless `consented` is true);
-  - lists the games, installs and removes per game by running HelixSR's own setup/helixsr_install.py with HelixSR's
-    embedded Python (`install N`, `uninstall N`, `--folder PATH`). The list comes from a small read-only bridge run in
-    that same Python (it imports helixsr_install and prints JSON); if the bridge cannot run, the installer's printed
+  - runs HelixSR's own setup (`helixsr-setup.ps1 -Yes`, on Linux `helixsr-setup.sh --yes`) with stdin closed (the flag
+    accepts NVIDIA's DLSS DLL download, so the caller must have asked the user: install() does nothing unless
+    `consented` is true);
+  - lists the games, installs and removes per game by running HelixSR's own setup/helixsr_install.py with the Python
+    HelixSR's setup uses (its embedded Windows Python; on Linux the system python3 with numpy, or HelixSR's portable
+    one: find_python()) (`install N`, `uninstall N`, `--folder PATH`). The list comes from a small read-only bridge run
+    in that same Python (it imports helixsr_install and prints JSON); if the bridge cannot run, the installer's printed
     `list` output is parsed instead.
   - installs the OptiScaler route into a game that has an FSR 3.1 DLL and DLSS (HelixSR's `install N` would take the
     FSR drop-in there) through a second small bridge that sets what the installer's "o" answer sets and calls the
@@ -22,6 +24,7 @@ import hashlib
 import http.client
 import os
 import re
+import shutil
 import subprocess
 import threading
 import urllib.error
@@ -30,6 +33,7 @@ import zipfile
 from pathlib import Path
 
 from . import games as gamelist
+from . import host
 
 VERSION = '1.9.0'
 ZIP_NAME = 'HelixSR-1.9.0.2.zip'  # the release asset carries a build number the version does not
@@ -39,7 +43,8 @@ ZIP_SHA256 = '190bc0a62e467b362eeb47d37e14571e51e5b7d75dca5a70e6eafba9b6797337'
 TOP = f'HelixSR-{VERSION}'  # the folder the zip extracts to
 DLL = 'amd_fidelityfx_dx12.dll'
 BUILT = 'helixsr_setup.json'  # written beside the DLL when the setup has built the network
-SETUP = 'helixsr-setup.ps1'
+SETUP_PS1, SETUP_SH = 'helixsr-setup.ps1', 'helixsr-setup.sh'
+SETUP = SETUP_PS1 if host.WINDOWS else SETUP_SH
 INSTALLER = Path('setup') / 'helixsr_install.py'
 NVIDIA_LICENSE_URL = 'https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt'
 CHUNK = 1 << 20
@@ -239,18 +244,64 @@ def locate(data_dir, override=''):
     return max(found)[1] if found else None
 
 
-def helixsr_python():
-    """The embedded Python HelixSR's setup downloads into %LOCALAPPDATA%\\HelixSR."""
-    return Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'HelixSR' / 'python' / 'python.exe'
+def helixsr_data(windows=None):
+    """The folder HelixSR's setup downloads into (%LOCALAPPDATA%\\HelixSR, or ~/.local/share/HelixSR)."""
+    return host.data_home(windows) / 'HelixSR'
 
 
-def consent_text():
+def portable_python():
+    """The portable Python HelixSR's Linux setup downloads into ~/.local/share/HelixSR when the system has none."""
+    return helixsr_data(False) / 'python' / 'bin' / 'python3'
+
+
+_NUMPY = {}
+
+
+def has_numpy(python):
+    """True for a Python 3.8+ that imports numpy: the test helixsr-setup.sh makes. Checked once per path."""
+    key = str(python)
+    if key not in _NUMPY:
+        try:
+            done = subprocess.run([key, '-c', 'import numpy, sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)'],
+                                  capture_output=True, timeout=60)
+            _NUMPY[key] = done.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            _NUMPY[key] = False
+    return _NUMPY[key]
+
+
+def find_python(windows=None):
+    """The Python HelixSR's setup and installer run under, or None. Windows: its embedded Python in
+    %LOCALAPPDATA%\\HelixSR. Linux, as in helixsr-setup.sh: HelixSR's portable Python first, then the
+    system's python3, each needing numpy."""
+    if host.is_windows(windows):
+        found = helixsr_data(True) / 'python' / 'python.exe'
+        return found if found.is_file() else None
+    candidates = [portable_python()]
+    system = shutil.which('python3')
+    if system:
+        candidates.append(Path(system))
+    return next((python for python in candidates if has_numpy(python)), None)
+
+
+def helixsr_python(windows=None):
+    """find_python(), or where it will be once the setup has run (so error messages can name it)."""
+    if host.is_windows(windows):
+        return helixsr_data(True) / 'python' / 'python.exe'
+    return find_python(False) or portable_python()
+
+
+def consent_text(windows=None):
+    downloads = ("downloads Python, numpy and the shader compiler once, about 150 MB, into %LOCALAPPDATA%\\HelixSR."
+                 if host.is_windows(windows) else
+                 "uses Python 3 with numpy (your system's when it has them; otherwise it downloads a portable "
+                 "Python, about 70 MB, into ~/.local/share/HelixSR) and runs the shader compiler through Proton.")
     return (f"AMDLSS downloads HelixSR {VERSION} (about 57 MB) from github.com/lonewolf0622/HelixSR, checks its "
             f"SHA-256, and runs HelixSR's own setup.\n\n"
             f"The setup downloads NVIDIA's DLSS 310.7.0 DLL from NVIDIA's GitHub. That DLL is NVIDIA's, under "
             f"NVIDIA's license:\n{NVIDIA_LICENSE_URL}\n\n"
             f"The setup builds HelixSR's network on this PC from it (about a minute) and deletes the DLL. It also "
-            f"downloads Python, numpy and the shader compiler once, about 150 MB, into %LOCALAPPDATA%\\HelixSR. "
+            f"{downloads} "
             f"The built network stays on this PC: do not share it.\n\n"
             f"Do you agree and want to continue?")
 
@@ -325,7 +376,7 @@ def extract(part, target):
     except zipfile.BadZipFile as error:
         raise HelixSRError(f'the zip is damaged: {error}')
     if not extracted(target):
-        raise HelixSRError(f'the zip does not hold {TOP}\\{SETUP} and {TOP}\\{DLL}')
+        raise HelixSRError(f'the zip does not hold {TOP}/{SETUP} and {TOP}/{DLL}')
 
 
 def fetch(target, progress=None):
@@ -352,7 +403,7 @@ def fetch(target, progress=None):
 
 def child_env():
     """UTF-8 for every child, so game names with accents come back as written."""
-    return {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
+    return {**host.clean_env(), 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
 
 
 def feed_lines(chunks):
@@ -374,13 +425,13 @@ def feed_lines(chunks):
         yield tail, True
 
 
-def run_streaming(command, cwd, on_line=None, timeout=COMMAND_TIMEOUT):
+def run_streaming(command, cwd, on_line=None, timeout=COMMAND_TIMEOUT, env=None):
     """Runs `command` with stdin closed and no console window, passing each line to on_line(text, final).
     Returns (exit code, the last few finished lines). A process that outlives `timeout` is killed."""
     try:
         process = subprocess.Popen([str(part) for part in command], cwd=str(cwd), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
-                                   env=child_env())
+                                   env=env or child_env())
     except OSError as error:
         raise HelixSRError(f'could not start {Path(str(command[0])).name}: {error}')
     timer = threading.Timer(timeout, process.kill)
@@ -400,16 +451,25 @@ def run_streaming(command, cwd, on_line=None, timeout=COMMAND_TIMEOUT):
     return code, tail
 
 
-def setup_command():
-    """HelixSR's own setup, unmodified; run with the HelixSR folder as the working directory."""
-    return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SETUP, '-Yes']
+def setup_command(windows=None):
+    """HelixSR's own setup, unmodified; run with the HelixSR folder as the working directory. The yes flag
+    (`-Yes`, `--yes`) answers every question the setup asks, the NVIDIA DLSS download included (helixsr-setup
+    passes it on to helixsr_setup.py)."""
+    if host.is_windows(windows):
+        return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SETUP_PS1, '-Yes']
+    return ['bash', SETUP_SH, '--yes']
 
 
-def build(folder, on_line=None):
+def build(folder, on_line=None, windows=None):
     """Runs the setup in `folder`. Raises HelixSRError unless it ends with the network built."""
     folder = Path(folder)
     (folder / BUILT).unlink(missing_ok=True)  # a file of an earlier build must not pass for this one
-    code, tail = run_streaming(setup_command(), folder, on_line, BUILD_TIMEOUT)
+    env = child_env()
+    if not host.is_windows(windows) and find_python(False) is None:
+        # no Python with numpy: the setup would offer a sudo package install it cannot ask about from a window,
+        # so take its portable-Python route (the read-only-system one) instead
+        env['HELIXSR_FORCE_PORTABLE'] = '1'
+    code, tail = run_streaming(setup_command(windows), folder, on_line, BUILD_TIMEOUT, env)
     if code != 0:
         raise HelixSRError(f'HelixSR setup failed (exit {code}): {tail[-1] if tail else "no output"}')
     if not built(folder):
@@ -434,6 +494,7 @@ class HelixSR:
 
     def __init__(self, folder, python=None):
         self.folder = Path(folder)
+        self._python_given = python is not None   # an explicit Python is used as given (tests); else find_python()'s
         self.python = Path(python or helixsr_python())
 
     @property
@@ -445,8 +506,13 @@ class HelixSR:
         return self.folder / INSTALLER
 
     def _need_python(self):
-        if not self.python.is_file():
-            raise HelixSRError(f"HelixSR's Python is missing ({self.python}): run Install HelixSR again")
+        if self.python.is_file():
+            return
+        if not self._python_given and not host.WINDOWS:
+            raise HelixSRError(f"HelixSR's Python is missing: no Python 3 with numpy (the system python3 or "
+                               f"HelixSR's portable Python under {portable_python().parent.parent}): "
+                               f"run Install HelixSR again")
+        raise HelixSRError(f"HelixSR's Python is missing ({self.python}): run Install HelixSR again")
 
     @staticmethod
     def folder_flags(extras):

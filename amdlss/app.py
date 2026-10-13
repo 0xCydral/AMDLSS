@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, covers, framegen, games as gamelist, helixsr, logs, settings, update
+from . import VERSION, covers, framegen, games as gamelist, helixsr, host, logs, settings, update
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, segmented, short_path)
 
@@ -535,7 +535,10 @@ class App:
     def open_folder(self):
         game = self.selected()
         if game and game.folder:
-            os.startfile(game.folder)
+            try:
+                host.open_folder(game.folder)
+            except OSError as error:
+                self.log_line(f'could not open the folder: {error}')
 
     def install_game(self):
         game = self.selected()
@@ -790,6 +793,7 @@ class App:
 
 
 def main(argv):
+    host.restore_library_path()
     if '--selftest' in argv and '--update' not in argv:
         from .selftest import run
         return run()
@@ -798,10 +802,11 @@ def main(argv):
         return update.command(argv, beta)
     if update.FROZEN:   # what the last update left beside the exe; the old exe may still be closing
         threading.Thread(target=update.cleanup_old, args=(update.exe_path(),), daemon=True).start()
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
-    except (AttributeError, OSError):
-        pass
+    if host.WINDOWS:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
+        except (AttributeError, OSError):
+            pass
     import tkinter as tk
     from tkinter import filedialog, font, messagebox, ttk
     root = tk.Tk()
