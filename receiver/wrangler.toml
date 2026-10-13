@@ -1,0 +1,16 @@
+name = "amdlss-reports"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "amdlss-reports"
+
+# 10 uploads per minute per IP and Cloudflare location. READ_TOKEN is a secret: `npx wrangler secret put READ_TOKEN`.
+[[ratelimits]]
+name = "UPLOAD_LIMITER"
+namespace_id = "5307"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
