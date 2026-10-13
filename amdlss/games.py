@@ -7,6 +7,7 @@ bridge cannot run) and never decides a route itself. Pure functions, no Tk, no s
 exercise them directly.
 """
 import json
+import ntpath  # game folders are Windows paths, whatever the host
 import os
 import re
 from dataclasses import dataclass, field
@@ -175,7 +176,7 @@ def count_text(rows):
 
 
 def same_folder(a, b):
-    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    return ntpath.normcase(ntpath.realpath(a)) == ntpath.normcase(ntpath.realpath(b))
 
 
 def match_game(fresh, wanted):
@@ -188,8 +189,8 @@ def match_game(fresh, wanted):
 
 def overlaps(a, b):
     """True when folder a is folder b, inside it, or contains it (the way HelixSR decides a game is already listed)."""
-    a, b = (os.path.normcase(os.path.normpath(p)) for p in (a, b))
-    return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
+    a, b = (ntpath.normcase(ntpath.normpath(p)) for p in (a, b))
+    return a == b or a.startswith(b + ntpath.sep) or b.startswith(a + ntpath.sep)
 
 
 # --- anti-cheat -------------------------------------------------------------------------------------------------
