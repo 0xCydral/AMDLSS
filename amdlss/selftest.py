@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import framegen, games, helixsr, logs, update
+from . import covers, framegen, games, helixsr, logs, update
 
 
 def check_parsing():
@@ -48,7 +48,8 @@ def check_routes():
     assert not games.Game(name='x', can_opti=True, state='optiscaler').route_choice  # installed
     assert both.in_game() == 'AMD FSR' and games.Game(name='x', state='optiscaler', route='direct').in_game() == 'DLSS'
     command = helixsr.HelixSR('C:/h', python='C:/p/python.exe').optiscaler_command('D:/g', ['E:/x'])
-    assert [str(c) for c in command[1:3]] == ['-I', '-c'] and [str(c) for c in command[-3:]] == ['C:\\h', 'D:/g', 'E:/x']
+    assert [str(c) for c in command[1:3]] == ['-I', '-c']
+    assert [str(c) for c in command[-3:]] == [str(Path('C:/h')), 'D:/g', 'E:/x']
     assert "g.route, g.chosen = 'optiscaler', g.can_opti" in helixsr.BRIDGE_INSTALL
 
 
@@ -157,9 +158,33 @@ def check_update():
         assert update.cleanup_old(exe, tries=1) and sorted(p.name for p in Path(folder).iterdir()) == ['AMDLSS.exe']
 
 
+def check_covers():
+    jpeg = b'\xff\xd8\xff\xe0' + b'x' * 50
+    asked = []
+
+    def steam(url, limit):   # a store that knows one game, and one cover that is not a JPEG
+        asked.append(url)
+        if 'storesearch' in url:
+            return json.dumps({'items': [{'id': 7, 'name': "Dragon’s Dogma™ 2"},
+                                         {'id': 8, 'name': 'Dragon\'s Dogma 2: Dark Arisen'}]}).encode()
+        return jpeg if '/apps/7/' in url else b'<html>'
+
+    assert covers.normalise("Dragon's  Dogma® 2") == covers.normalise('dragon’s dogma 2')
+    with tempfile.TemporaryDirectory() as folder:
+        client = covers.SteamCovers(folder, fetch=steam)
+        assert client.get(games.Game(name="Dragon's Dogma 2")).read_bytes() == jpeg
+        assert client.get(games.Game(name="Dragon's Dogma 2: Dark")) is None   # a near miss is no match
+        assert client.get(games.Game(name='Unlisted')) is None and client.cached(games.Game(name='Unlisted')) is None
+        asked.clear()
+        assert client.get(games.Game(name='Unlisted')) is None and not asked   # a miss is remembered
+        assert sorted(p.name for p in (Path(folder) / 'covers').iterdir()) == ['7.jpg', 'names.json']
+        client.enabled = False
+        assert client.get(games.Game(name="Dragon's Dogma 2")) is None
+
+
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_helixsr, check_zip_slip, check_update):
+                  check_collect_logs, check_helixsr, check_zip_slip, check_update, check_covers):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

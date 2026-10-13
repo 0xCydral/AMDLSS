@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from amdlss import helixsr
+from amdlss import covers, helixsr, settings
 from fake_helixsr import make
 
 tk = pytest.importorskip('tkinter')
@@ -38,6 +38,7 @@ def window(hidden_root, tmp_path, monkeypatch):
     top = tk.Toplevel(hidden_root)
     top.withdraw()
     monkeypatch.setenv('AMDLSS_DATA_DIR', str(tmp_path / 'data'))
+    settings.save_covers(tmp_path / 'data', False)   # no test fetches covers from Steam unless it says so
     monkeypatch.setattr(helixsr, 'helixsr_python', lambda: sys.executable)
     from amdlss.app import App
     yield top, lambda: App(top, tk, ttk, filedialog, messagebox, font), tmp_path
@@ -458,3 +459,48 @@ def test_monogram_and_tint_come_from_the_name_alone():
              'The Witcher 3': 'W3', 'Far Cry 6': 'FC6', 'Like a Dragon Gaiden': 'LDG', 'Where Winds Meet': 'WWM'}
     assert {name: monogram(name) for name in names} == names
     assert monogram('???') == '?' and tint('Far Cry 6') == tint('Far Cry 6')
+
+
+def image_items(app, number):
+    return [i for i in app.gallery.canvas.find_withtag(f'c{number}') if app.gallery.canvas.type(i) == 'image']
+
+
+def test_a_card_with_a_cached_cover_draws_it_and_one_without_keeps_the_tint(window, monkeypatch):
+    image = pytest.importorskip('PIL.Image')
+    tmp = window[2]
+    cache = tmp / 'data' / 'covers'
+    cache.mkdir(parents=True)
+    image.new('RGB', (460, 215), '#c03040').save(cache / '123.jpg', 'JPEG')
+    (cache / 'names.json').write_text('{"one": {"appid": 123, "at": 0}}')
+    settings.save_covers(tmp / 'data', True)
+    monkeypatch.setattr(covers, 'download', lambda url, limit: None)   # Steam knows nothing about Three
+    top, app, _one = two_game_app(window, monkeypatch)
+    assert [c.cover is not None for c in app.gallery.cards] == [True, False]
+    assert len(image_items(app, 0)) == 1 and image_items(app, 1) == []
+    assert any(app.gallery.canvas.type(i) == 'line' for i in app.gallery.canvas.find_withtag('c1'))   # the stripes
+    app.covers_var.set(False)   # the footer's box: the tint comes back and nothing more is fetched
+    app.covers_changed()
+    assert settings.load_covers(tmp / 'data') is False and image_items(app, 0) == []
+
+
+def test_a_cover_that_arrives_later_is_drawn_without_losing_the_selection(window, monkeypatch):
+    image = pytest.importorskip('PIL.Image')
+    import io
+    import json
+    stream = io.BytesIO()
+    image.new('RGB', (460, 215), '#3040c0').save(stream, 'JPEG')
+
+    def steam(url, limit):   # the store knows Three as app 77 and has its header image
+        return json.dumps({'items': [{'id': 77, 'name': 'Three'}]}).encode() if 'storesearch' in url \
+            else stream.getvalue()
+
+    settings.save_covers(window[2] / 'data', True)
+    monkeypatch.setattr(covers, 'download', steam)
+    top, app, _one = two_game_app(window, monkeypatch)
+    app.tree.selection_set('1')
+    end = time.time() + 10
+    while time.time() < end and not image_items(app, 1):
+        top.update()
+        time.sleep(0.02)
+    assert image_items(app, 1) and app.gallery.selected == 1 and app.tree.selection() == ('1',)
+    assert (window[2] / 'data' / 'covers' / '77.jpg').is_file()

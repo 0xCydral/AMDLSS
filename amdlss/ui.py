@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The look of the window and the hand-drawn controls it needs: flat buttons, a segmented toggle, a progress bar
-and the game gallery (cards drawn on a Canvas, no artwork: a tint and a stripe pattern derived from the name).
+and the game gallery (cards drawn on a Canvas: the game's cover when it has one, else a tint and a stripe pattern
+derived from the name).
 
 mix() and short_path() are copied from launcher/bbport_launcher_win.py of the Bloodborne port
 (https://github.com/0xCydral/bloodborne_pc, GPL-2.0-or-later); FlatButton and Bar are cut-down versions of its
@@ -12,7 +13,13 @@ import re
 import zlib
 from collections import namedtuple
 
-BG, PANEL, CARD, FIELD = '#101115', '#17181d', '#1c1d23', '#14151a'
+try:   # without Pillow the cards keep their tint: covers are JPEG and Tk cannot read those
+    from PIL import Image, ImageDraw, ImageTk
+except ImportError:
+    Image = ImageDraw = ImageTk = None
+COVER_ART = Image is not None
+
+BG,PANEL, CARD, FIELD = '#101115', '#17181d', '#1c1d23', '#14151a'
 LINE, LINE_HI = '#34353f', '#4b4d5a'
 TEXT, MUTED, DIM = '#f4f4f5', '#aeb0bd', '#6f7180'
 BLOOD, BLOOD_HI, BLOOD_DEEP = '#df3545', '#ee5562', '#6b1d27'
@@ -59,6 +66,26 @@ def tint(name):
     """The colour a game's card art starts from: a muted hue picked by the name, the same every run."""
     hue = TINT_HUES[zlib.crc32(name.encode('utf-8')) % len(TINT_HUES)] / 360
     return '#%02x%02x%02x' % tuple(round(v * 255) for v in colorsys.hsv_to_rgb(hue, .4, .46))
+
+
+def cover_art(path, w, h, r):
+    """A cover JPEG as a w x h card background (a PIL image): centre-cropped to the card's aspect, a dark scrim rising
+    from the bottom so the title stays readable on bright art, the corners rounded to `r` over the window colour."""
+    with Image.open(path) as source:
+        art = source.convert('RGB')
+    scale = max(w / art.width, h / art.height)
+    art = art.resize((max(w, round(art.width * scale)), max(h, round(art.height * scale))), Image.LANCZOS)
+    left, top = (art.width - w) // 2, (art.height - h) // 2
+    art = art.crop((left, top, left + w, top + h))
+    scrim = Image.new('L', (w, h))
+    ramp = ImageDraw.Draw(scrim)
+    for y in range(h):
+        level = .15 + .79 * min(1.0, max(0.0, (y / h - .1) / .7)) ** .7
+        ramp.line([(0, y), (w, y)], fill=round(255 * level))
+    art = Image.composite(Image.new('RGB', (w, h), '#0b0b0e'), art, scrim)
+    corners = Image.new('L', (w, h), 0)
+    ImageDraw.Draw(corners).rounded_rectangle((0, 0, w - 1, h - 1), r, fill=255)
+    return Image.composite(art, Image.new('RGB', (w, h), BG), corners)
 
 
 def round_rect(canvas, x0, y0, x1, y1, r, **options):
@@ -305,8 +332,9 @@ class Bar:
         self.job = self.canvas.after(40, self.sweep)
 
 
-# what a card shows: kind 'ok' is a green pill (installed), 'none' a grey one; dim greys a game that is not offered
-Card = namedtuple('Card', 'name supports state kind dim')
+# what a card shows: kind 'ok' is a green pill (installed), 'none' a grey one; dim greys a game that is not offered;
+# cover is the path of its cover JPEG when it has one (the tint and stripes otherwise)
+Card = namedtuple('Card', 'name supports state kind dim cover', defaults=(None,))
 
 
 class Gallery:
@@ -327,6 +355,7 @@ class Gallery:
         self.canvas.configure(yscrollcommand=self.scroll.set)
         self.canvas.pack(side='left', fill='both', expand=True)
         self.cards, self.selected, self.outlines = [], None, {}
+        self.photos, self.last_photos = {}, {}   # PhotoImages must stay referenced or Tk blanks them
         self.size, self.total, self.scrolls = None, 0, False
         c = self.canvas
         c.bind('<Configure>', self.resized)
@@ -339,6 +368,11 @@ class Gallery:
         self.cards, self.selected = list(cards), None
         self.draw()
 
+    def update(self, cards):
+        """New cards for the same games (a cover arrived, or covers were switched): redrawn, selection kept."""
+        self.cards = list(cards)
+        self.draw()
+
     def resized(self, event):
         if (event.width, event.height) != self.size:
             self.size = (event.width, event.height)
@@ -348,6 +382,7 @@ class Gallery:
         c, px = self.canvas, self.look.px
         c.delete('all')
         self.outlines = {}
+        self.last_photos, self.photos = self.photos, {}
         width = c.winfo_width() if c.winfo_width() > 1 else c.winfo_reqwidth()
         card_w = max(px(120), (width - self.gap * (COLUMNS - 1)) // COLUMNS)
         rows = -(-len(self.cards) // COLUMNS)
@@ -373,16 +408,20 @@ class Gallery:
         fonts, r = self.look.fonts, px(8)
         top = tint(card.name)
         round_rect(c, x, y, x + w, y + h, r, fill=CARD, outline='', tags=tag)
-        # art: bands from the tint down to the card colour by 78% of the height, the top band rounded
-        fade, bands = int(h * .78), 14
-        for k in range(bands):
-            y0, y1 = y + fade * k // bands, y + fade * (k + 1) // bands
-            color = mix(top, CARD, ((k + .5) / bands) ** 1.4)
-            if k == 0:
-                round_rect(c, x + 1, y0 + 1, x + w - 1, y1 + r, r, fill=color, outline='', tags=tag)
-            else:
-                c.create_rectangle(x + 1, y0, x + w - 1, y1, fill=color, outline='', tags=tag)
-        self.stripes(x, y + r, w, int(h * .46) - r, mix(top, TEXT, .09), tag)
+        cover = self.photo(card.cover, w, h, r) if card.cover else None
+        if cover:
+            c.create_image(x, y, image=cover, anchor='nw', tags=tag)
+        else:
+            # art: bands from the tint down to the card colour by 78% of the height, the top band rounded
+            fade, bands = int(h * .78), 14
+            for k in range(bands):
+                y0, y1 = y + fade * k // bands, y + fade * (k + 1) // bands
+                color = mix(top, CARD, ((k + .5) / bands) ** 1.4)
+                if k == 0:
+                    round_rect(c, x + 1, y0 + 1, x + w - 1, y1 + r, r, fill=color, outline='', tags=tag)
+                else:
+                    c.create_rectangle(x + 1, y0, x + w - 1, y1, fill=color, outline='', tags=tag)
+            self.stripes(x, y + r, w, int(h * .46) - r, mix(top, TEXT, .09), tag)
         # monogram chip, top left
         chip_font = fonts['chip']
         chip_w = max(px(30), self.look.measure(chip_font, monogram(card.name)) + px(16))
@@ -406,6 +445,16 @@ class Gallery:
         for sequence, handler in (('<Button-1>', self.clicked), ('<Double-Button-1>', self.doubled),
                                   ('<Button-3>', self.right_clicked)):
             c.tag_bind(tag, sequence, lambda e, n=number, handler=handler: handler(e, n))
+
+    def photo(self, path, w, h, r):
+        """The cover as a PhotoImage sized for a card, or None (no Pillow, unreadable file): the card keeps its tint."""
+        key = (str(path), w, h, r)
+        if key not in self.photos:
+            try:
+                self.photos[key] = self.last_photos.get(key) or ImageTk.PhotoImage(cover_art(path, w, h, r))
+            except Exception:   # Pillow raises many kinds for a bad file; a card must never fail to draw over one
+                return None
+        return self.photos[key]
 
     def stripes(self, x, y, w, height, color, tag):
         """Diagonal lines across the art area, clipped to the card's width."""

@@ -63,6 +63,12 @@ Update downloads the release's `AMDLSS.exe` next to the running one and compares
 
 Run from source, AMDLSS only shows the card with a link to the release page. `AMDLSS.exe --update` does the whole update without a window.
 
+## Game covers
+
+The game cards show each game's Steam header image when Steam has one. The images come from Steam's public store API and CDN (`store.steampowered.com` and `cdn.akamai.steamstatic.com`), with no account or key. When the game sits in a Steam library, AMDLSS reads its `appmanifest_*.acf` files to find the Steam app id, and the only thing sent to Steam is that app id, in the request for the image (and, for newer games, in one request for the store's app details, which gives the image's address). Only for a game it cannot find that way (Epic, GOG or a folder you added) does it send the game's name to Steam's store search, and it uses the result only when Steam's name is the same as the game's name. Otherwise the card keeps its colour. Downloads run in the background, so offline the window opens and works as before.
+
+Covers are saved in `%LOCALAPPDATA%\AMDLSS\covers`, with a small `names.json` that remembers the game names already looked up (a game Steam does not know is asked again after 7 days). The box **Show game covers (downloads from Steam)** at the bottom is on by default; turn it off to stop all requests and show the plain cards. Covers need Pillow, which the exe includes (from source: `pip install pillow`); without it the box is hidden and no cover is fetched. The images belong to their owners. AMDLSS is not affiliated with Valve or Steam.
+
 ## Warnings
 
 - Do not use this in online games or games with anti-cheat. The account can be banned, or the game can refuse to start. AMDLSS looks for anti-cheat files in each game folder and flags the game, but it cannot know every game. Check it yourself.
@@ -87,13 +93,13 @@ Run from source, AMDLSS only shows the card with a link to the release page. `AM
 
 ## Build
 
-AMDLSS needs only Python's standard library and Tk to run. To build `dist/AMDLSS.exe` you need a Windows Python 3 from python.org (the build was tested with 3.14) and, in Git Bash:
+AMDLSS needs only Python's standard library and Tk to run (Pillow too, for the game covers). To build `dist/AMDLSS.exe` you need a Windows Python 3 from python.org (the build was tested with 3.14) and, in Git Bash:
 
 ```
 bash packaging/build.sh
 ```
 
-The script makes a private virtual environment in `out/pyenv`, installs PyInstaller there, and freezes `AMDLSS.pyw` into one windowed exe (about 12 MB). It prints the SHA-256 of the exe. `packaging/make_icon.py` redraws `amdlss.ico` (needs Pillow).
+The script makes a private virtual environment in `out/pyenv`, installs PyInstaller and Pillow there, and freezes `AMDLSS.pyw` into one windowed exe (about 12 MB). It prints the SHA-256 of the exe. `packaging/make_icon.py` redraws `amdlss.ico` (needs Pillow).
 
 ## Tests
 

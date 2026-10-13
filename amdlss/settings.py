@@ -44,3 +44,13 @@ def load_beta(folder, default):
 
 def save_beta(folder, value):
     _save(folder, 'beta_versions', bool(value))
+
+
+def load_covers(folder):
+    """The "Show game covers" switch: on unless the user turned it off."""
+    value = _read(folder).get('show_covers')
+    return value if isinstance(value, bool) else True
+
+
+def save_covers(folder, value):
+    _save(folder, 'show_covers', bool(value))

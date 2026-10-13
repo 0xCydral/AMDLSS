@@ -12,9 +12,9 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, framegen, games as gamelist, helixsr, logs, settings, update
-from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT, Bar, Card,
-                 FlatButton, Gallery, Look, logo, magnifier, mix, segmented, short_path)
+from . import VERSION, covers, framegen, games as gamelist, helixsr, logs, settings, update
+from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
+                 Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, segmented, short_path)
 
 LINKS = (('HelixSR', 'https://github.com/lonewolf0622/HelixSR'),
          ('HelixSR license', 'https://github.com/lonewolf0622/HelixSR/blob/HEAD/LICENSE'),
@@ -24,14 +24,17 @@ LINKS = (('HelixSR', 'https://github.com/lonewolf0622/HelixSR'),
 FOOTER = ('AMDLSS is unofficial and is not affiliated with HelixSR, NVIDIA or AMD. AMDLSS is free software '
           '(GPL-2.0-or-later); HelixSR is freeware under its own license.')
 MAX_LOG_LINES = 3000
+COVER_WORKERS = 4
 
 
-def card_of(game):
-    """What a game's card shows: the name, what it supports, and the state (or why it is not offered)."""
+def card_of(game, steam_covers=None):
+    """What a game's card shows: the name, what it supports, and the state (or why it is not offered), plus its cover
+    when one is already on disk."""
     supports = game.supports.replace(', ', ' / ') if game.fsr31 or game.inputs else ''
     if game.reason:
         return Card(game.name, supports, game.reason, 'none', True)
-    return Card(game.name, supports, game.state_text, 'ok' if game.installed else 'none', False)
+    cover = steam_covers.cached(game) if steam_covers else None
+    return Card(game.name, supports, game.state_text, 'ok' if game.installed else 'none', False, cover)
 
 
 def resource(name):
@@ -58,6 +61,11 @@ class App:
         # a beta user keeps getting betas unless they say no
         self.beta_var = tk.BooleanVar(value=settings.load_beta(self.data_dir, update.is_prerelease(update.current_version())))
         self.update_card = None     # the "AMDLSS x is available" card, once an update was found
+        self.covers_var = tk.BooleanVar(value=settings.load_covers(self.data_dir))
+        self.covers = covers.SteamCovers(self.data_dir, self.covers_var.get() and COVER_ART,
+                                         lambda text: self.post(self.log_line, text))
+        self.cover_jobs, self.cover_tried, self.cover_redraw = queue.Queue(), set(), None
+        self.cover_threads = []
         self.log_hidden = False     # the log strip is dropped while the window is short
         self.calls = queue.Queue()  # work for the Tk thread from worker threads
         root.title(f'AMDLSS {VERSION}')
@@ -230,6 +238,11 @@ class App:
         tk.Checkbutton(foot, text='Show all games', variable=self.show_all, command=self.fill_tree, bg=BG, fg=TEXT,
                        selectcolor=FIELD, activebackground=BG, activeforeground=TEXT, font=self.look.fonts['small'],
                        bd=0, highlightthickness=0).pack(side='right')
+        if COVER_ART:   # covers are JPEG: Tk cannot read those, Pillow does
+            tk.Checkbutton(foot, text='Show game covers (downloads from Steam)', variable=self.covers_var,
+                           command=self.covers_changed, bg=BG, fg=TEXT, selectcolor=FIELD, activebackground=BG,
+                           activeforeground=TEXT, font=self.look.fonts['small'], bd=0,
+                           highlightthickness=0).pack(side='right', padx=(0, px(12)))
         self.gallery = Gallery(tk, self.ttk, self.look, games, self.pick, lambda _n: self.open_folder(),
                                self.card_menu)
         self.gallery.frame.pack(fill='both', expand=True)
@@ -433,6 +446,7 @@ class App:
 
     def rescan(self):
         self.failed.clear()
+        self.cover_tried.clear()   # covers that could not be fetched are asked for again
         self.refresh_games()
 
     def refresh_games(self):
@@ -479,7 +493,8 @@ class App:
                 tags = ('installed',) if game.installed else ('warn',) if game.anticheat else ()
                 values = (game.name, game.supports, game.state_text, notes)
             self.tree.insert('', 'end', iid=str(number), tags=tags, values=values)
-        self.gallery.set_items(card_of(game) for game in self.shown)
+        self.gallery.set_items(card_of(game, self.covers) for game in self.shown)
+        self.fetch_covers()
         if self.helixsr is None:
             self.empty.configure(text='Install HelixSR first, then your games show up here.')
         elif not self.games:
@@ -609,6 +624,42 @@ class App:
         if self.helixsr:
             self.set_status(f'✓ HelixSR {self.helixsr.version or "?"} is installed and built '
                             f'({short_path(self.helixsr_folder)})')
+
+    # ---- covers ---------------------------------------------------------------------------------
+    def fetch_covers(self):
+        """Asks Steam, off the window's thread and COVER_WORKERS at a time, for the covers of the games on show that
+        are not on disk yet. Each game is asked once until Rescan or the switch is turned on again."""
+        if not self.covers.enabled:
+            return
+        wanted = [g for g in self.shown
+                  if not g.reason and g.name not in self.cover_tried and not self.covers.cached(g)]
+        self.cover_tried.update(g.name for g in wanted)
+        for game in wanted:
+            self.cover_jobs.put(game)
+        while wanted and len(self.cover_threads) < COVER_WORKERS:
+            self.cover_threads.append(threading.Thread(target=self.cover_worker, daemon=True))
+            self.cover_threads[-1].start()
+
+    def cover_worker(self):
+        while True:
+            if self.covers.get(self.cover_jobs.get()):
+                self.post(self.cover_arrived)
+
+    def cover_arrived(self):
+        """Redraws the cards once for the covers that came in during the last moment, not once per cover."""
+        if self.cover_redraw is None:
+            self.cover_redraw = self.root.after(150, self.redraw_cards)
+
+    def redraw_cards(self):
+        self.cover_redraw = None
+        self.gallery.update(card_of(game, self.covers) for game in self.shown)
+
+    def covers_changed(self):
+        settings.save_covers(self.data_dir, self.covers_var.get())
+        self.covers.enabled = self.covers_var.get() and COVER_ART
+        self.cover_tried.clear()
+        self.redraw_cards()
+        self.fetch_covers()
 
     # ---- updates --------------------------------------------------------------------------------
     def start_update_check(self):

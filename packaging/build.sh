@@ -19,8 +19,11 @@ export USERPROFILE=${USERPROFILE:-$(cygpath -w "/c/Users/$(id -un)")}
 # Only when missing: pip asks PyPI on every call and hangs for minutes without a connection.
 out/pyenv/Scripts/python.exe -c 'import PyInstaller' 2>/dev/null ||
     out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller
+# Pillow decodes the game covers (Tk cannot read JPEG); the exe needs it and its Tk bridge.
+out/pyenv/Scripts/python.exe -c 'import PIL.ImageTk' 2>/dev/null ||
+    out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pillow
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed --onefile \
     --name AMDLSS --icon "$(cygpath -w "$PWD/amdlss.ico")" --add-data "$(cygpath -w "$PWD/amdlss.ico");." \
-    --distpath dist --workpath out/pyi-work --specpath out/pyi-work \
+    --hidden-import PIL.ImageTk --distpath dist --workpath out/pyi-work --specpath out/pyi-work \
     --paths "$(cygpath -w "$PWD")" "$(cygpath -w "$PWD/AMDLSS.pyw")"
 sha256sum dist/AMDLSS.exe
