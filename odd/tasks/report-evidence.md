@@ -92,3 +92,12 @@ Route: delegated direct (multi-file feature).
   Generation for AMDLSS to replace.", Install never writes it on, and Update turns an earlier "on" off.
   Tests: fake folders for present at depth, split, absent and too deep; the UI disabled state; install and update
   writing it off. Route: inline (one coherent change, 2 source files).
+- [x] T9 report evidence for games that end with no destroy line and no Windows record (2026-10-13, report
+  GZ633MDH, AION2): `crashes.py` reads Event 1002 (Application Hang; property order from a real Windows 7 record,
+  newer Windows names the same fields and puts the path by its shape), says whether the game was running when
+  collected (`Running when collected:` through the Install check, minus Unreal's crash reporter), and for an
+  Unreal game (`...\<Project>\Binaries\Win64`) lists `Saved\Crashes` folders from `%LOCALAPPDATA%\<Project>` and
+  the game folder (names, sizes, times, last 14 days, never the files) and sends the last 200 lines of the newest
+  `Saved\Logs\*.log` as `unreal-latest.log`. The receiver needs no change (names are inside its rules; a name
+  case was added to its test). The reader answers "Did the game crash?" Yes for a hang or a crash folder inside the
+  run's window, and No "still running when the report was made" for a game that had not ended. Not deployed.

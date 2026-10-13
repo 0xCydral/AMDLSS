@@ -8,7 +8,8 @@ const report = (files = { 'files.txt': 'ok\n' }, extra = {}) => ({ app: 'AMDLSS'
 test('the names a zip of logs uses are accepted', () => {
   for (const name of ['files.txt', 'system.txt', 'amdlss-install.log', 'exe-folder/OptiScaler.log',
     'exe-folder/HelixSR/helixsr-install.json', 'fsr-dll-folder-2/helixsr.ini', 'a/b/c.LOG', 'a/b/c/d/e.log',
-    'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log', 'a/b/c/d/e/f/g.log']) {
+    'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log', 'a/b/c/d/e/f/g.log',
+    'Game/crashes.txt', 'Game/unreal-latest.log']) {
     assert.equal(nameProblem(name), null, name);
   }
 });

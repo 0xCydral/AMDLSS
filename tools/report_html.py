@@ -355,12 +355,21 @@ def module_owner(module, path=''):
 
 
 def parse_crashes(text):
-    """crashes.txt read back: the Event ID 1000/1001 entries (one `when | exe | faulting module: ...` line each),
-    the dumped-file listings, and whether Windows was checked at all. No file answers present False."""
+    """crashes.txt read back: the Event ID 1000/1001/1002 entries (one `when | exe | faulting module: ...` line
+    each), the Unreal Engine crash folders (`Unreal Engine crash folder | when | name | ...`, merged into the
+    entries), the dumped-file listings, whether Windows was checked at all and whether the game was running when
+    the report was made (True, False, or None when unknown or not said). No file answers present False."""
     if not text:
-        return {'present': False, 'entries': [], 'dumps': [], 'wer': [], 'checked': False, 'failed': False}
+        return {'present': False, 'entries': [], 'dumps': [], 'wer': [], 'checked': False, 'failed': False,
+                'running': None}
     entries = []
     for line in text.splitlines():
+        if line.startswith('Unreal Engine crash folder | '):
+            parts = [part.strip() for part in line.split(' | ')]
+            if len(parts) >= 3:
+                entries.append({'when': parts[1], 'exe': parts[2], 'module': '', 'version': '', 'exception': '',
+                                'offset': '', 'event': '', 'path': '', 'name': '', 'unreal': True})
+            continue
         if ' | faulting module: ' not in line:
             continue
         fields = {}
@@ -373,7 +382,9 @@ def parse_crashes(text):
                         'exception': fields.get('exception', ''), 'offset': fields.get('offset', ''),
                         'event': fields.get('Event ID', ''), 'path': fields.get('module path', ''),
                         'name': fields.get('event name', '')})
-    return {'present': True, 'entries': entries,
+    running = re.search(r'(?m)^Running when collected: (yes|no)\b', text)
+    return {'present': True, 'entries': sorted(entries, key=lambda entry: entry['when']),
+            'running': None if not running else running.group(1) == 'yes',
             'dumps': [_short(line) for line in text.splitlines() if '.dmp' in line.lower()],
             'wer': [_short(line) for line in text.splitlines() if 'AppCrash_' in line],
             'checked': 'Application log' in text, 'failed': 'could not be read' in text}
@@ -382,6 +393,8 @@ def parse_crashes(text):
 def crash_what(entry):
     """What one record says happened. An Event 1001 from a hang names no module; an old AMDLSS wrote WER's
     unread "P5:" label where the module belongs, and that is said as it is, never as a module."""
+    if entry.get('unreal'):
+        return 'Unreal Engine recorded a crash (a folder in Saved/Crashes)'
     if (entry.get('name') or '').lower().startswith('apphang'):
         return 'the game stopped responding (hang)'
     if re.fullmatch(r'P\d+:?', entry['module'] or ''):
@@ -462,6 +475,8 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
         route = 'unknown'
     ended = 'clean' if (opti['clean'] if opti['present'] else helix['clean_last']) else \
         'stops' if (opti['present'] or helix['present'] or fake_text) else 'unknown'
+    if (crashes or {}).get('running') and ended != 'clean':
+        ended = 'running'   # the game had not ended when the report was made: a log that stops is not a crash
     ended_evidence = opti['clean_line'] if opti['clean'] else last_session.get('destroy_line', '')
     entries = (crashes or {}).get('entries') or []
 
@@ -477,11 +492,13 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
     mine = [entry for entry in entries if report_date and entry['when'].startswith(report_date)
             and (seconds(entry['when'][11:19]) is None or low is None
                  or low <= seconds(entry['when'][11:19]) <= (high if high is not None else 24 * 3600))]
-    if mine or (entries and not report_date and ended != 'clean'):
+    if mine or (entries and not report_date and ended not in ('clean', 'running')):
         hit = (mine or entries)[-1]
         crashed = {'verdict': 'Yes', 'evidence': crash_plain(hit)}
     elif ended == 'clean':
         crashed = {'verdict': 'No', 'evidence': ended_evidence or 'a clean shutdown marker is in the log'}
+    elif ended == 'running':
+        crashed = {'verdict': 'No', 'evidence': 'still running when the report was made'}
     elif ended == 'stops':
         crashed = {'verdict': 'Unknown', 'evidence': 'the log just stops, which fits a crash or a kill; '
                                                      'Windows recorded no matching crash for this run'
@@ -491,7 +508,8 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
     note = ''
     if entries and crashed['verdict'] != 'Yes':
         latest = entries[-1]
-        note = (f"Windows also recorded {len(entries)} crash(es) of this game in the last 14 days; the latest is "
+        who = 'Unreal Engine and Windows' if any(entry.get('unreal') for entry in entries) else 'Windows'
+        note = (f"{who} also recorded {len(entries)} crash(es) of this game in the last 14 days; the latest is "
                 f"{latest['when']}: {crash_what(latest)}. See Windows crashes below.")
     if opti['present'] and opti['fg_delivered'] > 0:
         framegen = {'verdict': 'Yes', 'evidence': (
@@ -585,6 +603,9 @@ def timeline_lines(run, verdicts=True):
         lines.append(vram + '.')
     if run['ended'] == 'clean':
         lines.append('How it ended: clean shutdown' + (f" at {run['ended_at']}" if run['ended_at'] else '') + '.')
+    elif run['ended'] == 'running':
+        lines.append('How it ended: it had not ended, the game was still running when the report was made' +
+                     (f" (last log line {run['last']})" if run['last'] else '') + '.')
     elif run['ended'] == 'stops':
         lines.append('How it ended: the log just stops' + (f" at {run['last']}" if run['last'] else '') +
                      ' (likely crash or kill).')
@@ -656,7 +677,7 @@ def third_party_optiscaler(files, install):
     return None
 
 
-def status_of(game, actions, problems, helix):
+def status_of(game, actions, problems, helix, running=False):
     """(plain-words status, badge colour) for one game: a failed last action is red, an install with problems
     or no clean shutdown is amber, a clean install is green."""
     if actions and actions[-1]['outcome'] == 'failed':
@@ -665,7 +686,7 @@ def status_of(game, actions, problems, helix):
         if any(action['outcome'] in ('removed', 'restored') for action in actions):
             return 'Removed', 'amber'
         return 'Not installed by AMDLSS', 'amber'
-    if problems or helix['nul'] or (helix['present'] and not helix['clean']):
+    if problems or helix['nul'] or (helix['present'] and not helix['clean'] and not running):
         return 'Installed, with problems', 'amber'
     return 'Working', 'green'
 
@@ -694,7 +715,8 @@ def analyse(report, code, created=None):
         game['problems'] = problems_in(current)
         game['helix'] = helix_evidence(current)
         game['third_party'] = third_party_optiscaler(current, game['install'])
-        game['status'], game['level'] = status_of(game, game['actions'], game['problems'], game['helix'])
+        game['status'], game['level'] = status_of(game, game['actions'], game['problems'], game['helix'],
+                                                  runs[0]['ended'] == 'running')
     return {'code': code, 'created': created, 'date': date_of(created, files.get('system.txt', '')),
             'version': report.get('version') or '?', 'system': system, 'games': games, 'files': files}
 
@@ -769,7 +791,7 @@ def _game_card(game):
                        'See crashes.txt in the raw files.</p>')
         elif crashes['checked']:
             out.append('<p>No crash of this game\'s executables in the Windows Application log '
-                       '(last 14 days, Event ID 1000 and 1001).</p>')
+                       '(last 14 days, Event ID 1000, 1001 and 1002).</p>')
         else:
             out.append('<p class="dim">Windows crash records are collected on Windows only. '
                        'See crashes.txt in the raw files.</p>')

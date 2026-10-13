@@ -424,14 +424,15 @@ def contents(game, data_dir, windows=None):
     names = [name for name, _path in gather(game)]
     log = session_log_path(data_dir, game.folder) if game.folder else None
     proton = [] if host.is_windows(windows) or not crashes.proton_log_path(game) else [PROTON_LOG]
-    return (names + ['files.txt', CRASHES] + proton + ['system.txt']
+    unreal = [crashes.UNREAL_LOG] if crashes.unreal_log_path(game, windows) else []
+    return (names + ['files.txt', CRASHES] + proton + unreal + ['system.txt']
             + ([SESSION_LOG] if log and log.is_file() else []) + history_names(game, data_dir))
 
 
 def confirm_text(game, data_dir, windows=None):
     names = contents(game, data_dir, windows)
     kept = [n for n in names if n.startswith('history/')]
-    found = [n for n in names if n not in ('files.txt', 'system.txt', SESSION_LOG, CRASHES, PROTON_LOG)
+    found = [n for n in names if n not in ('files.txt', 'system.txt', SESSION_LOG, CRASHES, PROTON_LOG, crashes.UNREAL_LOG)
              and not n.startswith('history/')]
     system = 'Windows' if host.is_windows(windows) else 'Linux'
     lines = [f'AMDLSS writes one zip to your Desktop for {game.name}:', '']
@@ -445,6 +446,9 @@ def confirm_text(game, data_dir, windows=None):
                                   "a note on the Proton log, this system's crash evidence")]
     if PROTON_LOG in names:
         lines.append(f'  {PROTON_LOG}: the Proton log of the last run (PROTON_LOG=1)')
+    if crashes.UNREAL_LOG in names:
+        lines.append(f"  {crashes.UNREAL_LOG}: the last {crashes.UNREAL_LOG_LINES} lines of the game's newest Unreal "
+                     'Engine log, and in crashes.txt the names and sizes of its crash folders (never their files)')
     if kept:
         runs = len({n.split('/')[1] for n in kept})
         lines.append(f'  history/: the logs AMDLSS kept before {runs} earlier install, update or '
@@ -493,10 +497,11 @@ def zip_name(game, now=None):
     return f'AMDLSS-logs-{slug(game.name)}-{time.strftime("%Y%m%d-%H%M", now or time.localtime())}.zip'
 
 
-def game_evidence(game, data_dir, redact, windows=None, crash_run=None, crash_events=None):
+def game_evidence(game, data_dir, redact, windows=None, crash_run=None, crash_events=None, processes=None):
     """[(name, bytes)] for one game, the user name already replaced: the files found, files.txt, the crash
-    record (amdlss.crashes; `crash_run` is its PowerShell seam, tests, and `crash_events` one query shared
-    across games), the Proton log on Linux when present, AMDLSS's own record of the installs and removals,
+    record (amdlss.crashes; `crash_run` is its PowerShell seam, tests, and `crash_events` and `processes` the two
+    queries shared across games), the Proton log on Linux when present, the tail of an Unreal Engine game's newest
+    log, AMDLSS's own record of the installs and removals,
     and the kept history, newest snapshots last."""
     found = []
     for name, source in gather(game):
@@ -504,7 +509,8 @@ def game_evidence(game, data_dir, redact, windows=None, crash_run=None, crash_ev
         if data is not None:
             found.append((name, redact_bytes(data, redact)))
     found.append(('files.txt', redact(files_text(game)).encode('utf-8')))
-    found.append(crashes.crashes_evidence(game, redact, windows, crash_run, events=crash_events))
+    found.append(crashes.crashes_evidence(game, redact, windows, crash_run, events=crash_events, processes=processes))
+    found += crashes.unreal_evidence(game, redact, windows)
     if not host.is_windows(windows):
         proton = crashes.proton_log_path(game)
         data = read_capped(proton) if proton else None

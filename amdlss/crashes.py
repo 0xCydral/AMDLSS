@@ -3,9 +3,12 @@
 
 When a game dies, its logs stop without saying why; the Windows Application log keeps the answer (Event ID
 1000, "Application Error": faulting application, faulting module and version, exception code, fault offset,
-and Event ID 1001 from Windows Error Reporting). This module reads the last 14 days of those events for the
-game's own .exe files with one bounded PowerShell query and writes them in one line each. Minidumps and WER
-report folders are listed by name, size and time only: their bytes never leave the PC. On Linux there is no
+Event ID 1001 from Windows Error Reporting and Event ID 1002, "Application Hang"). This module reads the last 14
+days of those events for the game's own .exe files with one bounded PowerShell query and writes them in one line
+each. Minidumps and WER report folders are listed by name, size and time only: their bytes never leave the PC. A
+game that ends with no crash record and no log line looks like a normal close, so crashes.txt also says whether the
+game was still running when it was collected, and for an Unreal Engine game it lists the project's Saved\\Crashes
+folders and adds the tail of its newest Saved\\Logs file (unreal-latest.log). On Linux there is no
 event log, so the file says so and points at the Proton log (`~/steam-<appid>.log`, written with
 `PROTON_LOG=1`), which amdlss.logs collects beside it when present.
 
@@ -22,14 +25,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import host, identify
+from . import helixsr, host, identify
 
 CRASH_DAYS = 14
-EVENT_IDS = (1000, 1001)
+EVENT_IDS = (1000, 1001, 1002)
 MAX_EVENTS = 500
 TIMEOUT = 30
 MAX_EXES = 200
 MAX_LISTED = 20
+UNREAL_LOG = 'unreal-latest.log'
+UNREAL_LOG_LINES = 200
+UNREAL_LOG_BYTES = 1 << 20   # read this much of the log's end, then keep its last lines
+UNREAL_LOG_CHARS = 200_000
+HELPER_EXES = ('crashreport', 'crashhandler')   # Unreal's crash reporter stays open after a crash
 MERGE_SECONDS = 10   # Windows writes Event 1001 about 2 s after the 1000 for the same crash (seen on a real PC)
 # WER's own event name -> (P number of the exception code, P number of the offset). Both are in the problem
 # signature of Event 1001, but BEX64 swaps them (a real BEX64 record: P7 0000000000032f8e, P8 c0000409).
@@ -40,7 +48,7 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # Get-WinEvent itself errors when nothing matches, so the query is trapped.
 EVENT_SCRIPT = (
     "$start=(Get-Date).AddDays(-{days});"
-    "try {{ $ev=@(Get-WinEvent -FilterHashtable @{{LogName='Application'; Id=@(1000,1001); StartTime=$start}} "
+    "try {{ $ev=@(Get-WinEvent -FilterHashtable @{{LogName='Application'; Id=@(1000,1001,1002); StartTime=$start}} "
     "-MaxEvents {max_events} -ErrorAction Stop) }} catch {{ $ev=@() }};"
     "$out=@(); foreach ($e in $ev) {{ $msg=''; if ($e.Message) {{ $msg=$e.Message.Substring(0, "
     "[Math]::Min(2000, $e.Message.Length)) }}; $props=@(); foreach ($p in $e.Properties) {{ $props += "
@@ -153,6 +161,13 @@ def parse_event(raw, exe_names):
     elif str(raw.get('id')) == '1000' and len(props) >= 8 and props[0].lower().endswith('.exe'):
         app, module, version, exception, offset = props[0], props[3], props[4], props[6], props[7]
         app_path, module_path = (props[10] if len(props) > 10 else ''), (props[11] if len(props) > 11 else '')
+    elif str(raw.get('id')) == '1002' and props and props[0].lower().endswith('.exe'):
+        # Application Hang: [0] exe name, [1] version, then (Windows 7 to 10) process id, start and end time, path,
+        # report id; newer Windows names AppName, AppVersion, ExeFileName (the path), HangType. The path is found
+        # by its shape because the position differs.
+        app = props[0]
+        app_path = next((value for value in props[2:] if re.search(r'[\\/]', value) and value.lower().endswith('.exe')),
+                        '')
     else:
         app = _message((r'Faulting application name:\s*([^,\r\n]+)', 'Nombre de la aplicación con errores'
                         r':\s*([^,\r\n]+)', r'\bP1:[ \t]*(\S+\.exe)'), message)
@@ -172,6 +187,8 @@ def parse_event(raw, exe_names):
         hit, app = known, known
     if not hit:
         return None
+    if str(raw.get('id')) == '1002':
+        name = 'AppHang'
     if ('\\' in module or '/' in module) and not module_path:
         module_path = module
     entry = {'when': str(raw.get('time') or ''), 'exe': hit, 'module': _basename(module) or 'unknown',
@@ -280,6 +297,154 @@ def steam_appid(game):
     return None
 
 
+# --- was the game still running? ----------------------------------------------------------------------------------
+
+def running_text(game, windows=None, run=None, processes=None, proc=None):
+    """'yes', 'no' or 'unknown': whether a process of the game was running when this was collected. It is the
+    check Install uses (helixsr.running_from), except that Unreal's crash reporter, which stays open after a crash,
+    does not count. `processes` is helixsr.process_paths() already asked (one query for a whole report)."""
+    folder = game.folder or game.exe_folder
+    if not folder:
+        return 'unknown'
+    try:
+        if host.is_windows(windows):
+            paths = helixsr.process_paths(run) if processes is None else processes
+            if not paths:   # a PowerShell that failed, not a PC with no processes
+                return 'unknown'
+            return 'yes' if any(helixsr.inside(path, folder, True) and not _basename(path).lower().startswith(HELPER_EXES)
+                                for path in paths) else 'no'
+        return 'yes' if helixsr.running_from(folder, False, proc=proc) else 'no'
+    except OSError:
+        return 'unknown'
+
+
+# --- Unreal Engine games ------------------------------------------------------------------------------------------
+# An Unreal game that dies handles it itself: Windows records nothing, but the engine keeps a crash folder and a log.
+# UE puts them in Saved\ under <Project>, named by the exe's place (...\<Project>\Binaries\Win64\<exe>): in
+# %LOCALAPPDATA%\<Project>\Saved for a shipped game, in <game folder>\<Project>\Saved for a development build.
+
+def unreal_project(game, windows=None):
+    """(project name, project folder) from the exe folder `...\\<Project>\\Binaries\\Win64`, else ('', '')."""
+    pathmod = host.path_module(windows)
+    for folder in (game.exe_folder, game.folder):
+        path = str(folder or '').rstrip('\\/')
+        while path:
+            head, tail = pathmod.split(path)
+            if tail.lower() == 'binaries' and pathmod.basename(head) and pathmod.basename(head).lower() != 'engine':
+                return pathmod.basename(head), head
+            if not tail or head == path:
+                break
+            path = head.rstrip('\\/')
+    return '', ''
+
+
+def local_appdata(game, windows=None):
+    """%LOCALAPPDATA%; on Linux the one inside the game's Proton prefix when the game sits in a Steam library."""
+    if host.is_windows(windows):
+        return host.data_home(True)
+    library, steamapps, _game = (game.folder or '').partition('/steamapps/')
+    appid = steam_appid(game)
+    if appid is None or not steamapps:
+        return None
+    local = Path(library) / 'steamapps' / 'compatdata' / str(appid) / 'pfx' / 'drive_c' / 'users' / 'steamuser' \
+        / 'AppData' / 'Local'
+    return local if local.is_dir() else None
+
+
+def unreal_saved_dirs(game, windows=None, local=None):
+    """(project, [Saved folders that exist]) for an Unreal game; ('', []) for any other. `local` replaces
+    %LOCALAPPDATA% (tests)."""
+    project, root = unreal_project(game, windows)
+    if not project:
+        return '', []
+    base = local_appdata(game, windows) if local is None else local
+    places = ([Path(base) / project / 'Saved'] if base else []) + [Path(root) / 'Saved']
+    return project, [place for place in places if place.is_dir()]
+
+
+def _tree(path, limit=200):
+    """(files, bytes) in a folder, looking at no more than `limit` files."""
+    files = size = 0
+    for root, _folders, names in os.walk(path):
+        for name in names:
+            try:
+                size += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+            files += 1
+            if files >= limit:
+                return files, size
+    return files, size
+
+
+def list_unreal_crashes(saved_dirs, days=CRASH_DAYS):
+    """[(time, name, files, bytes, folder)] of what Saved\\Crashes holds from the last `days`, newest first. Only
+    names, sizes and times: a dump in there is never read."""
+    cutoff, found = time.time() - days * 86400, []
+    for saved in saved_dirs:
+        try:
+            entries = list(os.scandir(Path(saved) / 'Crashes'))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                when = entry.stat().st_mtime
+                files, size = _tree(entry.path) if entry.is_dir(follow_symlinks=False) else (1, entry.stat().st_size)
+            except OSError:
+                continue
+            if when >= cutoff:
+                found.append((when, entry.name, files, size, str(Path(saved) / 'Crashes')))
+    return sorted(found, reverse=True)[:MAX_LISTED]
+
+
+def unreal_log_path(game, windows=None, local=None):
+    """The newest *.log in the project's Saved\\Logs folders, or None (not an Unreal game, or no log)."""
+    newest, best = None, -1.0
+    for saved in unreal_saved_dirs(game, windows, local)[1]:
+        try:
+            for entry in os.scandir(Path(saved) / 'Logs'):
+                if entry.is_file() and entry.name.lower().endswith('.log') and entry.stat().st_mtime > best:
+                    newest, best = Path(entry.path), entry.stat().st_mtime
+        except OSError:
+            continue
+    return newest
+
+
+def unreal_evidence(game, redact, windows=None, local=None):
+    """[(unreal-latest.log, bytes)]: the last UNREAL_LOG_LINES lines of the newest Unreal log, redacted and cut to
+    UNREAL_LOG_CHARS; [] when there is none. It says in its first line which file it is and when it was written."""
+    path = unreal_log_path(game, windows, local)
+    if path is None:
+        return []
+    try:
+        with open(path, 'rb') as stream:
+            size = path.stat().st_size
+            stream.seek(max(0, size - UNREAL_LOG_BYTES))
+            text = stream.read().decode('utf-8-sig', errors='replace')
+        written = _stamp(path.stat().st_mtime)
+    except OSError:
+        return []
+    lines = text.splitlines()[-UNREAL_LOG_LINES:]
+    body = '\n'.join(lines)[-UNREAL_LOG_CHARS:]
+    head = f'[AMDLSS: the last {len(lines)} lines of {path.name}, written {written}]\n'
+    return [(UNREAL_LOG, redact(head + body + '\n').encode('utf-8'))]
+
+
+def unreal_lines(game, windows=None, local=None, days=CRASH_DAYS):
+    """The crashes.txt lines for an Unreal game (none for any other): its crash folders, one machine-readable line
+    each (tools/report_html.py reads them back)."""
+    project, saved = unreal_saved_dirs(game, windows, local)
+    if not project:
+        return []
+    lines = ['', f'Unreal Engine project {project}: crash folders of the last {int(days)} days, listed only (not sent):']
+    crashes = list_unreal_crashes(saved, days)
+    lines += [f'Unreal Engine crash folder | {_stamp(when)} | {_clean(name)} | {files} files, {size} bytes | {_clean(where)}'
+              for when, name, files, size, where in crashes] or ['  (none found)']
+    lines.append(f'The newest Saved\\Logs file is included as {UNREAL_LOG}.' if unreal_log_path(game, windows, local)
+                 else f'No Saved\\Logs file was found in {len(saved)} Saved folder(s).')
+    return lines
+
+
 def proton_log_path(game, home=None):
     """~/steam-<appid>.log (what Proton writes with PROTON_LOG=1) when it exists, else None. `home` replaces
     the home folder (tests)."""
@@ -291,12 +456,14 @@ def proton_log_path(game, home=None):
 
 
 def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None, home=None, days=CRASH_DAYS,
-                 events=None):
+                 events=None, processes=None, local=None, proc=None):
     """crashes.txt for one game (unredacted: the caller replaces the user name) (see the module text).
-    `events` is a query_events() answer shared across games, so one report runs PowerShell once."""
+    `events` is a query_events() answer and `processes` a helixsr.process_paths() answer, shared across games, so one
+    report runs PowerShell once for each. `local` replaces %LOCALAPPDATA% and `proc` /proc (tests)."""
+    running = f'Running when collected: {running_text(game, windows, run, processes, proc)}'
     if not host.is_windows(windows):
         appid, proton = steam_appid(game), proton_log_path(game, home)
-        lines = [f'Windows crashes for {game.name} (not collected on Linux)',
+        lines = [f'Windows crashes for {game.name} (not collected on Linux)', running,
                  'Windows event log records exist only on Windows. On Linux the Proton log is the crash '
                  'evidence:']
         if proton:
@@ -308,11 +475,11 @@ def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None,
             lines.append('AMDLSS could not tell this game\'s Steam app id from its folder, so no Proton log '
                          'was looked for. Add PROTON_LOG=1 to the game\'s Steam launch options, run the game '
                          'once, and send logs again.')
-        return '\n'.join(lines) + '\n'
+        return '\n'.join(lines + unreal_lines(game, windows, local, days)) + '\n'
     exes = game_exes(game)
     lines = [f'Windows crashes for {game.name} (Application log, last {int(days)} days, '
-             f'Event ID {EVENT_IDS[0]} and {EVENT_IDS[1]})',
-             f"Game executables checked: {', '.join(exes) if exes else '(none found in the game folder)'}", '']
+             f"Event ID {', '.join(str(number) for number in EVENT_IDS[:-1])} and {EVENT_IDS[-1]})",
+             f"Game executables checked: {', '.join(exes) if exes else '(none found in the game folder)'}", running, '']
     if not exes:
         lines.append('No .exe file was found in the game folder, so the event log was not searched.')
     else:
@@ -334,15 +501,15 @@ def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None,
     reports = list_wer_reports(exes, wer_folders, windows) if exes else []
     lines += ['', 'Windows Error Reporting folders listed only (not sent):']
     lines += [f'  {name}  {when}' for name, when in reports] or ["  (none found for this game's executables)"]
-    return '\n'.join(lines) + '\n'
+    return '\n'.join(lines + unreal_lines(game, windows, local, days)) + '\n'
 
 
 def crashes_evidence(game, redact, windows=None, run=None, dumps_dir=None, wer_folders=None, home=None,
-                     days=CRASH_DAYS, events=None):
+                     days=CRASH_DAYS, events=None, processes=None, local=None, proc=None):
     """('crashes.txt', bytes) for Collect logs and Send logs, the user name already replaced. A failure to even
     build the text becomes the file's one line: collecting logs never stops for crash evidence."""
     try:
-        text = crashes_text(game, windows, run, dumps_dir, wer_folders, home, days, events)
+        text = crashes_text(game, windows, run, dumps_dir, wer_folders, home, days, events, processes, local, proc)
     except Exception as error:   # noqa: BLE001 (best effort by contract: see the module text)
         text = (f'Windows crashes for {game.name}\n'
                 f'The Windows event log could not be read: {error}. Collection continued without it.\n')

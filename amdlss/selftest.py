@@ -145,6 +145,14 @@ def check_streamline():
         assert games.Game(name='x', streamline=False).framegen_reason == games.NO_DLSSG
 
 
+def check_hang_and_unreal():
+    hang = {'time': '2026-10-13 14:20:11', 'id': 1002, 'props': ['One.exe', '1.0', 'E:\\One.exe']}
+    assert crashes.parse_event(hang, ['One.exe'])['name'] == 'AppHang'
+    unreal = games.Game(name='U', exe_folder='/g/U/Proj/Binaries/Win64')
+    assert crashes.unreal_project(unreal, windows=False) == ('Proj', '/g/U/Proj')
+    assert crashes.running_text(games.Game(name='U', folder='E:\\U'), True, processes=['E:\\U\\U.exe']) == 'yes'
+
+
 def check_reports():
     files = {'G/exe-folder/helixsr.log': 'ok\n', 'system.txt': 'x'}
     sample = {'app': 'AMDLSS', 'version': '0.1.0', 'game': 'G', 'files': files}
@@ -295,7 +303,7 @@ def check_covers():
 
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_history_and_crashes, check_streamline, check_reports,
+                  check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
                   check_helixsr, check_running_game, check_zip_slip, check_update, check_identify, check_covers):
         check()
         print(f'ok  {check.__name__}')

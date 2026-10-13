@@ -19,7 +19,7 @@ GOOD = {'app': 'AMDLSS', 'version': '0.1.0-beta.9', 'game': 'Fake Game', 'files'
 GOOD_NAMES = ['files.txt', 'system.txt', 'amdlss-install.log', 'Far-Cry-6/exe-folder/OptiScaler.log',
               'Far-Cry-6/exe-folder/HelixSR/helixsr-install.json', 'fsr-dll-folder-2/helixsr.ini', 'a/b/c.LOG',
               'a/b/c/d/e.log', 'Game/history/20261013-141500/exe-folder/HelixSR/helixsr.log', 'a/b/c/d/e/f/g.log',
-              'crashes.txt', 'Game/crashes.txt', 'Game/proton.log', 'a' * 156 + '.log']
+              'crashes.txt', 'Game/crashes.txt', 'Game/proton.log', 'Game/unreal-latest.log', 'a' * 156 + '.log']
 BAD_NAMES = ['', '../x.log', 'a/../x.log', '/etc/passwd.txt', '.hidden.log', 'a/.x.log', 'a/./x.log', 'a//x.log',
              'a/b/c/d/e/f/g/h.log', 'a\\b.log', 'C:/x.log', 'x.log ', 'x .log', 'x.log.', 'x..log', 'noext', '.log',
              'x.exe', 'x.dll', 'x.log.exe', 'x.sh', 'x.zip', 'x.log/', 'a./b.log', 'nul.log', 'COM1.txt', 'a/aux.ini',
@@ -231,10 +231,29 @@ def test_one_report_asks_windows_for_crashes_once_for_every_game(fake):  # noqa:
     second = add_game(fake, 'Second Game', log='x')
     (Path(second.folder) / 'Second.exe').write_bytes(b'MZ')
     report = reports.build_payload([fake[0], second], fake[1], fake[2], INFO, windows=True, crash_run=run)
-    assert len(asked) == 1 and 'Get-WinEvent -FilterHashtable' in asked[0][4]
+    events = [command for command in asked if 'Get-WinEvent -FilterHashtable' in command[4]]
+    assert len(events) == 1 and len(asked) == 2   # the event log once, and the process list once (is it running?)
     assert 'faulting module: dxgi.dll' in report['files']['Fake-Game/crashes.txt']
     assert 'No matching crash was recorded' in report['files']['Second-Game/crashes.txt']
     assert 'listed only (not sent)' in report['files']['Fake-Game/crashes.txt']
+
+
+def test_an_unreal_game_sends_the_tail_of_its_log_and_its_crash_folders_under_names_the_receiver_accepts(fake):  # noqa: F811
+    game, helixsr_folder, data_dir = fake[0], fake[1], fake[2]
+    exe = Path(game.folder) / 'Proj' / 'Binaries' / 'Win64'
+    exe.mkdir(parents=True)
+    (exe / 'Proj-Win64-Shipping.exe').write_bytes(b'MZ')
+    saved = Path(game.folder) / 'Proj' / 'Saved'
+    (saved / 'Logs').mkdir(parents=True)
+    (saved / 'Crashes' / 'UECC-Windows-ABC_0000').mkdir(parents=True)
+    (saved / 'Logs' / 'Proj.log').write_text('LogInit: started\nFatal error at C:\\Users\\' + USER + '\\x\n')
+    game.exe_folder = str(exe)
+    report = reports.build_payload([game], helixsr_folder, data_dir, INFO, crash_run=lambda command: '')
+    log = report['files']['Fake-Game/unreal-latest.log']
+    assert 'Fatal error at C:\\Users\\<user>\\x' in log and USER not in log
+    assert 'UECC-Windows-ABC_0000' in report['files']['Fake-Game/crashes.txt']
+    assert all(reports.name_problem(name) is None for name in report['files'])
+    assert 'unreal-latest.log' in logs.confirm_text(game, data_dir) and 'unreal-latest.log' in logs.contents(game, data_dir)
 
 
 def test_folder_names_follow_the_zip_slug_and_are_unique_and_valid():

@@ -347,3 +347,76 @@ def test_the_install_record_names_the_route_for_the_latest_run_and_for_a_kept_on
 def test_frame_generation_yes_cites_the_counts_not_an_arbitrary_log_line():
     run = page.timeline_of({'G/exe-folder/OptiScaler.log': OPTI_RUN + '[14:16:40.000000] [I] Upscaling paused!\n'})
     assert run['framegen']['evidence'] == '1 frames delivered by FSR frame generation, 1 activation'
+
+
+# --- a game that ends without a destroy line and without an Event 1000: hang, Unreal crash folder, still running --
+
+# A drop-in run whose HelixSR log just stops (AION2 in GZ633MDH: no destroy line, no Windows record).
+STOPS = HELIX_RUN.rsplit('[14:19:36', 1)[0]
+HEADER = ('Windows crashes for One (Application log, last 14 days, Event ID 1000, 1001 and 1002)\n'
+          'Game executables checked: One.exe\nRunning when collected: {running}\n\n')
+HANG_LINE = ('2026-10-13 14:19:50 | One.exe | faulting module: unknown | module version:  | exception:  | offset:  | '
+             'Event ID: 1002 | module path:  | event name: AppHang\n')
+UE_LINE = ('Unreal Engine crash folder | 2026-10-13 14:19:40 | UECC-Windows-ABC_0000 | 3 files, 1234 bytes | '
+           'C:\\Users\\<user>\\AppData\\Local\\Proj\\Saved\\Crashes\n')
+
+
+def stops_with(crash_text, date='2026-10-13'):
+    return page.timeline_of({'G/exe-folder/helixsr.log': STOPS}, 'Latest run', date, page.parse_crashes(crash_text),
+                            drop_in=True)
+
+
+def test_a_hang_event_answers_yes_hang():
+    run = stops_with(HEADER.format(running='no') + HANG_LINE)
+    assert run['crashed']['verdict'] == 'Yes' and 'the game stopped responding (hang)' in run['crashed']['evidence']
+    assert '(Event ID 1002)' in run['crashed']['evidence']
+
+
+def test_an_unreal_crash_folder_in_the_window_of_the_run_answers_yes_and_one_outside_it_is_only_a_note():
+    run = stops_with(HEADER.format(running='no') + UE_LINE)
+    assert run['crashed']['verdict'] == 'Yes' and 'Unreal Engine recorded a crash' in run['crashed']['evidence']
+    assert 'UECC-Windows-ABC_0000' in run['crashed']['evidence']
+    older = stops_with(HEADER.format(running='no') + UE_LINE.replace('2026-10-13', '2026-10-09'))
+    assert older['crashed']['verdict'] == 'Unknown'   # a log that stops, and a crash folder from days before
+    assert 'Unreal Engine and Windows also recorded 1 crash(es)' in older['crash_note']
+
+
+def test_a_game_still_running_when_the_report_was_made_did_not_crash():
+    run = stops_with(HEADER.format(running='yes'))
+    assert run['ended'] == 'running' and run['crashed'] == {'verdict': 'No',
+                                                            'evidence': 'still running when the report was made'}
+    assert 'How it ended: it had not ended, the game was still running when the report was made' in \
+        '\n'.join(page.timeline_lines(run))
+    assert page.status_of({'install': 'drop-in DLL'}, [], [], {'nul': False, 'present': True, 'clean': False},
+                          running=True) == ('Working', 'green')
+    # not running and no record stays Unknown, as before; a hang beats "running" if both are there
+    assert stops_with(HEADER.format(running='no'))['crashed']['verdict'] == 'Unknown'
+    assert stops_with(HEADER.format(running='yes') + HANG_LINE)['crashed']['verdict'] == 'Yes'
+    assert page.parse_crashes(HEADER.format(running='unknown'))['running'] is None
+    assert page.parse_crashes(CRASHES)['running'] is None   # a crashes.txt from before this line existed
+
+
+def test_the_reader_reads_back_what_crashes_py_writes_for_an_unreal_game(tmp_path):
+    from amdlss import crashes, games
+    root = tmp_path / 'UE'
+    exe = root / 'Proj' / 'Binaries' / 'Win64'
+    crash = root / 'Proj' / 'Saved' / 'Crashes' / 'UECC-Windows-ABC_0000'
+    exe.mkdir(parents=True)
+    crash.mkdir(parents=True)
+    (exe / 'Proj.exe').write_bytes(b'MZ')
+    (crash / 'a.dmp').write_bytes(b'x')
+    game = games.Game(name='UE', folder=str(root), exe_folder=str(exe))
+    text = crashes.crashes_text(game, windows=True, run=lambda command: '', dumps_dir=tmp_path / 'none',
+                                wer_folders=[], processes=['C:/Windows/explorer.exe'], local=tmp_path / 'nowhere')
+    read = page.parse_crashes(text)
+    [entry] = read['entries']
+    assert entry['unreal'] and entry['exe'] == 'UECC-Windows-ABC_0000' and read['running'] is False
+    assert read['dumps'] == [] and read['present']
+    report = {'app': 'AMDLSS', 'version': '0.1.0-beta.13', 'game': 'UE', 'files': {
+        'system.txt': 'AMDLSS 0.1.0-beta.13\nCollected: ' + entry['when'][:10] + ' 23:59:00\n',
+        'games.txt': 'UE/ | UE | x | install: drop-in DLL | HelixSR: 1.9.0\n',
+        'UE/exe-folder/helixsr.log': '[00:00:01.000] create: max render 1920x1080 -> upscale 1920x1080, flags 0x19\n'
+                                     '[00:00:02.000] dispatch 0: render 1920x1080 -> 1920x1080, jitter 0,0\n',
+        'UE/crashes.txt': text}}
+    rendered = page.render_report(page.analyse(report, 'ABCD2345'))
+    assert 'Unreal Engine recorded a crash' in rendered and 'UECC-Windows-ABC_0000' in rendered

@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import VERSION, framegen, logs
+from . import VERSION, framegen, helixsr, logs
 
 DEFAULT_LOGS_URL = 'https://amdlss-reports.amdlss-reports.workers.dev'   # the receiver's address (receiver/README.md)
 REPORT_URL = DEFAULT_LOGS_URL   # where Send logs uploads; empty: sending is not set up in this build
@@ -37,7 +37,8 @@ MAX_ANSWER = 64 << 10
 MAX_LIST = 1 << 20        # the report list: one short entry per stored report
 EXTENSIONS = ('log', 'ini', 'json', 'txt')
 KEYS = {'app', 'version', 'game', 'files'}
-OWN_FILES = ('files.txt', logs.SESSION_LOG, logs.CRASHES)   # kept first when there are more files than MAX_FILES
+# kept first when there are more files than MAX_FILES
+OWN_FILES = ('files.txt', logs.SESSION_LOG, logs.CRASHES, logs.crashes.UNREAL_LOG)
 CODE = re.compile(r'[0-9A-HJKMNP-TV-Z]{8}')
 # A name part is letters, digits, "_", "." and "-", and it neither starts nor ends with ".".
 SEGMENT = re.compile(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?')
@@ -263,10 +264,12 @@ def build_payload(games, helixsr_folder, data_dir, info=None, windows=None, cras
     redact, folders = logs.redactor(), folder_names(games)
     held = [logs.system_evidence(helixsr_folder, redact, info),
             ('games.txt', redact(games_text(games, folders)).encode('utf-8'))]
-    shared = logs.crashes.query_events(crash_run) if logs.host.is_windows(windows) else None
+    on_windows = logs.host.is_windows(windows)
+    shared = logs.crashes.query_events(crash_run) if on_windows else None
+    processes = helixsr.process_paths(crash_run) if on_windows else None
     for game, folder in zip(games, folders):
         held += [(f'{folder}/{name}', data)
-                 for name, data in logs.game_evidence(game, data_dir, redact, windows, crash_run, shared)]
+                 for name, data in logs.game_evidence(game, data_dir, redact, windows, crash_run, shared, processes)]
     held = [(name, data) for name, data in held if not name_problem(name)]
 
     def rank(item):   # stable within a rank: AMDLSS's own writes, the current logs, then kept history
@@ -291,8 +294,10 @@ def confirm_text(games, data_dir):
     lines += ['', "Per game: the HelixSR, OptiScaler and fakenvapi logs and settings found in the game's folders, "
               'files.txt (names, sizes, dates and versions of its .dll and .exe files), crashes.txt (on Windows, '
               "Windows' record of this game's crashes and the names of its crash dumps, never the dumps "
-              'themselves), the logs AMDLSS kept before earlier installs (history/), and, when AMDLSS installed '
-              'into it, what AMDLSS printed then. Once for all: system.txt (the system, graphics card and driver, CPU, RAM, '
+              'themselves; for an Unreal Engine game also its crash folder names and the last 200 lines of its newest '
+              'log, unreal-latest.log), the logs AMDLSS kept before earlier installs (history/), and, when AMDLSS '
+              'installed into it, what AMDLSS printed then. Once for all: system.txt (the system, graphics card and '
+              'driver, CPU, RAM, '
               'the AMDLSS and HelixSR versions) and games.txt (each game, its folder and install mode).',
               '', 'Your user name is replaced by <user> everywhere. Nothing else from your user folder is included. '
               'The server keeps the report for 30 days and then deletes it. You get a short code to paste in the '
