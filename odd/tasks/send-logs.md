@@ -28,8 +28,10 @@ OptiScaler installed, a helixsr/optiscaler/fakenvapi log, or an AMDLSS session l
 - [x] T2 client `ReportClient` + Send logs button + tests (delegated, Muse): 234 pass, 3 skipped (was 204 + 3)
 - [x] T3 fetch CLI with quarantine + tests (delegated, Muse): 254 pytest pass, 3 skipped
 - [x] T4 deployed on Workers KV (R2 needs a card); live smoke test: good report accepted, `.exe` and `../` refused, no token 401; released v0.1.0-beta.9 (`0f0da78`)
-- [x] T5 receiver list: `GET /reports` (Bearer token, newest first) from KV metadata (`created`, app version, game count) stored on put; `node --test receiver/`, 23 pass. Not deployed yet
+- [x] T5 receiver list: `GET /reports` (Bearer token, newest first) from KV metadata (`created`, app version, game count) stored on put; `node --test receiver/`, 23 pass. Deployed 2026-10-13 (version 6bf5ada3); no token gives 401
 - [x] T6 reader: `tools/amdlss-logs.py sync` downloads every new report and writes `~/amdlss-reports/index.html` plus one `report.html` per report (`tools/report_html.py` parses, everything escaped); the desktop entry syncs and opens the index, no code entry
 - [x] T7 AMDLSS: refuse Install/Update/Remove while the game runs (process check in `amdlss/helixsr.py`), and say so in plain words when a file is locked (PermissionError); 278 pytest pass, 3 skipped
+- [x] T8 Windows suite green under wine (`63404f3`): test fixtures wrote logs in text mode (CRLF), the /proc branch compared Windows-spelled paths, the report reader warns on Windows; 272 passed + 10 skipped on Windows, 279 + 3 on Linux; beta.9 users not affected
+- [x] T9 released v0.1.0-beta.10 (exe c562d2be, linux 2dae7a57); live `amdlss-logs sync` downloaded 2 reports and wrote the index
 
 Route: delegated direct (3+ non-trivial files).
