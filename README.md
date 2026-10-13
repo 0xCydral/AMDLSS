@@ -112,7 +112,7 @@ AMDLSS needs only Python's standard library and Tk to run (Pillow too, for the g
 bash packaging/build.sh
 ```
 
-The script makes a private virtual environment in `out/pyenv`, installs PyInstaller and Pillow there, and freezes `AMDLSS.pyw` into one windowed exe (about 12 MB). It prints the SHA-256 of the exe. `packaging/make_icon.py` redraws `amdlss.ico` (needs Pillow).
+The script makes a private virtual environment in `out/pyenv`, installs PyInstaller and Pillow there, and freezes `AMDLSS.pyw` into one windowed exe (about 19 MB with Pillow). It prints the SHA-256 of the exe. `packaging/make_icon.py` redraws `amdlss.ico` (needs Pillow).
 
 ## Tests
 
