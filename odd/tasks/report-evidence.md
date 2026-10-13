@@ -49,20 +49,27 @@ Decisions:
 
 ## Tasks
 
-- [ ] T1 receiver + client: report names of up to 7 parts (`receiver/validate.js`, `amdlss/reports.py`, tests
-  on both sides agree)
-- [ ] T2 reader: session timeline per run in `tools/report_html.py` (Yes/No/Unknown for HelixSR ran, frame
+- [x] T1 receiver + client: report names of up to 7 parts (`receiver/validate.js`, `amdlss/reports.py`, tests
+  on both sides agree, `MAX_SEGMENTS` compared across the seam)
+- [x] T2 reader: session timeline per run in `tools/report_html.py` (Yes/No/Unknown for HelixSR ran, frame
   generation worked, game crashed; started, route and resolution, dispatch and toggle counts, VRAM, errors,
   how it ended), the same lines in `amdlss-logs.py fetch`, a prominent Windows crashes section that names the
   faulting module in plain words, and the Proton log note for Linux reports; every byte of report text stays
-  escaped
-- [ ] T3 history: preserve a game's logs before install, update and remove, prune to the caps, and carry the
-  newest 5 snapshots in Collect logs and Send logs (a game with only history left still reports)
-- [ ] T4 crashes: `amdlss/crashes.py` collects `crashes.txt` per game (Windows event log behind the platform
+  escaped. One crash query is shared across a whole report, not one per game
+- [x] T3 history: preserve a game's logs before install, update and remove (`HelixSR._act` calls the injected
+  preserve hook, wired in `app.py`), prune to the caps, and carry the newest 5 snapshots in Collect logs and
+  Send logs (a game with only history left still reports)
+- [x] T4 crashes: `amdlss/crashes.py` collects `crashes.txt` per game (Windows event log behind the platform
   switch, failures never block collection), lists minidumps and WER folders without uploading them, and
   collects the Proton log on Linux; everything redacted
-- [ ] T5 checks: Linux pytest, Windows pytest under wine, receiver `node --test`, `--selftest`, and the real
-  report TFTKA6A3 regenerated into a temp folder showing frame generation working in Assassin's Creed Shadows
-  and 10512 clean HelixSR frames in Monster Hunter Stories 3
+- [x] T5 checks (2026-10-13): Linux 304 passed and 3 skipped (baseline 279 and 3); Windows under wine 297
+  passed and 10 skipped (baseline 272 and 10); receiver 23 pass; `--selftest` exit 0 with the new
+  `check_history_and_crashes`; the real report TFTKA6A3 regenerated into `/tmp/TFTKA6A3-proof/` reads
+  Assassin's Creed Shadows as frame generation working (2757 dispatch lines, 2214 delivered, 14 activates and
+  16 deactivates, 12 VRAM warnings with a 7.34 GB peak, clean shutdown 14:16:39, the allocator error named)
+  and Monster Hunter Stories 3 as 10512 HelixSR frames at 1920x1080 ending in a destroy line. Live
+  `Get-WinEvent` on real Windows stays unexercised (wine has no event log; the query and its parsing are
+  covered through the runner seam). The receiver change is committed, not deployed: deploy it before or with
+  the client release that first sends history files
 
 Route: delegated direct (multi-file feature).

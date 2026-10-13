@@ -18,7 +18,8 @@ HelixSR's own installer (`amdlss/helixsr.py`) and shows the result. Repo: `~/Pro
 | `amdlss/helixsr.py` | Downloads, builds and runs HelixSR's installer; the two install routes |
 | `amdlss/games.py`, `identify.py` | Finding games and what upscaler each one uses |
 | `amdlss/framegen.py` | The OptiScaler frame generation switch (`OptiScaler.ini`) |
-| `amdlss/logs.py` | What a game's logs are; the Desktop zip (Collect logs) |
+| `amdlss/logs.py` | What a game's logs are; the Desktop zip (Collect logs); kept log history |
+| `amdlss/crashes.py` | Windows crash records (`crashes.txt`), crash dump listings, the Proton log |
 | `amdlss/reports.py` | Send logs: payload rules, trimming, `ReportClient` |
 | `amdlss/update.py` | Self-update from GitHub releases |
 | `receiver/` | Cloudflare Worker that stores sent reports (Workers KV) |
@@ -37,6 +38,9 @@ The two install routes matter in every bug report:
 
 Install, Update and Remove first check that no process runs from inside the game's folder (Windows: PowerShell
 process paths; Linux: `/proc`, Proton included; `helixsr.running_from`) and refuse in plain words when one does.
+Before the change itself runs, the game's current logs are copied to `history/<game>/<stamp>/` in the AMDLSS
+data folder (`HelixSR.preserve`, wired in `app.py` to `logs.preserve_history`), so replacing a route cannot
+delete the evidence of the run before it.
 A failed run whose output names a locked file (`PermissionError`, `WinError 5`, `Errno 13`, access denied in
 English or Spanish) reads the same way in the window; the raw output stays in the game's `amdlss-install.log`.
 
@@ -48,8 +52,12 @@ they paste `AMDLSS report <CODE>` in the chat.
 On the owner's PC, open **AMDLSS Logs** from the app menu (`tools/amdlss-logs-gui.sh`): it syncs (downloads every
 report not on disk yet) and opens `~/amdlss-reports/index.html`, newest first with a red/amber/green badge per
 game. Each report links to its `report.html`: the system as a table, one card per game with a plain-words status,
-what AMDLSS did, the real problems (OptiScaler `[E]` lines, HelixSR errors, traceback ends; .ini files, comments
-and known noise left out), HelixSR's evidence, and the raw files collapsed below. No code to paste. The read token
+the three answers for the latest run (did HelixSR run, did frame generation work, did the game crash: Yes, No or
+Unknown, each with its evidence line), a session timeline per run (kept history runs included: start, route and
+resolution, frame generation dispatch and activate counts, VRAM warnings and peak, how the run ended), the
+Windows crashes with the faulting DLL named in plain words, what AMDLSS did, the real problems (OptiScaler `[E]`
+lines, HelixSR errors, traceback ends; .ini files, comments and known noise left out), HelixSR's evidence, and
+the raw files collapsed below. `fetch` prints the same timeline in plain text. No code to paste. The read token
 is asked once and kept in `~/.config/amdlss-logs/token` (0600); never read that file. `sync` reads the token from
 `AMDLSS_LOGS_TOKEN` or that file, and the address from `AMDLSS_LOGS_URL` or the live receiver. From a shell:
 
@@ -73,8 +81,13 @@ Report layout:
 system.txt                 OS, GPU and driver, CPU, RAM, AMDLSS and HelixSR versions
 games.txt                  one line per game: folder, install mode, HelixSR version, frame generation on/off
 <Game>/files.txt           every .dll/.exe in the game's folders: size, date, version, HelixSR's or not
+<Game>/crashes.txt         Windows Event 1000/1001 for the game's exes (faulting DLL, exception, offset);
+                           crash dumps and WER folders by name only; on Linux the Proton log note
+<Game>/proton.log          Linux only, when ~/steam-<appid>.log exists (PROTON_LOG=1)
 <Game>/amdlss-install.log  what AMDLSS printed when it installed
 <Game>/exe-folder/...      helixsr.log, OptiScaler.log/.ini, fakenvapi.log/.ini
+<Game>/history/<stamp>/..  the same logs as kept right before an earlier install, update or remove
+                           (newest 5 runs sent; 10 runs and 32 MiB per game kept on the tester's PC)
 ```
 
 A large log is cut to its tail with a note on top; each game gets a fair share of the 8 MiB.
@@ -103,6 +116,8 @@ Anything that is not text is not an AMDLSS log: stop and say so.
 | `files.txt` with an OptiScaler `dxgi.dll` while `games.txt` says `install: none` | Someone else's OptiScaler install in that folder; `report.html` names it as not AMDLSS's, with its version |
 | `files.txt` | Which DLL versions are really there, and whether each upscaler DLL is HelixSR's |
 | `fakenvapi.log` `GetLatency: Not enough data` | Normal |
+| `OptiScaler.log` `FSRFG_Dx12::DispatchCallback` lines, `::Activate`/`::Deactivate`, `Exceeded VRAM budget`, `MenuCommon::WndProc IsShuttingDown = true` | What the timeline counts: delivered frame generation frames (plain `::Dispatch` lines are skipping or errors), toggles, VRAM pressure, and the clean-shutdown marker. No marker and no HelixSR `destroy`: the log just stops |
+| `crashes.txt` | Which DLL Windows blames. A `dxgi.dll` in the game folder is OptiScaler; `kernelbase.dll`/`ntdll.dll` usually carry another DLL's fault. A log that just stops with no Event 1000 stays Unknown: crash and kill look alike |
 
 Before blaming HelixSR for a performance drop, ask whether another game was running: on 2026-10-13 a "75 to 55 FPS"
 report turned out to be AC Shadows still open in the background.
@@ -115,7 +130,8 @@ node --test receiver/
 python AMDLSS.pyw --selftest
 ```
 
-All must pass before a release (278 Python tests, 3 skipped, and 23 receiver tests as of the sync reader). Tests
+All must pass before a release (304 Python tests and 3 skipped on Linux, 297 and 10 skipped on Windows under
+wine, and 23 receiver tests as of the report evidence work). Tests
 that need the unconfigured log path set `reports.REPORT_URL = ''` themselves; the shipped value is the live
 address.
 
@@ -146,7 +162,8 @@ Windows Defender sometimes flags a fresh unsigned exe; testers have to allow it.
 
 `receiver/worker.js` on Cloudflare Workers, storage in Workers KV (R2 needed a card on the account). Rules are in
 `receiver/validate.js` and mirrored in `amdlss/reports.py`; a pytest test runs both against the same cases, so change
-both together. Limits: 8 MiB body, 200 files, names of up to 5 parts ending in `.log/.ini/.json/.txt`, text without
+both together. Limits: 8 MiB body, 200 files, names of up to 7 parts ending in `.log/.ini/.json/.txt` (a kept
+history file needs 6), text without
 control characters, 10 uploads per minute per IP. Only the re-validated object is stored, never the raw body.
 Uploads also store KV metadata (arrival time, app version, game count); `GET /reports` answers the codes and
 arrival times, newest first, to the read-token holder only. That list is what `sync` is built on.

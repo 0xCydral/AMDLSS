@@ -64,10 +64,12 @@ The zip answers four questions: did HelixSR load, did the game call DLSS or FSR 
 - the logs: `helixsr.log` and `helixsr_loader.log` (HelixSR's `HelixSR` folder next to the game's .exe, or next to the game's FSR DLL for the drop-in), `OptiScaler.log`, `fakenvapi.log`;
 - the settings and install record: `OptiScaler.ini`, `fakenvapi.ini`, `helixsr.ini`, `helixsr-install.json`;
 - `files.txt`: name, size, date and file version of every .dll and .exe in those folders, and whether each upscaler DLL is HelixSR's;
+- `crashes.txt`: on Windows, what the Windows Application log recorded about this game's crashes in the last 14 days (which DLL faulted, the exception code and offset), plus the names, sizes and dates of its crash dumps (the dumps themselves never leave your PC); on Linux, whether a Proton log (`~/steam-<appid>.log`, written with `PROTON_LOG=1` in the game's Steam launch options) was found, and that log sits beside it as `proton.log` when present;
+- `history/`: the logs AMDLSS kept right before earlier installs, updates and removes of this game, so the run that crashed survives a switch of route;
 - `system.txt`: Windows version, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions and `helixsr_setup.json`;
 - `amdlss-install.log`: what AMDLSS printed when it installed into that game.
 
-Your Windows user name is replaced by `<user>` in every path and text, and nothing else from your user folder is read. Collect logs uploads nothing. A log larger than 16 MB goes in as its last 16 MB.
+Your Windows user name is replaced by `<user>` in every path and text. Apart from the crash record above (crash dump names are read, dumps are not), nothing else from your user folder is read. Collect logs uploads nothing. A log larger than 16 MB goes in as its last 16 MB. Before an install, update or remove changes a game, AMDLSS copies its current logs into its own data folder (`history/`, at most 10 runs and 32 MB per game); the newest 5 runs ride along in Collect logs and Send logs.
 
 **Send logs** (next to Rescan, or right-click a game) does the same for every game that has an install or a log, in one upload to the AMDLSS log server, and shows a code such as `AMDLSS report K7M2Q9XD`; it is also copied to the clipboard. Paste it in the chat. Each game's files sit in a folder named after the game, `system.txt` and a `games.txt` (name, folder, install mode and HelixSR version of each game) sit at the top. The dialog lists the games and the file count of each before anything leaves your PC. Only text files go up (at most 8 MiB; the largest logs of each game are cut to their last lines to fit) and the server deletes a report after 30 days. The server is in `receiver/`; `tools/amdlss-logs.py fetch <code>` downloads a report.
 
