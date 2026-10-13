@@ -27,13 +27,15 @@ MAX_LOG_LINES = 3000
 COVER_WORKERS = 4
 
 
-def card_of(game, steam_covers=None):
-    """What a game's card shows: the name, what it supports, and the state (or why it is not offered), plus its cover
-    when one is already on disk."""
+def card_of(game, steam_covers=None, update=False):
+    """What a game's card shows: the name, what it supports, and the state (or why it is not offered; 'update' when
+    the game runs an older HelixSR), plus its cover when one is already on disk."""
     supports = game.supports.replace(', ', ' / ') if game.fsr31 or game.inputs else ''
     if game.reason:
         return Card(game.name, supports, game.reason, 'none', True)
     cover = steam_covers.cached(game) if steam_covers else None
+    if update:
+        return Card(game.name, supports, 'update', 'update', False, cover)
     return Card(game.name, supports, game.state_text, 'ok' if game.installed else 'none', False, cover)
 
 
@@ -51,6 +53,8 @@ class App:
         self.extras = settings.load_folders(self.data_dir)
         self.helixsr_folder = None
         self.helixsr = None        # a HelixSR once its network is built
+        self.helixsr_version = ''  # its version, read once per refresh
+        self.helixsr_stale = False  # built, but older than the pinned release: the button updates it
         self.games, self.shown = [], []
         self.failed = {}            # folder added by hand -> why it was not offered, until the next Rescan
         self.busy = False
@@ -324,7 +328,8 @@ class App:
     def update_buttons(self):
         game, idle = self.selected(), not self.busy
         ready = idle and self.helixsr is not None
-        self.install_button.configure(state='normal' if idle and self.helixsr is None else 'disabled')
+        self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale)
+                                      else 'disabled')
         self.rescan_button.configure(state='normal' if ready else 'disabled')
         self.add_button.configure(state='normal' if ready else 'disabled')
         self.game_install.configure(state='normal' if ready and game and game.can_install else 'disabled',
@@ -402,8 +407,9 @@ class App:
 
     # ---- HelixSR --------------------------------------------------------------------------------
     def refresh_helixsr(self):
-        folder = helixsr.locate(self.data_dir, os.environ.get('AMDLSS_HELIXSR', ''))
-        self.helixsr_folder, self.helixsr = folder, None
+        override = os.environ.get('AMDLSS_HELIXSR', '')
+        folder = helixsr.locate(self.data_dir, override)
+        self.helixsr_folder, self.helixsr, self.helixsr_stale = folder, None, False
         if folder is None:
             self.set_status('✗ HelixSR is not installed. Install it once, then pick your games.')
             self.install_button.configure(text='Install HelixSR')
@@ -413,8 +419,10 @@ class App:
             self.install_button.configure(text='Build HelixSR')
         else:
             self.helixsr = helixsr.HelixSR(folder)
-            self.set_status(f'✓ HelixSR {self.helixsr.version or "?"} is installed and built ({short_path(folder)})')
-            self.install_button.configure(text='Install HelixSR')
+            self.helixsr_version = self.helixsr.version
+            self.helixsr_stale = not override and helixsr.older(self.helixsr_version, helixsr.VERSION)
+            self.set_status(self.helixsr_text())
+            self.install_button.configure(text='Update HelixSR' if self.helixsr_stale else 'Install HelixSR')
             self.refresh_games()
         self.update_buttons()
 
@@ -493,7 +501,7 @@ class App:
                 tags = ('installed',) if game.installed else ('warn',) if game.anticheat else ()
                 values = (game.name, game.supports, game.state_text, notes)
             self.tree.insert('', 'end', iid=str(number), tags=tags, values=values)
-        self.gallery.set_items(card_of(game, self.covers) for game in self.shown)
+        self.gallery.set_items(card_of(game, self.covers, self.outdated(game)) for game in self.shown)
         self.fetch_covers()
         if self.helixsr is None:
             self.empty.configure(text='Install HelixSR first, then your games show up here.')
@@ -622,8 +630,17 @@ class App:
 
     def refresh_helixsr_status(self):
         if self.helixsr:
-            self.set_status(f'✓ HelixSR {self.helixsr.version or "?"} is installed and built '
-                            f'({short_path(self.helixsr_folder)})')
+            self.set_status(self.helixsr_text())
+
+    def helixsr_text(self):
+        version = self.helixsr_version or '?'
+        if self.helixsr_stale:
+            return f'✓ HelixSR {version} is installed. HelixSR {helixsr.VERSION} is available.'
+        return f'✓ HelixSR {version} is installed and built ({short_path(self.helixsr_folder)})'
+
+    def outdated(self, game):
+        """True when `game` runs an older HelixSR than the one AMDLSS runs (either version unknown: no)."""
+        return game.installed and helixsr.older(game.helixsr, self.helixsr_version)
 
     # ---- covers ---------------------------------------------------------------------------------
     def fetch_covers(self):
@@ -652,7 +669,7 @@ class App:
 
     def redraw_cards(self):
         self.cover_redraw = None
-        self.gallery.update(card_of(game, self.covers) for game in self.shown)
+        self.gallery.update(card_of(game, self.covers, self.outdated(game)) for game in self.shown)
 
     def covers_changed(self):
         settings.save_covers(self.data_dir, self.covers_var.get())

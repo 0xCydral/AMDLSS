@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Everything AMDLSS does with HelixSR lives in this file, and nothing in it changes HelixSR.
 
-HelixSR (https://github.com/lonewolf0622/HelixSR, closed-source freeware DLL, Apache-2.0 setup scripts) runs NVIDIA's
-DLSS network as Direct3D 12 compute on AMD cards. This module:
+HelixSR (https://github.com/lonewolf0622/HelixSR, closed-source freeware DLL; its setup scripts are Apache-2.0 up to
+1.8.1 and under the HelixSR Freeware License from 1.9.0) runs NVIDIA's DLSS network as Direct3D 12 compute on AMD
+cards. This module:
 
   - fetches the pinned official release zip (resumable, SHA-256 checked, zip-slip checked) and extracts it;
   - runs HelixSR's own `helixsr-setup.ps1 -Yes` with stdin closed (`-Yes` accepts NVIDIA's DLSS DLL download, so the
@@ -15,7 +16,7 @@ DLSS network as Direct3D 12 compute on AMD cards. This module:
     FSR drop-in there) through a second small bridge that sets what the installer's "o" answer sets and calls the
     installer's own install().
 
-The pinned files are HelixSR 1.8.1. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
+The pinned files are HelixSR 1.9.0. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
 """
 import hashlib
 import http.client
@@ -30,11 +31,11 @@ from pathlib import Path
 
 from . import games as gamelist
 
-VERSION = '1.8.1'
-ZIP_NAME = f'HelixSR-{VERSION}.zip'
+VERSION = '1.9.0'
+ZIP_NAME = 'HelixSR-1.9.0.2.zip'  # the release asset carries a build number the version does not
 ZIP_URL = f'https://github.com/lonewolf0622/HelixSR/releases/download/v{VERSION}/{ZIP_NAME}'
-ZIP_SIZE = 56650779
-ZIP_SHA256 = '5b2d06db22d59aaa8c931fc06d3a8e354e65dde1bef9fce90086542f02d4a627'
+ZIP_SIZE = 56161772
+ZIP_SHA256 = '190bc0a62e467b362eeb47d37e14571e51e5b7d75dca5a70e6eafba9b6797337'
 TOP = f'HelixSR-{VERSION}'  # the folder the zip extracts to
 DLL = 'amd_fidelityfx_dx12.dll'
 BUILT = 'helixsr_setup.json'  # written beside the DLL when the setup has built the network
@@ -67,6 +68,30 @@ def state(g):
 
 def same(a, b):
     return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def installed_version(g):
+    """The HelixSR a game runs: its install record's version, else the one inside the installed DLL; none: ''."""
+    route, own = state(g), (g.target / h.FOLDER if g.target else None)
+    if route == 'none' or (route != 'direct' and own is None):
+        return ''
+    folders = [t.parent for t in g.fsr_targets] if route == 'direct' else [own]
+    dlls = list(g.fsr_targets) if route == 'direct' else [own / h.OWN, g.target / h.CORE]
+    for folder in folders:
+        try:
+            version = json.loads((folder / h.MARKER).read_text()).get('helixsr')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if version:
+            return str(version)
+    for dll in dlls:
+        try:
+            version = h.version_of(dll)
+        except OSError:
+            continue
+        if version != '?':
+            return version
+    return ''
 
 
 # HelixSR's games() drops a game it has no route for. To report those too (index 0: not in HelixSR's list, so never
@@ -119,7 +144,7 @@ rows = [(i, g) for i, g in enumerate(found, 1)] + [(0, g) for g in hidden]
 rows = [{'index': i, 'name': g.name, 'folder': str(g.folder), 'inputs': list(g.inputs), 'fsr31': bool(g.fsr_targets),
          'can_opti': bool(getattr(g, 'can_opti', False)), 'route': g.route or '', 'state': state(g),
          'fsr_targets': [str(t) for t in g.fsr_targets],
-         'exe_folder': str(g.target) if g.target else ''} for i, g in rows]
+         'exe_folder': str(g.target) if g.target else '', 'helixsr': installed_version(g)} for i, g in rows]
 print('@SENTINEL@' + json.dumps(rows))
 '''.replace('@SENTINEL@', gamelist.SENTINEL)
 
@@ -189,12 +214,29 @@ def version_of(folder):
     return match.group(1).decode() if match else ''
 
 
+def version_key(text):
+    """(1, 10, 0) for '1.10.0' so versions compare as numbers; None when `text` is not dotted digits."""
+    return tuple(int(part) for part in text.split('.')) if re.fullmatch(r'\d+(\.\d+)*', text or '') else None
+
+
+def older(version, other):
+    """True when both are versions and `version` is below `other` (1.9.0 < 1.10.0)."""
+    a, b = version_key(version), version_key(other)
+    return a is not None and b is not None and a < b
+
+
 def locate(data_dir, override=''):
-    """The HelixSR folder to use, or None: `override` (AMDLSS_HELIXSR) if it holds the DLL, else <data_dir>/HelixSR-x."""
+    """The HelixSR folder to use, or None: `override` (AMDLSS_HELIXSR) if it holds the DLL, else <data_dir>/HelixSR-x
+    for the pinned x, else the newest older HelixSR-x there (a user who has not updated yet)."""
     for folder in ((Path(override),) if override else ()) + (install_folder(data_dir),):
         if (folder / DLL).is_file():
             return folder
-    return None
+    found = []
+    for folder in Path(data_dir).glob('HelixSR-*'):
+        version = folder.name[len('HelixSR-'):]
+        if older(version, VERSION) and (folder / DLL).is_file():
+            found.append((version_key(version), folder))
+    return max(found)[1] if found else None
 
 
 def helixsr_python():

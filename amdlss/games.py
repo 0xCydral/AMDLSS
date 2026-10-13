@@ -35,6 +35,7 @@ class Game:
     anticheat: list = field(default_factory=list)
     reason: str = ''            # why the list hides this game ('' = ready); set by classify()
     manual: bool = False        # the folder was added by hand with "Add game folder"
+    helixsr: str = ''           # the HelixSR version installed in the game; '' when none or unknown
 
     @property
     def supports(self):
@@ -82,7 +83,8 @@ def from_json(entries):
                           can_opti=bool(entry.get('can_opti')),
                           route='optiscaler' if entry.get('route') is None else str(entry['route']), state=str(entry.get('state') or 'none'),
                           fsr_targets=list(entry.get('fsr_targets') or []),
-                          exe_folder=str(entry.get('exe_folder') or ''), index=int(entry.get('index') or 0)))
+                          exe_folder=str(entry.get('exe_folder') or ''), index=int(entry.get('index') or 0),
+                          helixsr=str(entry.get('helixsr') or '')))
     return games
 
 

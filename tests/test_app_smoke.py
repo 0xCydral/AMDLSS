@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The window builds and fills its list. The root window is withdrawn before anything is drawn, so nothing shows."""
 import json
+import shutil
 import sys
 import time
 
@@ -506,3 +507,71 @@ def test_a_cover_that_arrives_later_is_drawn_without_losing_the_selection(window
         time.sleep(0.02)
     assert image_items(app, 1) and app.gallery.selected == 1 and app.tree.selection() == ('1',)
     assert (window[2] / 'data' / 'covers' / '77.jpg').is_file()
+
+
+def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatch):
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    top, _make, tmp = window
+    one = tmp / 'One'
+    one.mkdir()
+    (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    old = tmp / 'data' / 'HelixSR-1.8.1'
+    old.parent.mkdir(exist_ok=True)
+    make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(old)
+    (old / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    (old / helixsr.BUILT).write_text('{}')
+    monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
+    answers, installs = Answers(), []
+
+    def fake_install(data_dir, consented, progress, on_line):
+        installs.append(consented)
+        new = old.parent / helixsr.TOP
+        shutil.copytree(old, new)
+        (new / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+        return new
+
+    monkeypatch.setattr(helixsr, 'install_helixsr', fake_install)
+    app = App(top, tk, ttk, filedialog, answers, font)
+    pump(top, app)
+    assert app.status.cget('text') == 'HelixSR 1.8.1 is installed. HelixSR 1.9.0 is available.'
+    assert app.install_button.text == 'Update HelixSR' and app.install_button.state == 'normal'
+    assert [r[0] for r in rows_of(app)] == ['One']  # the older HelixSR still lists the games
+    app.install_helixsr()
+    assert answers.asked[0][0] == 'Install HelixSR' and 'HelixSR 1.9.0' in answers.asked[0][1]
+    wait(top, app, lambda: installs and not app.busy)
+    assert installs == [True]
+    assert 'HelixSR 1.9.0 is installed and built' in app.status.cget('text')
+    assert app.install_button.text == 'Install HelixSR' and app.install_button.state == 'disabled'
+    assert (old / helixsr.DLL).is_file()  # the old folder stays on disk
+
+
+def test_a_game_on_an_older_helixsr_shows_update(window, monkeypatch):
+    from tkinter import filedialog, font, ttk
+
+    from amdlss import games
+    from amdlss.app import App
+    top, _make, tmp = window
+    rows = []
+    for name, version in (('One', '1.7.0'), ('Two', '1.8.1'), ('Three', '')):
+        game = tmp / name
+        game.mkdir()
+        (game / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'HELIX stand-in')   # installed: the drop-in
+        (game / 'amd_fidelityfx_upscaler_dx12.original.dll').write_bytes(b'GAME')
+        if version:
+            (game / 'helixsr-install.json').write_text(json.dumps({'helixsr': version}))
+        rows.append({'name': name, 'folder': str(game), 'fsr': True, 'inputs': ['DLSS']})
+    folder = make(tmp, rows)
+    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    (folder / helixsr.BUILT).write_text('{}')
+    monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
+    app = App(top, tk, ttk, filedialog, Answers(), font)
+    pump(top, app)
+    assert [g.helixsr for g in app.games] == ['1.7.0', '1.8.1', '']
+    assert [(c.state, c.kind) for c in app.gallery.cards] == [('update', 'update'), ('FSR drop-in', 'ok'),
+                                                              ('FSR drop-in', 'ok')]  # no version: no hint
+    app.tree.selection_set('0')
+    top.update()
+    assert app.game_install.text == 'Update' and app.game_install.state == 'normal'
+    assert not app.outdated(games.Game(name='x', state='none', helixsr='1.0.0'))  # nothing installed: nothing to update

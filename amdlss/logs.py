@@ -32,7 +32,7 @@ MAX_BYTES = 16 << 20        # a larger file goes in as its last 16 MiB, with a n
 SESSION_LOG = 'amdlss-install.log'
 # What is collected from every place HelixSR or OptiScaler may write to (matched on the lower-cased name).
 PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'optiscaler*.ini', 'fakenvapi*.ini',
-            'helixsr-install*.json')
+            'helixsr-install*.json', 'helixsr.ini')
 # DLLs whose owner is worth saying: the upscalers and the files OptiScaler and HelixSR take their names.
 UPSCALER_PREFIXES = ('amd_fidelityfx', 'helixsr', 'nvngx', 'libxess', 'ffx_', 'fakenvapi', 'optiscaler')
 OPTI_NAMES = ('dxgi.dll', 'winmm.dll', 'version.dll', 'dbghelp.dll', 'd3d12.dll', 'wininet.dll', 'winhttp.dll')

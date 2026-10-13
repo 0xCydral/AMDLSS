@@ -8,10 +8,11 @@ import json
 from pathlib import Path
 
 STUB = '''
-import json, os, sys
+import json, os, re, sys
 from pathlib import Path
 
 DLL = 'amd_fidelityfx_dx12.dll'
+MARKER, FOLDER, OWN, CORE = 'helixsr-install.json', 'HelixSR', 'helixsr.dll', 'nvngx.dll'
 INI = ('[FrameGen]\\r\\n; comment\\r\\nFGInput=auto\\r\\nFGOutput=auto\\r\\n\\r\\n[Other]\\r\\nKey = 1\\r\\n\\r\\n[Log]\\r\\nLogToFile=auto\\r\\nLogLevel=auto\\r\\n')
 
 
@@ -31,7 +32,10 @@ def say(msg):
 
 
 def version_of(dll):
-    return '9.9.9'
+    if not Path(dll).is_file():
+        return '?'
+    found = re.search(rb'\\x00HelixSR (\\d+\\.\\d+\\.\\d+)\\x00', Path(dll).read_bytes()[:4 << 20])
+    return found.group(1).decode() if found else '?'
 
 
 def network_ready(here):

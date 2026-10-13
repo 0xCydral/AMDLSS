@@ -67,6 +67,17 @@ def test_the_zip_holds_every_log_from_every_place(fake):
     assert not list(fake[3].glob('*.part'))
 
 
+def test_helixsr_ini_is_collected_next_to_helixsrs_dlls_and_redacted(fake):
+    game = fake[0]
+    root = Path(game.folder)
+    (root / 'bin' / 'HelixSR' / 'helixsr.ini').write_bytes(f'[Upscaling]\nInt8 = auto\n; C:\\Users\\{USER}\\x\n'.encode())
+    (root / 'plugins' / 'helixsr.ini').write_bytes(b'[Sharpening]\n')
+    held = entries(collect(fake))
+    assert held['exe-folder/HelixSR/helixsr.ini'] == '[Upscaling]\nInt8 = auto\n; C:\\Users\\<user>\\x\n'
+    assert held['fsr-dll-folder/helixsr.ini'] == '[Sharpening]\n'
+    assert 'exe-folder/HelixSR/helixsr.ini' in logs.confirm_text(game, fake[2])
+
+
 def test_files_txt_says_which_dll_is_whose(fake):
     text = entries(collect(fake))['files.txt']
     rows = {line.split()[0]: line for line in text.splitlines() if line.split() and line.split()[0].endswith('.dll')}

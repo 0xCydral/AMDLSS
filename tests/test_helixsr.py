@@ -74,6 +74,18 @@ def test_locate_prefers_the_override_then_the_data_folder(tmp_path):
     assert helixsr.locate(tmp_path, str(tmp_path / 'missing')) == inner
 
 
+def test_locate_falls_back_to_the_newest_older_folder_and_prefers_the_pinned_one(tmp_path):
+    for name in ('HelixSR-1.8.9', 'HelixSR-1.8.10', 'HelixSR-1.10.0', 'HelixSR-1.9.0', 'HelixSR-2.0.0', 'HelixSR-nope',
+                 'HelixSR-1.7.0'):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / helixsr.DLL).write_bytes(b'x')
+    (tmp_path / 'HelixSR-1.8.5').mkdir()   # no DLL: not a HelixSR folder
+    assert helixsr.VERSION == '1.9.0' and helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.0'
+    (tmp_path / 'HelixSR-1.9.0' / helixsr.DLL).unlink()
+    assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.8.10'   # numeric order; the newer ones are above the pin
+    assert helixsr.older('1.9.0', '1.10.0') and not helixsr.older('1.10.0', '1.9.0') and not helixsr.older('?', '1.9.0')
+
+
 def test_installer_command_lines(tmp_path):
     client = helixsr.HelixSR(tmp_path, python='py.exe')
     python = Path('py.exe')
@@ -290,3 +302,18 @@ def test_a_helixsr_without_the_scan_hooks_still_lists_its_games(fake, monkeypatc
     installer.write_text(installer.read_text(encoding='utf-8').replace('def games_from', 'def games_from_unused')
                          .replace('return out + games_from(extra, out)', 'return out'), encoding='utf-8')
     assert [g.name for g in client.list_games()] == ['One', 'Two', 'Three']
+
+
+def test_the_bridge_reports_the_helixsr_version_a_game_runs(fake):
+    client, one, _two = fake
+    assert [g.helixsr for g in client.list_games()] == ['', '', '']   # nothing installed
+    client.install(client.list_games()[0])
+    assert client.list_games()[0].helixsr == ''   # installed, but no record and no version in the stand-in DLL
+    dll = one / 'amd_fidelityfx_upscaler_dx12.dll'
+    dll.write_bytes(b'HELIX\x00HelixSR 1.8.1\x00')
+    assert client.list_games()[0].helixsr == '1.8.1'   # the DLL is the fallback
+    (one / 'helixsr-install.json').write_text('{"helixsr": "1.9.0"}')
+    assert client.list_games()[0].helixsr == '1.9.0'   # the install record wins
+    (one / 'helixsr-install.json').write_text('not json')
+    assert client.list_games()[0].helixsr == '1.8.1'
+    assert games.from_json([{'name': 'x'}])[0].helixsr == ''   # a bridge without the field: no hint

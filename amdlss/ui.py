@@ -332,7 +332,8 @@ class Bar:
         self.job = self.canvas.after(40, self.sweep)
 
 
-# what a card shows: kind 'ok' is a green pill (installed), 'none' a grey one; dim greys a game that is not offered;
+# what a card shows: kind 'ok' is a green pill (installed), 'update' an amber one (an older HelixSR), 'none' a grey
+# one; dim greys a game that is not offered;
 # cover is the path of its cover JPEG when it has one (the tint and stripes otherwise)
 Card = namedtuple('Card', 'name supports state kind dim cover', defaults=(None,))
 
@@ -437,9 +438,9 @@ class Gallery:
                       text=self.look.fit(fonts['small'], card.supports, inner), fill=MUTED)
         text = self.look.fit(fonts['small'], card.state, inner - px(20))
         pill_w = self.look.measure(fonts['small'], text) + px(20)
-        ink = OK if card.kind == 'ok' else MUTED
+        ink = {'ok': OK, 'update': CAUTION}.get(card.kind, MUTED)
         round_rect(c, x + px(12), y + h - px(30), x + px(12) + pill_w, y + h - px(10), px(10), tags=tag,
-                   fill=mix(CARD, OK, .16) if card.kind == 'ok' else mix(CARD, TEXT, .1), outline='')
+                   fill=mix(CARD, ink, .16) if ink != MUTED else mix(CARD, TEXT, .1), outline='')
         c.create_text(x + px(12) + pill_w // 2, y + h - px(20), text=text, font=fonts['small'], fill=ink, tags=tag)
         self.outlines[number] = round_rect(c, x + 1, y + 1, x + w - 1, y + h - 1, r, fill='', outline=LINE, tags=tag)
         for sequence, handler in (('<Button-1>', self.clicked), ('<Double-Button-1>', self.doubled),

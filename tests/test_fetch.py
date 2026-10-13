@@ -90,6 +90,7 @@ def test_consent_text_names_nvidia_and_its_license():
 
 
 def test_pinned_values_are_the_current_release():
-    assert helixsr.ZIP_SIZE == 56650779
-    assert helixsr.ZIP_SHA256 == '5b2d06db22d59aaa8c931fc06d3a8e354e65dde1bef9fce90086542f02d4a627'
-    assert helixsr.ZIP_URL.endswith('/v1.8.1/HelixSR-1.8.1.zip')
+    assert helixsr.ZIP_SIZE == 56161772
+    assert helixsr.ZIP_SHA256 == '190bc0a62e467b362eeb47d37e14571e51e5b7d75dca5a70e6eafba9b6797337'
+    assert helixsr.ZIP_URL.endswith('/v1.9.0/HelixSR-1.9.0.2.zip')
+    assert helixsr.TOP == 'HelixSR-1.9.0'  # the zip extracts to the version, not to the asset's build number

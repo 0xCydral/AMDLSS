@@ -117,6 +117,7 @@ def check_helixsr():
     with tempfile.TemporaryDirectory() as folder:
         (Path(folder) / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00' + b'x' * 100)
         assert helixsr.version_of(folder) == '1.8.1'
+        assert helixsr.older('1.9.0', '1.10.0') and not helixsr.older('1.10.0', '1.9.0') and not helixsr.older('?', '1.9.0')
         assert not helixsr.built(folder)
         (Path(folder) / helixsr.BUILT).write_text('{}')
         assert helixsr.built(folder)

@@ -10,7 +10,7 @@ AMDLSS is unofficial. It is not affiliated with HelixSR, NVIDIA or AMD.
 
 1. Download `AMDLSS.exe` from the [Releases](https://github.com/0xCydral/AMDLSS/releases) page and run it. Windows SmartScreen may warn about an unknown publisher, because the exe is not code-signed. You can also run it from source: `python AMDLSS.pyw` (Python 3 with Tk; tested with 3.14).
 2. Press **Install HelixSR**. AMDLSS asks you first, because HelixSR's setup downloads NVIDIA's DLSS 310.7.0 DLL under NVIDIA's license. If you agree, AMDLSS:
-   - downloads HelixSR 1.8.1 from its own release page and checks the SHA-256,
+   - downloads HelixSR 1.9.0 from its own release page and checks the SHA-256,
    - runs HelixSR's own `helixsr-setup.ps1 -Yes`,
    - shows the setup's output in the log.
 
@@ -19,6 +19,10 @@ AMDLSS is unofficial. It is not affiliated with HelixSR, NVIDIA or AMD.
    The list only offers games AMDLSS can do something with: the game's folder and its .exe folder exist, and the game has an FSR 3.1 DLL or DLSS, XeSS or FSR 2 files (or HelixSR is already installed in it, so Remove stays reachable). The line under the list says how many games are ready and how many are hidden, for example "10 games ready, 26 hidden". Tick **Show all games** to see the hidden ones greyed out with the reason ("not installed" for a Steam leftover, "no DLSS, FSR 3.1 or XeSS found"); they have no Install button. A folder you added by hand that fails the check always stays in the list with its reason; **Forget folder** removes it. HelixSR looks around such a folder (up to four parent folders), which can take a while on a large drive, so AMDLSS does not ask again until you press **Rescan**.
 4. Pick a game and press **Install**. AMDLSS shows what will change and asks you to confirm. When it finishes it tells you what to choose in the game. A game that has both an FSR 3.1 DLL and DLSS, XeSS or FSR 2 files works either way, so before you install you pick **Install as: DLSS (OptiScaler)** or **AMD FSR (drop-in)**. DLSS (OptiScaler) is offered first when the game lists DLSS, so the game's DLSS option is usable; otherwise HelixSR's own default is. This is the same choice as the `o` and `f` answers in HelixSR's own setup. Use the FSR drop-in if OptiScaler gives you trouble in that game.
 5. **Remove** runs HelixSR's own uninstall for that game and puts the original files back.
+
+## Updating from HelixSR 1.8.1
+
+If you built HelixSR 1.8.1 with an earlier AMDLSS, the window keeps using it and the status line says HelixSR 1.9.0 is available. Press **Update HelixSR** to download, check and build 1.9.0. Games that still run 1.8.1 show the pill **update** on their card: pick one and press **Update**; nothing changes in a game until you do. From 1.9.0 each install writes a commented `helixsr.ini` next to HelixSR's DLL in the game (upscaling and sharpening settings), and the uninstall removes it only if you did not edit it. Collect logs includes it. After updating you can delete the old `%LOCALAPPDATA%\AMDLSS\HelixSR-1.8.1` folder.
 
 ## What to choose in the game
 
@@ -46,7 +50,7 @@ If a game looks the same with HelixSR as without it, send a log zip instead of d
 The zip answers four questions: did HelixSR load, did the game call DLSS or FSR at all, did OptiScaler pass the call to HelixSR, did the network run. It holds, for each file that exists:
 
 - the logs: `helixsr.log` and `helixsr_loader.log` (HelixSR's `HelixSR` folder next to the game's .exe, or next to the game's FSR DLL for the drop-in), `OptiScaler.log`, `fakenvapi.log`;
-- the settings and install record: `OptiScaler.ini`, `fakenvapi.ini`, `helixsr-install.json`;
+- the settings and install record: `OptiScaler.ini`, `fakenvapi.ini`, `helixsr.ini`, `helixsr-install.json`;
 - `files.txt`: name, size, date and file version of every .dll and .exe in those folders, and whether each upscaler DLL is HelixSR's;
 - `system.txt`: Windows version, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions and `helixsr_setup.json`;
 - `amdlss-install.log`: what AMDLSS printed when it installed into that game.
@@ -94,12 +98,12 @@ Downloads run in the background, so offline the window opens and works as before
 - It runs HelixSR's own scripts without changing them. Listing games, installing and removing use HelixSR's `helixsr_install.py` with HelixSR's own embedded Python (`install N`, `uninstall N`, `--folder PATH`). A small read-only helper, run in that same Python, reads HelixSR's game scan and returns it as JSON. If the helper fails, AMDLSS parses the installer's printed `list` output instead. `install N` always takes HelixSR's default route, so for the OptiScaler route in a game that also has an FSR 3.1 DLL, a second small helper in the same Python does what the installer's `o` answer does (it sets `route` and `chosen`) and then calls the installer's own `install()`. HelixSR's files are only imported.
 - Before each install or remove, AMDLSS reads the list again and matches the game by folder, so a change in your library cannot send the action to another game.
 - It does not bundle, modify or redistribute HelixSR or any NVIDIA file. This repository holds only AMDLSS's own code.
-- Files: HelixSR is extracted to `%LOCALAPPDATA%\AMDLSS\HelixSR-1.8.1`, and the games you added by hand are saved in `%LOCALAPPDATA%\AMDLSS\settings.json`. HelixSR's own downloads go to `%LOCALAPPDATA%\HelixSR`. Delete these folders to remove everything. Remove HelixSR from your games first.
+- Files: HelixSR is extracted to `%LOCALAPPDATA%\AMDLSS\HelixSR-1.9.0`, and the games you added by hand are saved in `%LOCALAPPDATA%\AMDLSS\settings.json`. HelixSR's own downloads go to `%LOCALAPPDATA%\HelixSR`. Delete these folders to remove everything. Remove HelixSR from your games first.
 
 ## Credits and licenses
 
 - AMDLSS is free software under the GNU General Public License, version 2 or (at your option) any later version. See `LICENSE`. Parts are copied from the launcher and tools of the [Bloodborne PC port](https://github.com/0xCydral/bloodborne_pc) (GPL-2.0-or-later): the window's palette and button and progress-bar code, and the download, verify and extract code of `tools/fetch_helixsr.py`.
-- [HelixSR](https://github.com/lonewolf0622/HelixSR) is closed-source freeware by lonewolf0622 under the [HelixSR Freeware License](https://github.com/lonewolf0622/HelixSR/blob/HEAD/LICENSE). Its setup scripts are Apache-2.0. AMDLSS downloads the unmodified official release.
+- [HelixSR](https://github.com/lonewolf0622/HelixSR) is closed-source freeware by lonewolf0622 under the [HelixSR Freeware License](https://github.com/lonewolf0622/HelixSR/blob/HEAD/LICENSE). Its setup scripts are Apache-2.0 up to 1.8.1 and under the same Freeware License from 1.9.0, which allows running the setup and redistributing it only unmodified, complete and free. AMDLSS downloads the unmodified official release.
 - [OptiScaler](https://github.com/optiscaler/OptiScaler) (GPL-3.0) comes inside the HelixSR release and is installed by HelixSR's setup into games without an FSR 3.1 DLL.
 - NVIDIA's DLSS 310.7.0 DLL is downloaded by HelixSR's setup under [NVIDIA's license](https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt).
 - Ideas, not code, from similar tools: per-game state lines and a library view (OptiScaler Client, GPL-3.0; DLSS5-Autopilot, MIT), file-name based anti-cheat detection with whole-word matching (DLSS5-Autopilot; the marker list here is our own), a copy-log button and an "Open folder" action (DLSS5-Swapper, MIT).
