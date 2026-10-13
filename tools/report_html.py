@@ -194,6 +194,424 @@ def helix_evidence(files):
             'clean': bool(frames), 'nul': any('\x00' in text for text in texts)}
 
 
+# --- session timelines -------------------------------------------------------------------------------------------
+# One run is the current logs of a game, plus one run per kept history snapshot. The logs carry clock times only
+# (`[14:14:17.315930]`), never a date, so a timeline speaks in clock times and the report date (system.txt's
+# Collected line, or the receiver's arrival time) is what ties a Windows crash record to a run.
+
+CLOCK = re.compile(r'\[(\d\d:\d\d:\d\d)(?:\.\d+)?\]')
+FG_DISPATCH = re.compile(r'(?:FSRFG|XeFG|OptiFG)\w*::Dispatch')
+FG_CALLBACK = re.compile(r'(?:FSRFG|XeFG|OptiFG)\w*::DispatchCallback')
+FG_ACTIVATE = re.compile(r'(?:FSRFG|XeFG|OptiFG)\w*::Activate\b')
+FG_DEACTIVATE = re.compile(r'(?:FSRFG|XeFG|OptiFG)\w*::Deactivate\b')
+VRAM_PEAK = re.compile(r'Total VRAM used:\s*([0-9]+(?:\.[0-9]+)?)\s*GB')
+STAMP = re.compile(r'(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)')
+PROTON_NOTE = ('Proton log: not in this report. To capture one, add PROTON_LOG=1 to the game\'s Steam launch '
+               'options (Steam then writes ~/steam-<appid>.log), run the game once, and send logs again.')
+
+
+def _base(name):
+    return name.rsplit('/', 1)[-1].lower()
+
+
+def _clock(line):
+    match = CLOCK.search(line)
+    return match.group(1) if match else None
+
+
+def _short(line, limit=220):
+    """One evidence line on one line, cut for display (the raw file below keeps every byte)."""
+    return ' '.join(str(line).split())[:limit]
+
+
+def _first(pattern, text, flags=0):
+    match = re.search(pattern, text, flags)
+    return match.group(1).strip() if match else None
+
+
+def _ini_values(text):
+    """{Dx12Upscaler, Enabled, FGInput, FGOutput} from an OptiScaler.ini, each key only in its own section (the
+    file holds other Enabled keys elsewhere). A tail-cut OptiScaler.log loses its startup lines; the ini is the
+    fallback for what was configured."""
+    wanted = {'Upscalers': ('Dx12Upscaler',), 'FrameGen': ('Enabled', 'FGInput', 'FGOutput')}
+    found, section = {}, ''
+    for line in (text or '').splitlines():
+        stripped = line.strip().lstrip(';').lstrip('#').strip() if line.strip().startswith((';', '#')) else line.strip()
+        if stripped.startswith('[') and stripped.endswith(']'):
+            section = stripped[1:-1].strip()
+            continue
+        if line.strip().startswith((';', '#')) or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        if key in wanted.get(section, ()):
+            found[key] = value.strip().split(';', 1)[0].strip()
+    return found
+
+
+def parse_optiscaler(text):
+    """One OptiScaler.log read for the timeline: when it loaded, what was configured, whether frame generation
+    dispatched (delivered callbacks apart from skipping lines), the VRAM peak and the clean-shutdown marker."""
+    lines = (text or '').splitlines()
+    clocks = [clock for clock in (_clock(line) for line in lines) if clock]
+    dispatches = [line for line in lines if FG_DISPATCH.search(line)]
+    callbacks = sum(1 for line in lines if FG_CALLBACK.search(line))
+    skipped = sum(1 for line in dispatches if 'skipping' in line.lower())
+    delivered_plain = sum(1 for line in dispatches if 'skipping' not in line.lower()
+                          and '[E]' not in line and 'error' not in line.lower())
+    activates = [line for line in lines if FG_ACTIVATE.search(line)]
+    deactivates = [line for line in lines if FG_DEACTIVATE.search(line)]
+    peaks = [(float(value), line) for line in lines for value in VRAM_PEAK.findall(line)]
+    clean = next((line for line in lines if re.search(r'IsShuttingDown\s*=\s*true', line, re.IGNORECASE)), None)
+    enabled = _first(r'FrameGen\.Enabled:\s*(\S+)', text or '')
+    return {'present': bool(lines), 'version': _first(r'OptiScaler v([0-9][^\s]*)', text or ''),
+            'loads': sum(1 for line in lines if 'OptiScaler v' in line and 'loaded' in line),
+            'started': clocks[0] if clocks else None, 'last': clocks[-1] if clocks else None,
+            'last_line': _short(lines[-1]) if lines else '',
+            'dx12_upscaler': _first(r'Upscalers\.Dx12Upscaler:\s*(\S+)', text or ''),
+            'fg_enabled': None if enabled is None else enabled.lower() in ('true', '1', 'on', 'yes'),
+            'fg_config': next((line.strip() for line in lines if 'FrameGen.Enabled:' in line), ''),
+            'fg_input': _first(r'FrameGen\.FGInput:\s*(\S+)', text or ''),
+            'fg_output': _first(r'FrameGen\.FGOutput:\s*(\S+)', text or ''),
+            'fg_dispatch_lines': len(dispatches), 'fg_callbacks': callbacks, 'fg_skipped': skipped,
+            'fg_delivered': callbacks if callbacks else delivered_plain,
+            'fg_first_dispatch': _short(dispatches[0]) if dispatches else '',
+            'fg_first_delivered': _short(next((line for line in lines if FG_CALLBACK.search(line)), '')) or
+            _short(next((line for line in dispatches if 'skipping' not in line.lower()
+                         and '[E]' not in line and 'error' not in line.lower()), '')),
+            'activates': len(activates), 'deactivates': len(deactivates),
+            'first_activate': _clock(activates[0]) if activates else None,
+            'last_deactivate': _clock(deactivates[-1]) if deactivates else None,
+            'vram_warnings': sum(1 for line in lines if 'Exceeded VRAM budget' in line),
+            'vram_peak': max(peaks)[0] if peaks else None,
+            'clean': clean is not None, 'clean_line': _short(clean) if clean else '',
+            'clean_at': _clock(clean) if clean else None,
+            'truncated': (text or '').startswith('[AMDLSS:')}
+
+
+def parse_helix(texts):
+    """The HelixSR sessions of one run: one per `create:` (a game can recreate its upscaler inside one run, so a
+    `destroy` for an early session does not close the last one). `texts` is [(name, text)] of helixsr*.log."""
+    sessions, clocks, renders = [], [], []
+    for _name, text in texts:
+        current = None
+        for line in (text or '').splitlines():
+            clock = _clock(line)
+            if clock:
+                clocks.append(clock)
+            if 'create:' in line:
+                sizes = re.search(r'(\d+x\d+)\s*->\s*(?:upscale\s*)?(\d+x\d+)', line)
+                current = {'create': _short(line), 'render': sizes.group(1) if sizes else None,
+                           'output': sizes.group(2) if sizes else None,
+                           'as_dll': _first(r'\(as ([^)]+\.dll)\)', line), 'max_dispatch': -1,
+                           'destroy': None, 'destroy_line': '', 'destroy_at': None}
+                sessions.append(current)
+                continue
+            dispatched = re.search(r'\bdispatch (\d+):', line)
+            destroyed = re.search(r'destroy after (\d+) frames', line)
+            if (dispatched or destroyed) and current is None:
+                current = {'create': '', 'render': None, 'output': None, 'as_dll': None, 'max_dispatch': -1,
+                           'destroy': None, 'destroy_line': '', 'destroy_at': None}
+                sessions.append(current)
+            if dispatched and current is not None:
+                current['max_dispatch'] = max(current['max_dispatch'], int(dispatched.group(1)))
+                size = re.search(r'render (\d+x\d+)\s*->', line)
+                if size:
+                    renders.append(size.group(1))
+            if destroyed and current is not None:
+                current['destroy'] = int(destroyed.group(1))
+                current['destroy_line'], current['destroy_at'] = _short(line), clock
+                current = None
+    last = sessions[-1] if sessions else None
+    joined = '\n'.join(text for _name, text in texts)
+    return {'present': bool(texts), 'sessions': sessions, 'last': last,
+            'started': clocks[0] if clocks else None, 'last_clock': clocks[-1] if clocks else None,
+            'renders': sorted(set(renders), key=lambda size: int(size.split('x', 1)[0])),
+            'closed': sum(1 for session in sessions if session['destroy'] is not None),
+            'destroy_frames': [session['destroy'] for session in sessions if session['destroy'] is not None],
+            'clean_last': bool(last and last['destroy'] is not None),
+            'ran': bool(sessions and (any(s['destroy'] is not None or s['max_dispatch'] >= 0 for s in sessions)
+                                      or 'network running' in joined)),
+            'nul': '\x00' in joined, 'truncated': joined.startswith('[AMDLSS:')}
+
+
+def module_owner(module, path=''):
+    """Whose DLL a faulting module is, in plain words (a `dxgi.dll` inside the game is OptiScaler's name; the
+    same name under System32 is Windows'); kernelbase and ntdll usually only carry another DLL's fault."""
+    name, where = (module or '').lower(), (path or '').lower()
+    if name.startswith(('amd_fidelityfx', 'helixsr')):
+        return 'HelixSR'
+    if name in OPTI_NAMES:
+        return 'Windows' if '\\windows\\' in where or '/windows/' in where else 'OptiScaler'
+    if name.startswith('fakenvapi'):
+        return 'fakenvapi'
+    if name.startswith(('nvngx', '_nvngx', 'sl.')):
+        return 'NVIDIA DLSS or Streamline'
+    if name.startswith(('amd', 'ati', 'amdxc')):
+        return 'AMD driver'
+    if name in ('kernelbase.dll', 'ntdll.dll'):
+        return 'Windows, often carrying another DLL\'s fault'
+    return 'the game itself' if name.endswith('.exe') else 'unidentified'
+
+
+def parse_crashes(text):
+    """crashes.txt read back: the Event ID 1000/1001 entries (one `when | exe | faulting module: ...` line each),
+    the dumped-file listings, and whether Windows was checked at all. No file answers present False."""
+    if not text:
+        return {'present': False, 'entries': [], 'dumps': [], 'wer': [], 'checked': False, 'failed': False}
+    entries = []
+    for line in text.splitlines():
+        if ' | faulting module: ' not in line:
+            continue
+        fields = {}
+        parts = [part.strip() for part in line.split(' | ')]
+        for part in parts[2:]:
+            key, _, value = part.partition(': ')
+            fields[key] = value
+        entries.append({'when': parts[0], 'exe': parts[1] if len(parts) > 1 else '',
+                        'module': fields.get('faulting module', ''), 'version': fields.get('module version', ''),
+                        'exception': fields.get('exception', ''), 'offset': fields.get('offset', ''),
+                        'event': fields.get('Event ID', ''), 'path': fields.get('module path', '')})
+    return {'present': True, 'entries': entries,
+            'dumps': [_short(line) for line in text.splitlines() if '.dmp' in line.lower()],
+            'wer': [_short(line) for line in text.splitlines() if 'AppCrash_' in line],
+            'checked': 'Application log' in text, 'failed': 'could not be read' in text}
+
+
+def crash_plain(entry):
+    """One crash record in plain words, the faulting module named with its owner."""
+    owner = module_owner(entry['module'], entry['path'])
+    text = f"{entry['when']}: the game crashed inside {entry['module'] or 'an unnamed module'} ({owner})"
+    if entry['exe']:
+        text += f": {entry['exe']}"
+    if entry['exception']:
+        text += f", exception {entry['exception']}"
+    if entry['offset']:
+        text += f" at offset {entry['offset']}"
+    if entry['event']:
+        text += f" (Event ID {entry['event']})"
+    return text
+
+
+def report_date_of(files, created=None):
+    """The report's day as YYYY-MM-DD (the receiver's arrival time, else system.txt's Collected line), else ''."""
+    if created:
+        return time.strftime('%Y-%m-%d', time.localtime(created))
+    for line in ((files or {}).get('system.txt', '')).splitlines():
+        match = re.match(r'Collected: (\d{4}-\d\d-\d\d)', line)
+        if match:
+            return match.group(1)
+    return ''
+
+
+def stamp_text(stamp):
+    """A history folder's stamp (YYYYMMDD-HHMMSS) as a date and time, the stamp itself when it is not one."""
+    match = STAMP.fullmatch(stamp or '')
+    return f'{match.group(1)}-{match.group(2)}-{match.group(3)} {match.group(4)}:{match.group(5)}:{match.group(6)}' \
+        if match else str(stamp)
+
+
+def timeline_of(files, label='Latest run', report_date='', crashes=None):
+    """One run read plainly: start and last clock, route and resolution, frame generation, VRAM, errors, how it
+    ended, and Yes/No/Unknown for HelixSR ran, frame generation worked and the game crashed, each with its
+    evidence line. `files` holds only this run's files; `crashes` is parse_crashes() of the game's crashes.txt."""
+    opti_text = '\n'.join(text for name, text in files.items()
+                          if _base(name).startswith('optiscaler') and _base(name).endswith('.log'))
+    helix_texts = [(name, text) for name, text in files.items()
+                   if _base(name).startswith('helixsr') and _base(name).endswith('.log')]
+    fake_text = '\n'.join(text for name, text in files.items()
+                          if _base(name).startswith('fakenvapi') and _base(name).endswith('.log'))
+    ini = {}
+    for name, text in files.items():
+        if _base(name).startswith('optiscaler') and _base(name).endswith('.ini'):
+            ini.update(_ini_values(text))
+    opti, helix = parse_optiscaler(opti_text), parse_helix(helix_texts)
+    fake_clocks = [clock for clock in (_clock(line) for line in fake_text.splitlines()) if clock]
+    enabled = opti['fg_enabled']
+    if enabled is None and 'Enabled' in ini:
+        enabled = ini['Enabled'].lower() in ('true', '1', 'on', 'yes')
+    fg_input = opti['fg_input'] or ini.get('FGInput')
+    fg_output = opti['fg_output'] or ini.get('FGOutput')
+    dx12 = opti['dx12_upscaler'] or ini.get('Dx12Upscaler')
+    # The run starts with OptiScaler when it is there, else with HelixSR: a fakenvapi.log can be a leftover of
+    # an earlier route (Monster Hunter in TFTKA6A3 keeps one from 13:20 beside a 14:17 drop-in run).
+    started = opti['started'] or helix['started'] or (fake_clocks[0] if fake_clocks else None)
+    lasts = [value for value in (opti['last'], helix['last_clock'], fake_clocks[-1] if fake_clocks else None) if value]
+    last_session = helix['last'] or {}
+    if opti['present']:
+        route = 'OptiScaler route'
+    elif (last_session.get('as_dll') or '').lower().startswith('amd_fidelityfx'):
+        route = 'FSR drop-in'
+    elif helix['present']:
+        route = 'HelixSR'
+    else:
+        route = 'unknown'
+    ended = 'clean' if (opti['clean'] if opti['present'] else helix['clean_last']) else \
+        'stops' if (opti['present'] or helix['present'] or fake_text) else 'unknown'
+    ended_evidence = opti['clean_line'] if opti['clean'] else last_session.get('destroy_line', '')
+    entries = (crashes or {}).get('entries') or []
+
+    def seconds(clock):
+        try:
+            hours, minutes, secs = (int(part) for part in clock.split(':'))
+            return hours * 3600 + minutes * 60 + secs
+        except (ValueError, AttributeError):
+            return None
+
+    low = seconds(started) - 600 if seconds(started) is not None else None
+    high = seconds(max(lasts)) + 600 if lasts and seconds(max(lasts)) is not None else None
+    mine = [entry for entry in entries if report_date and entry['when'].startswith(report_date)
+            and (seconds(entry['when'][11:19]) is None or low is None
+                 or low <= seconds(entry['when'][11:19]) <= (high if high is not None else 24 * 3600))]
+    if mine or (entries and not report_date and ended != 'clean'):
+        hit = (mine or entries)[-1]
+        crashed = {'verdict': 'Yes', 'evidence': crash_plain(hit)}
+    elif ended == 'clean':
+        crashed = {'verdict': 'No', 'evidence': ended_evidence or 'a clean shutdown marker is in the log'}
+    elif ended == 'stops':
+        crashed = {'verdict': 'Unknown', 'evidence': 'the log just stops, which fits a crash or a kill; '
+                                                     'Windows recorded no matching crash for this run'
+                   if crashes and crashes.get('checked') else 'the log just stops, which fits a crash or a kill'}
+    else:
+        crashed = {'verdict': 'Unknown', 'evidence': 'no HelixSR, OptiScaler or fakenvapi log in this report'}
+    note = ''
+    if entries and crashed['verdict'] != 'Yes':
+        latest = entries[-1]
+        note = (f"Windows also recorded {len(entries)} crash(es) of this game in the last 14 days; the latest is "
+                f"{latest['when']} inside {latest['module']}. See Windows crashes below.")
+    if opti['present'] and opti['fg_delivered'] > 0:
+        framegen = {'verdict': 'Yes', 'evidence': opti['fg_first_delivered'] or opti['fg_first_dispatch']}
+    elif opti['present'] and enabled:
+        framegen = {'verdict': 'No', 'evidence': opti['fg_first_dispatch'] or opti['fg_config'] or
+                    'frame generation on, no dispatch line in OptiScaler.log'}
+    elif opti['present'] and enabled is False:
+        framegen = {'verdict': 'No', 'evidence': opti['fg_config'] or 'FrameGen Enabled is off in OptiScaler.ini'}
+    elif route == 'FSR drop-in':
+        create = last_session.get('create', '')
+        framegen = {'verdict': 'No', 'evidence': ('the FSR drop-in route has no OptiScaler and no frame '
+                                                  f"generation: {create}" if create else
+                                                  'the FSR drop-in has no frame generation')}
+    else:
+        framegen = {'verdict': 'Unknown', 'evidence': 'no OptiScaler log in this report'}
+    if helix['ran']:
+        evidence = next((s['create'] for s in helix['sessions'] if s['create']), '') or \
+            next((s['destroy_line'] for s in helix['sessions'] if s['destroy_line']), '') or \
+            'dispatch lines in helixsr.log'
+        ran = {'verdict': 'Yes', 'evidence': evidence}
+    elif helix['present']:
+        ran = {'verdict': 'No', 'evidence': 'a HelixSR log is present but holds no create, dispatch or destroy line'}
+    else:
+        ran = {'verdict': 'Unknown', 'evidence': 'no HelixSR log in this report'}
+    run_files = {name: text for name, text in files.items() if _base(name) != SESSION_LOG}
+    return {'label': label, 'started': started, 'last': max(lasts) if lasts else None,
+            'route': route, 'opti': opti, 'helix': helix, 'dx12_upscaler': dx12, 'fg_enabled': enabled,
+            'fg_input': fg_input, 'fg_output': fg_output, 'ended': ended, 'ended_evidence': ended_evidence,
+            'ended_at': opti['clean_at'] or last_session.get('destroy_at'),
+            'helix_ran': ran, 'framegen': framegen, 'crashed': crashed, 'crash_note': note,
+            'errors': problems_in(run_files), 'fake_present': bool(fake_text),
+            'truncated': opti['truncated'] or helix['truncated']}
+
+
+def timeline_lines(run, verdicts=True):
+    """One run as short plain lines, the same text on the page (escaped there) and in the fetch summary. With
+    `verdicts` off the three Did-you lines are left out: the page shows them in its Answers table instead."""
+    opti, helix, lines = run['opti'], run['helix'], []
+    started = f"Started {run['started']}" if run['started'] else 'Start time unknown (no timed log line)'
+    if opti['version']:
+        started += f" (OptiScaler v{opti['version']} loaded)"
+    if run['last']:
+        started += f". Last log line {run['last']}"
+    lines.append(started + '.')
+    if run['truncated']:
+        lines.append('A log in this run was cut to its tail to fit the report, so its first lines are missing.')
+    if opti['loads'] > 1:
+        lines.append(f"OptiScaler loaded {opti['loads']} times in this log; the counts below cover the whole log.")
+    last = helix['last'] or {}
+    upscaler = f"Upscaler: {run['route']}"
+    if run['dx12_upscaler']:
+        upscaler += f", Dx12Upscaler {run['dx12_upscaler']}"
+    if last.get('render'):
+        upscaler += f". HelixSR render {last['render']} -> output {last['output']}"
+        if last.get('as_dll'):
+            upscaler += f" (as {last['as_dll']})"
+    if len(helix['renders']) > 1:
+        upscaler += f"; dispatch render sizes {', '.join(helix['renders'])}"
+    lines.append(upscaler + '.')
+    if helix['sessions']:
+        frames = []
+        if helix['destroy_frames']:
+            total = sum(helix['destroy_frames'])
+            frames.append(f"{total} frame{'' if total == 1 else 's'} in {helix['closed']} closed session(s)")
+        if last.get('destroy') is None and last.get('max_dispatch', -1) >= 0:
+            frames.append(f"last session reached dispatch {last['max_dispatch']} "
+                          f"(at least {last['max_dispatch'] + 1} frames) with no destroy line")
+        if frames:
+            lines.append(f"HelixSR sessions: {len(helix['sessions'])}; {'; '.join(frames)}.")
+    if opti['present']:
+        config = ', '.join(part for part in (
+            f"FrameGen.Enabled {'true' if run['fg_enabled'] else 'false'}" if run['fg_enabled'] is not None else '',
+            f"FGInput {run['fg_input']}" if run['fg_input'] else '',
+            f"FGOutput {run['fg_output']}" if run['fg_output'] else '') if part)
+        other = opti['fg_dispatch_lines'] - opti['fg_callbacks'] - opti['fg_skipped'] if opti['fg_callbacks'] else 0
+        counts = (f"{opti['fg_dispatch_lines']} FSRFG dispatch lines "
+                  f"({opti['fg_delivered']} delivered, {opti['fg_skipped']} skipping"
+                  f"{f', {other} other' if other > 0 else ''}), "
+                  f"{opti['activates']} activates and {opti['deactivates']} deactivates")
+        active = ''
+        if opti['first_activate']:
+            active = f", first active {opti['first_activate']}"
+        if opti['last_deactivate']:
+            active += f", last deactivated {opti['last_deactivate']}"
+        lines.append(f"Frame generation: {config + '. ' if config else ''}{counts}{active}.")
+        vram = f"VRAM: {opti['vram_warnings']} budget warnings"
+        if opti['vram_peak'] is not None:
+            vram += f", peak {opti['vram_peak']:.2f} GB"
+        lines.append(vram + '.')
+    if run['ended'] == 'clean':
+        lines.append('How it ended: clean shutdown' + (f" at {run['ended_at']}" if run['ended_at'] else '') + '.')
+    elif run['ended'] == 'stops':
+        lines.append('How it ended: the log just stops' + (f" at {run['last']}" if run['last'] else '') +
+                     ' (likely crash or kill).')
+    else:
+        lines.append('How it ended: unknown, no log of the run is in this report.')
+    if verdicts:
+        for question, answer in (('Did HelixSR run?', run['helix_ran']),
+                                 ('Did frame generation work?', run['framegen']),
+                                 ('Did the game crash?', run['crashed'])):
+            lines.append(f"{question} {answer['verdict']}. Evidence: {_short(answer['evidence'])}")
+    if run['crash_note']:
+        lines.append(run['crash_note'])
+    if run['errors']:
+        total = sum(error['count'] for error in run['errors'])
+        lines.append(f"Real errors: {len(run['errors'])} distinct line{'' if len(run['errors']) == 1 else 's'} "
+                     f"({total} total). First: {_short(run['errors'][0]['text'])}")
+    else:
+        lines.append('Real errors: none found in these logs.')
+    return lines
+
+
+def runs_of(files, folder, report_date=''):
+    """(timelines, crashes, proton present) for one game folder of a report: the latest run first, then each
+    kept history snapshot newest first. History files never join the latest run."""
+    prefix = folder + '/'
+    crashes = parse_crashes((files or {}).get(prefix + 'crashes.txt', ''))
+    current, history = {}, {}
+    for name, text in (files or {}).items():
+        if not name.startswith(prefix):
+            continue
+        rest = name[len(prefix):]
+        if rest.startswith('history/') and '/' in rest[len('history/'):]:
+            history.setdefault(rest.split('/')[1], {})[name] = text
+        else:
+            current[name] = text
+    runs = [timeline_of(current, 'Latest run', report_date, crashes)]
+    for stamp in sorted(history, reverse=True):
+        runs.append(timeline_of(history[stamp], f'Earlier run kept {stamp_text(stamp)}',
+                                stamp_text(stamp)[:10], None))
+    proton = any(_base(name) == 'proton.log' for name in current)
+    return runs, crashes, proton
+
+
 def third_party_optiscaler(files, install):
     """'OptiScaler <version> from another install...' when files.txt shows an OptiScaler DLL in the game while
     AMDLSS installed nothing there, else None."""
@@ -224,23 +642,32 @@ def status_of(game, actions, problems, helix):
 
 
 def analyse(report, code, created=None):
-    """Everything the pages show, out of one report: the system rows and, per game, what happened, the problems
-    found, HelixSR's evidence and the plain-words status. A report without games.txt falls back to its folders."""
+    """Everything the pages show, out of one report: the system rows and, per game, the session timelines, what
+    happened, the problems found, HelixSR's evidence, Windows crashes and the plain-words status. Problems and
+    HelixSR's evidence read the latest run only (kept history has its own timelines). A report without
+    games.txt falls back to its folders."""
     files = report.get('files') or {}
+    system = parse_system(files.get('system.txt', ''))
+    linux = any(label == 'OS' and value.startswith('Linux:') for label, value in system)
+    day = report_date_of(files, created)
     games = parse_games(files.get('games.txt', ''))
     if not games:
         games = [{'folder': folder, 'name': folder, 'install': 'unknown', 'helixsr': 'unknown', 'framegen': None}
                  for folder in sorted({name.split('/')[0] for name in files if '/' in name})]
     for game in games:
         own = {name: text for name, text in files.items() if name.startswith(game['folder'] + '/')}
+        current = {name: text for name, text in own.items()
+                   if not name.startswith(game['folder'] + '/history/')}
+        runs, crashes, proton = runs_of(files, game['folder'], day)
+        game['runs'], game['timeline'], game['crashes'], game['proton'] = runs, runs[0], crashes, proton
+        game['proton_note'] = 'Proton log: included (proton.log).' if proton else PROTON_NOTE if linux else ''
         game['actions'] = parse_actions(own.get(f"{game['folder']}/{SESSION_LOG}", ''))
-        game['problems'] = problems_in(own)
-        game['helix'] = helix_evidence(own)
-        game['third_party'] = third_party_optiscaler(own, game['install'])
+        game['problems'] = problems_in(current)
+        game['helix'] = helix_evidence(current)
+        game['third_party'] = third_party_optiscaler(current, game['install'])
         game['status'], game['level'] = status_of(game, game['actions'], game['problems'], game['helix'])
     return {'code': code, 'created': created, 'date': date_of(created, files.get('system.txt', '')),
-            'version': report.get('version') or '?', 'system': parse_system(files.get('system.txt', '')),
-            'games': games, 'files': files}
+            'version': report.get('version') or '?', 'system': system, 'games': games, 'files': files}
 
 
 # --- the pages ----------------------------------------------------------------------------------------------------
@@ -284,6 +711,41 @@ def _game_card(game):
                                    for label, value in rows) + '</table>')
     if game['third_party']:
         out.append(f'<p class="warn">{esc(game["third_party"])}</p>')
+    latest = game['timeline']
+    out.append('<h3>Answers (latest run)</h3>')
+    answers = [('Did HelixSR run?', latest['helix_ran']), ('Did frame generation work?', latest['framegen']),
+               ('Did the game crash?', latest['crashed'])]
+    out.append('<table>' + ''.join(
+        f'<tr><th>{esc(question)}</th><td>{esc(answer["verdict"])}</td>'
+        f'<td><code>{esc(_short(answer["evidence"]))}</code></td></tr>'
+        for question, answer in answers) + '</table>')
+    if latest['crash_note']:
+        out.append(f'<p class="warn">{esc(latest["crash_note"])}</p>')
+    out.append('<h3>Session timeline</h3>')
+    for run in game['runs']:
+        out.append(f'<p><strong>{esc(run["label"])}</strong></p>')
+        out.append('<ul>' + ''.join(f'<li>{esc(line)}</li>'
+                                     for line in timeline_lines(run, verdicts=run is not latest)) + '</ul>')
+    if game['proton_note']:
+        out.append(f'<p class="dim">{esc(game["proton_note"])}</p>')
+    crashes = game['crashes']
+    if crashes['present']:
+        out.append('<h3>Windows crashes</h3>')
+        if crashes['entries']:
+            out.append('<ul>' + ''.join(f'<li>{esc(crash_plain(entry))}</li>'
+                                         for entry in crashes['entries']) + '</ul>')
+        elif crashes['failed']:
+            out.append('<p class="warn">The Windows event log could not be read when these logs were '
+                       'collected, so a crash can be neither proved nor ruled out from Windows. '
+                       'See crashes.txt in the raw files.</p>')
+        elif crashes['checked']:
+            out.append('<p>No crash of this game\'s executables in the Windows Application log '
+                       '(last 14 days, Event ID 1000 and 1001).</p>')
+        else:
+            out.append('<p class="dim">Windows crash records are collected on Windows only. '
+                       'See crashes.txt in the raw files.</p>')
+        for line in crashes['dumps'] + crashes['wer']:
+            out.append(f'<p class="dim">Listed only, not sent: {esc(line)}</p>')
     out.append('<h3>What happened</h3>')
     if game['actions']:
         out.append('<ul>')

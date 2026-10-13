@@ -217,6 +217,24 @@ def test_the_summary_groups_by_game_with_sizes_and_the_first_problem_lines(serve
     assert not any('mention' in line or 'Quiet/exe-folder/OptiScaler.log:' in line for line in quiet)
 
 
+def test_the_summary_carries_the_same_timeline_as_the_page():
+    timed = report(**{'system.txt': 'AMDLSS 0.1.0\nCollected: 2026-10-13 15:00:00\n',
+                      'One/exe-folder/helixsr.log': (
+                          '[14:17:25.540] create: max render 1920x1080 -> upscale 1920x1080, flags 0x19 '
+                          '(as amd_fidelityfx_dx12.dll)\n'
+                          '[14:19:36.367] destroy after 10512 frames\n'),
+                      'One/crashes.txt': (
+                          'Windows crashes for One (Application log, last 14 days, Event ID 1000 and 1001)\n'
+                          '2026-10-12 09:00:00 | One.exe | faulting module: dxgi.dll | module version: 0.9.4.0 | '
+                          'exception: 0xc0000005 | offset: 0x1 | Event ID: 1000 | module path: E:\\Games\\dxgi.dll\n')})
+    lines = tool.summary(timed, CODE, Path('/x'))
+    assert '  timeline (Latest run):' in lines
+    assert any('Did HelixSR run? Yes' in line for line in lines)
+    assert any('10512 frames' in line for line in lines)
+    assert any(line.startswith('    Windows crash:') and 'crashed inside dxgi.dll (OptiScaler)' in line
+               for line in lines)
+
+
 def test_each_game_shows_at_most_20_problem_lines_so_a_noisy_one_cannot_hide_the_rest():
     noisy = report(**{'Noisy/a.log': ''.join(f'error {n}\n' for n in range(50)), 'Calm/a.log': 'crash once\n'})
     lines = tool.summary(noisy, CODE, Path('/x'))

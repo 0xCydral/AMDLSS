@@ -116,11 +116,13 @@ def grouped(files):
 
 
 def summary(report, code, folder):
-    """The lines printed after a fetch: one block per game with its files, sizes and the first problem lines."""
+    """The lines printed after a fetch: one block per game with its files, sizes, the session timeline in plain
+    text (the same reading report.html shows) and the first problem lines."""
     lines = [f'Report {code} saved to {folder}', f'AMDLSS {report["version"]}: {report["game"]}']
     games = report['files'].get('games.txt')
     if games:
         lines += ['', 'games.txt:'] + [f'  {one_line(line)}' for line in games.splitlines()[:50]]
+    day = report_html.report_date_of(report['files'])
     for group, files in grouped(report['files']).items():
         lines += ['', f'== {group} ({len(files)} file{"" if len(files) == 1 else "s"})']
         found = []
@@ -128,6 +130,13 @@ def summary(report, code, folder):
             lines.append(f'  {len(text.encode("utf-8")):>9} bytes  {name}')
             found += [(name, number, line) for number, line in enumerate(text.splitlines(), 1)
                       if PROBLEM.search(line) and not report_html.is_noise(name, line)]
+        if group != SHARED:
+            runs, crashes, _proton = report_html.runs_of(report['files'], group.rstrip('/'), day)
+            for run in runs:
+                lines.append(f'  timeline ({run["label"]}):')
+                lines += [f'    {one_line(line)}' for line in report_html.timeline_lines(run)]
+            lines += [f'    Windows crash: {one_line(report_html.crash_plain(entry))}'
+                      for entry in crashes['entries']]
         if found:
             lines.append(f'  lines that mention error, exception, crash or fail: {min(len(found), MAX_PROBLEMS)} of '
                          f'{len(found)}')

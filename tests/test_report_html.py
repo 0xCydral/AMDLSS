@@ -154,6 +154,127 @@ def test_the_page_shows_the_reading_and_escapes_every_byte_of_the_report():
     assert '<a ' not in rendered   # no link is ever built from report text
 
 
+# --- session timelines: the three questions, answered from the logs alone ----------------------------------------
+# Line shapes copied from a real tester report (TFTKA6A3, 2026-10-13) with the counts scaled down.
+
+OPTI_RUN = (
+    '[14:14:17.315930] [W] OptiScaler v0.9.4-final (7534ad0) loaded\n'
+    '[14:14:17.316025] [I] Upscalers.Dx12Upscaler: fsr31\n'
+    '[14:14:17.316029] [I] FrameGen.Enabled: true\n'
+    '[14:14:17.316032] [I] FrameGen.FGInput: dlssg\n'
+    '[14:14:17.316036] [I] FrameGen.FGOutput: fsrfg\n'
+    '[14:14:25.678837] [W] FSRFG_Dx12::Dispatch Depth or Velocity is not ready, skipping\n'
+    '[14:14:35.497585] [W] FSRFG_Dx12::DispatchCallback frameID: 306\n'
+    '[14:14:35.856912] [I] FSRFG_Dx12::Activate D3D12_Configure Enabled: true, result: FFX_API_RETURN_OK (0)\n'
+    '[14:15:02.743613] [W] StreamlineHooks::streamlineLogCallback Exceeded VRAM budget, various performance issues\n'
+    '[14:15:30.000000] [I] StreamlineHooks::streamlineLogCallback Total VRAM used: 7.34 GB\n'
+    '[14:15:34.971097] [E] FSRFG_Dx12::Dispatch allocator->Reset() error: 80004005\n'
+    '[14:16:02.186236] [I] FSRFG_Dx12::Deactivate D3D12_Configure Enabled: false, result: FFX_API_RETURN_OK (0)\n'
+    '[14:16:39.811637] [W] MenuCommon::WndProc IsShuttingDown = true\n')
+HELIX_RUN = (
+    '[14:17:25.540] create: max render 1920x1080 -> upscale 1920x1080, flags 0x19 (as amd_fidelityfx_dx12.dll); '
+    'sharpening: NVIDIA (NIS)\n'
+    '[14:17:25.577] dispatch 0: render 1920x1080 -> 1920x1080, jitter -0.125,-0.278, reset 0, sharpness 0.10\n'
+    '[14:19:36.367] destroy after 10512 frames (kept for 1000 ms in case the game creates the same upscaler again)\n')
+CRASHES = ('Windows crashes for One (Application log, last 14 days, Event ID 1000 and 1001)\n'
+           'Game executables checked: One.exe\n\n'
+           '2026-10-13 14:20:11 | One.exe | faulting module: dxgi.dll | module version: 0.9.4.0 | '
+           'exception: 0xc0000005 | offset: 0x0000000000123456 | Event ID: 1000 | module path: E:\\Games\\dxgi.dll\n\n'
+           'Crash dumps listed only (not sent):\n  One.exe.1234.dmp  999 bytes  2026-10-13 14:20:12\n')
+
+
+def test_the_timeline_answers_the_three_questions_for_an_optiscaler_run():
+    helix = HELIX_RUN.replace('amd_fidelityfx_dx12.dll', 'helixsr_upscaler.dll') \
+        .replace('14:17:25', '14:14:35').replace('14:19:36', '14:15:56')
+    files = {'G/exe-folder/OptiScaler.log': OPTI_RUN, 'G/exe-folder/HelixSR/helixsr.log': helix}
+    run = page.timeline_of(files, 'Latest run', '2026-10-13')
+    assert run['started'] == '14:14:17' and run['last'] == '14:16:39' and run['route'] == 'OptiScaler route'
+    assert run['helix_ran']['verdict'] == 'Yes' and 'create:' in run['helix_ran']['evidence']
+    assert run['framegen']['verdict'] == 'Yes' and 'DispatchCallback' in run['framegen']['evidence']
+    assert run['crashed'] == {'verdict': 'No', 'evidence': '[14:16:39.811637] [W] MenuCommon::WndProc IsShuttingDown = true'}
+    assert run['opti']['fg_dispatch_lines'] == 3 and run['opti']['fg_delivered'] == 1 and run['opti']['fg_skipped'] == 1
+    joined = '\n'.join(page.timeline_lines(run))
+    for needle in ('Started 14:14:17 (OptiScaler v0.9.4-final loaded)', 'Dx12Upscaler fsr31',
+                   'render 1920x1080 -> output 1920x1080', 'FrameGen.Enabled true, FGInput dlssg, FGOutput fsrfg',
+                   '3 FSRFG dispatch lines (1 delivered, 1 skipping, 1 other)', '1 activates and 1 deactivates',
+                   'first active 14:14:35', 'VRAM: 1 budget warnings, peak 7.34 GB',
+                   'How it ended: clean shutdown at 14:16:39', 'Did HelixSR run? Yes',
+                   'Did frame generation work? Yes', 'Did the game crash? No', 'allocator->Reset()'):
+        assert needle in joined, needle
+
+
+def test_the_timeline_reads_a_drop_in_run_and_ignores_a_stale_fakenvapi_log():
+    files = {'G/exe-folder/helixsr.log': HELIX_RUN,
+             'G/exe-folder/fakenvapi.log': '[13:20:06.100000] [C] fakenvapi version: v1.4.1\n'}
+    run = page.timeline_of(files)
+    assert run['started'] == '14:17:25' and run['route'] == 'FSR drop-in' and run['ended'] == 'clean'
+    assert run['framegen']['verdict'] == 'No' and 'FSR drop-in route has no OptiScaler' in run['framegen']['evidence']
+    joined = '\n'.join(page.timeline_lines(run))
+    assert '10512 frames in 1 closed session(s)' in joined and 'clean shutdown at 14:19:36' in joined
+
+
+def test_frame_generation_that_only_skips_did_not_work_and_a_stopped_log_is_unknown():
+    skipped = {'G/exe-folder/OptiScaler.log': OPTI_RUN.replace('DispatchCallback frameID: 306', 'Dispatch skipping')}
+    run = page.timeline_of(skipped)
+    assert run['framegen']['verdict'] == 'No' and run['opti']['fg_delivered'] == 0
+    stopped = page.timeline_of({'G/exe-folder/OptiScaler.log': OPTI_RUN.rsplit('[14:16:39', 1)[0]})
+    assert stopped['ended'] == 'stops' and stopped['crashed']['verdict'] == 'Unknown'
+    assert 'the log just stops at 14:16:02 (likely crash or kill)' in '\n'.join(page.timeline_lines(stopped))
+    bare = page.timeline_of({'G/files.txt': 'Game: G\n'})
+    assert [bare[key]['verdict'] for key in ('helix_ran', 'framegen', 'crashed')] == ['Unknown'] * 3
+
+
+def test_a_recreated_upscaler_keeps_its_sessions_apart():
+    text = ('[10:00:00.100] create: max render 1280x720 -> upscale 1920x1080, flags 0x28 (as helixsr_upscaler.dll)\n'
+            '[10:00:01.100] destroy after 1 frames\n'
+            '[10:00:02.100] create: max render 1280x720 -> upscale 1920x1080, flags 0x28 (as helixsr_upscaler.dll)\n'
+            '[10:01:00.100] dispatch 3000: render 1102x620 -> 1920x1080, jitter 0,0, reset 0, sharpness 0.10\n')
+    run = page.timeline_of({'G/exe-folder/HelixSR/helixsr.log': text})
+    assert run['ended'] == 'stops'   # the early destroy does not close the last session
+    joined = '\n'.join(page.timeline_lines(run))
+    assert 'HelixSR sessions: 2; 1 frame in 1 closed session(s); last session reached dispatch 3000' in joined
+
+
+def test_windows_crashes_name_the_faulting_module_and_date_the_verdict():
+    crashes = page.parse_crashes(CRASHES)
+    [entry] = crashes['entries']
+    assert entry['module'] == 'dxgi.dll' and entry['exception'] == '0xc0000005' and crashes['dumps']
+    assert page.crash_plain(entry).startswith('2026-10-13 14:20:11: the game crashed inside dxgi.dll (OptiScaler)')
+    assert page.module_owner('dxgi.dll', r'C:\Windows\System32\dxgi.dll') == 'Windows'
+    assert page.module_owner('amd_fidelityfx_dx12.dll') == 'HelixSR'
+    stopped = {'G/exe-folder/OptiScaler.log': '[14:14:17.315930] [W] OptiScaler v0.9.4 loaded\n'}
+    assert page.timeline_of(stopped, 'Latest run', '2026-10-13', crashes)['crashed']['verdict'] == 'Yes'
+    clean = {'G/exe-folder/OptiScaler.log': OPTI_RUN}
+    dated = page.timeline_of(clean, 'Latest run', '2026-10-14', crashes)   # the crash is the day before this run
+    assert dated['crashed']['verdict'] == 'No' and 'also recorded 1 crash(es)' in dated['crash_note']
+
+
+def test_history_runs_stay_apart_from_the_latest_run():
+    files = {'G/exe-folder/helixsr.log': HELIX_RUN, 'G/crashes.txt': CRASHES, 'G/proton.log': 'proton\n',
+             'G/history/20261012-090000/exe-folder/OptiScaler.log': OPTI_RUN}
+    runs, crashes, proton = page.runs_of(files, 'G', '2026-10-13')
+    assert proton and crashes['entries'] and [run['label'] for run in runs] == [
+        'Latest run', 'Earlier run kept 2026-10-12 09:00:00']
+    assert runs[0]['route'] == 'FSR drop-in' and runs[1]['route'] == 'OptiScaler route'
+    assert runs[1]['framegen']['verdict'] == 'Yes'
+
+
+def test_the_page_shows_answers_windows_crashes_and_the_proton_note_escaped():
+    report = {'app': 'AMDLSS', 'version': '0.1.0-beta.10', 'game': 'One', 'files': {
+        'system.txt': 'AMDLSS 0.1.0-beta.10\nLinux: Linux 6.10\nCollected: 2026-10-14 15:00:00\n',
+        'games.txt': 'One/ | One | /games/One | install: OptiScaler as dxgi.dll | HelixSR: 1.9.0\n',
+        'One/exe-folder/OptiScaler.log': OPTI_RUN.replace('loaded', EVIL),
+        'One/crashes.txt': CRASHES}}
+    [game] = page.analyse(report, 'ABCD2345')['games']
+    assert game['timeline']['crashed']['verdict'] == 'No' and game['crashes']['entries']
+    rendered = page.render_report(page.analyse(report, 'ABCD2345'))
+    for needle in ('Answers (latest run)', 'Did frame generation work?', 'Session timeline', 'Windows crashes',
+                   'the game crashed inside dxgi.dll (OptiScaler)', 'Listed only, not sent: One.exe.1234.dmp',
+                   'PROTON_LOG=1', '&lt;script&gt;alert(1)&lt;/script&gt;'):
+        assert needle in rendered, needle
+    assert EVIL not in rendered and '<script>' not in rendered
+
+
 def test_the_index_links_relative_pages_with_a_badge_per_game():
     analysis = page.analyse(REPORT, 'ABCD2345', 1791792000)
     index = page.render_index([analysis])
