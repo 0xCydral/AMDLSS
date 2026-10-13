@@ -371,17 +371,29 @@ def parse_crashes(text):
         entries.append({'when': parts[0], 'exe': parts[1] if len(parts) > 1 else '',
                         'module': fields.get('faulting module', ''), 'version': fields.get('module version', ''),
                         'exception': fields.get('exception', ''), 'offset': fields.get('offset', ''),
-                        'event': fields.get('Event ID', ''), 'path': fields.get('module path', '')})
+                        'event': fields.get('Event ID', ''), 'path': fields.get('module path', ''),
+                        'name': fields.get('event name', '')})
     return {'present': True, 'entries': entries,
             'dumps': [_short(line) for line in text.splitlines() if '.dmp' in line.lower()],
             'wer': [_short(line) for line in text.splitlines() if 'AppCrash_' in line],
             'checked': 'Application log' in text, 'failed': 'could not be read' in text}
 
 
+def crash_what(entry):
+    """What one record says happened. An Event 1001 from a hang names no module; an old AMDLSS wrote WER's
+    unread "P5:" label where the module belongs, and that is said as it is, never as a module."""
+    if (entry.get('name') or '').lower().startswith('apphang'):
+        return 'the game stopped responding (hang)'
+    if re.fullmatch(r'P\d+:?', entry['module'] or ''):
+        return ('crash recorded by Windows Error Reporting; this AMDLSS version could not read the faulting '
+                'module')
+    owner = module_owner(entry['module'], entry['path'])
+    return f"the game crashed inside {entry['module'] or 'an unnamed module'} ({owner})"
+
+
 def crash_plain(entry):
     """One crash record in plain words, the faulting module named with its owner."""
-    owner = module_owner(entry['module'], entry['path'])
-    text = f"{entry['when']}: the game crashed inside {entry['module'] or 'an unnamed module'} ({owner})"
+    text = f"{entry['when']}: {crash_what(entry)}"
     if entry['exe']:
         text += f": {entry['exe']}"
     if entry['exception']:
@@ -411,10 +423,12 @@ def stamp_text(stamp):
         if match else str(stamp)
 
 
-def timeline_of(files, label='Latest run', report_date='', crashes=None):
+def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in=False):
     """One run read plainly: start and last clock, route and resolution, frame generation, VRAM, errors, how it
     ended, and Yes/No/Unknown for HelixSR ran, frame generation worked and the game crashed, each with its
-    evidence line. `files` holds only this run's files; `crashes` is parse_crashes() of the game's crashes.txt."""
+    evidence line. `files` holds only this run's files; `crashes` is parse_crashes() of the game's crashes.txt;
+    `drop_in` is what the install record says (games.txt, the install log) for a run whose own logs do not
+    name the route: a drop-in run's HelixSR log can end in a session with no `create:` line."""
     opti_text = '\n'.join(text for name, text in files.items()
                           if _base(name).startswith('optiscaler') and _base(name).endswith('.log'))
     helix_texts = [(name, text) for name, text in files.items()
@@ -440,7 +454,7 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None):
     last_session = helix['last'] or {}
     if opti['present']:
         route = 'OptiScaler route'
-    elif (last_session.get('as_dll') or '').lower().startswith('amd_fidelityfx'):
+    elif drop_in or any((s['as_dll'] or '').lower().startswith('amd_fidelityfx') for s in helix['sessions']):
         route = 'FSR drop-in'
     elif helix['present']:
         route = 'HelixSR'
@@ -478,16 +492,18 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None):
     if entries and crashed['verdict'] != 'Yes':
         latest = entries[-1]
         note = (f"Windows also recorded {len(entries)} crash(es) of this game in the last 14 days; the latest is "
-                f"{latest['when']} inside {latest['module']}. See Windows crashes below.")
+                f"{latest['when']}: {crash_what(latest)}. See Windows crashes below.")
     if opti['present'] and opti['fg_delivered'] > 0:
-        framegen = {'verdict': 'Yes', 'evidence': opti['fg_first_delivered'] or opti['fg_first_dispatch']}
+        framegen = {'verdict': 'Yes', 'evidence': (
+            f"{opti['fg_delivered']} frames delivered by {'FSR ' if 'FSRFG' in opti['fg_first_delivered'] else ''}"
+            f"frame generation, {opti['activates']} activation{'' if opti['activates'] == 1 else 's'}")}
     elif opti['present'] and enabled:
         framegen = {'verdict': 'No', 'evidence': opti['fg_first_dispatch'] or opti['fg_config'] or
                     'frame generation on, no dispatch line in OptiScaler.log'}
     elif opti['present'] and enabled is False:
         framegen = {'verdict': 'No', 'evidence': opti['fg_config'] or 'FrameGen Enabled is off in OptiScaler.ini'}
     elif route == 'FSR drop-in':
-        create = last_session.get('create', '')
+        create = next((s['create'] for s in reversed(helix['sessions']) if s['create']), '')
         framegen = {'verdict': 'No', 'evidence': ('the FSR drop-in route has no OptiScaler and no frame '
                                                   f"generation: {create}" if create else
                                                   'the FSR drop-in has no frame generation')}
@@ -590,10 +606,23 @@ def timeline_lines(run, verdicts=True):
     return lines
 
 
+def drop_in_before(actions, moment):
+    """True when the install log says the FSR drop-in was in place just before `moment`. A history snapshot is
+    taken as an install, update or remove starts, so the action that took it (the last one at or before the
+    stamp) is left out."""
+    earlier = [action for action in actions if action['when'] <= moment][:-1]
+    last = next((action for action in reversed(earlier) if action['outcome'] != 'failed'), None)
+    return bool(last and last['action'] != 'remove' and last['route'] == 'direct')
+
+
 def runs_of(files, folder, report_date=''):
     """(timelines, crashes, proton present) for one game folder of a report: the latest run first, then each
-    kept history snapshot newest first. History files never join the latest run."""
+    kept history snapshot newest first. History files never join the latest run. A run whose logs do not name
+    its route gets it from the install record: games.txt for the latest run, the install log for a kept one."""
     prefix = folder + '/'
+    install = next((game['install'] for game in parse_games((files or {}).get('games.txt', ''))
+                    if game['folder'] == folder), '')
+    actions = parse_actions((files or {}).get(prefix + SESSION_LOG, ''))
     crashes = parse_crashes((files or {}).get(prefix + 'crashes.txt', ''))
     current, history = {}, {}
     for name, text in (files or {}).items():
@@ -604,10 +633,10 @@ def runs_of(files, folder, report_date=''):
             history.setdefault(rest.split('/')[1], {})[name] = text
         else:
             current[name] = text
-    runs = [timeline_of(current, 'Latest run', report_date, crashes)]
+    runs = [timeline_of(current, 'Latest run', report_date, crashes, install == 'drop-in DLL')]
     for stamp in sorted(history, reverse=True):
         runs.append(timeline_of(history[stamp], f'Earlier run kept {stamp_text(stamp)}',
-                                stamp_text(stamp)[:10], None))
+                                stamp_text(stamp)[:10], None, drop_in_before(actions, stamp_text(stamp))))
     proton = any(_base(name) == 'proton.log' for name in current)
     return runs, crashes, proton
 

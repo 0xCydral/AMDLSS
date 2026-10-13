@@ -145,3 +145,62 @@ def test_a_game_without_exes_skips_the_query(tmp_path):
                                 dumps_dir=tmp_path, wer_folders=[])
     assert 'No .exe file was found in the game folder, so the event log was not searched.' in text
     assert called == [] and os.name  # the query never ran; collection still produced the file
+
+
+def wer(when, name, *signature):
+    """An Event 1001 as Get-WinEvent hands it over, in a Spanish Windows: the text is localized and says nothing the
+    replacement strings do not (fault bucket, bucket type, event name, response, cab id, P1..P10, then the rest)."""
+    p = list(signature) + [''] * (10 - len(signature))
+    return {'time': when, 'id': 1001, 'provider': 'Windows Error Reporting',
+            'message': 'Cubo de errores 1, tipo 4\nNombre del evento: ' + name + '\nP4:\nP5: 1.0\n',
+            'props': ['1', '4', name, 'No disponible', '0'] + p + [r'\\?\C:\WER\a.tmp', 'store', '', '0', 'id']}
+
+
+APPCRASH = wer('2026-10-12 11:50:29', 'APPCRASH', 'One.exe', '1.0.0.0', '65000000', 'atiadlxx.dll_unloaded',
+               '32.0.21045.5002', '66000000', 'c0000005', '0000000000068bc5', '', '')
+BEX64 = wer('2026-10-12 12:00:00', 'BEX64', 'One.exe', '1.0.0.0', '65000000', 'ClassicExplorer64.dll', '4.2.0.0',
+            '548d2d73', '0000000000032f8e', 'c0000409', '0000000000000000')
+HANG = wer('2026-10-12 13:00:00', 'AppHangB1', 'One.exe', '1.0.0.0', '65000000', 'ab12cd', '0', '10.0.26100.1')
+
+
+def test_event_1001_replacement_strings_give_the_module_in_any_windows_language():
+    crash = crashes.parse_event(APPCRASH, ['One.exe'])
+    assert (crash['exe'], crash['module'], crash['version'], crash['exception'], crash['offset'], crash['event'],
+            crash['name']) == ('One.exe', 'atiadlxx.dll_unloaded', '32.0.21045.5002', 'c0000005',
+                               '0000000000068bc5', '1001', 'APPCRASH')
+    swapped = crashes.parse_event(BEX64, ['One.exe'])   # BEX64 puts the offset in P7 and the exception code in P8
+    assert (swapped['module'], swapped['exception'], swapped['offset']) == ('ClassicExplorer64.dll', 'c0000409',
+                                                                         '0000000000032f8e')
+    stopped = crashes.parse_event(HANG, ['One.exe'])   # a hang names no module
+    assert stopped['name'] == 'AppHangB1' and stopped['exception'] == '' and stopped['module'] == 'unknown'
+    assert 'event name: AppHangB1' in crashes.format_entry(stopped)
+    assert crashes.parse_event(wer('2026-10-12 13:00:00', 'APPCRASH', 'Other.exe'), ['One.exe']) is None
+
+
+def test_event_1001_with_missing_fields_still_parses_and_never_reads_the_p_labels_from_the_text():
+    short = dict(APPCRASH, props=APPCRASH['props'][:8])   # cut after P3
+    entry = crashes.parse_event(short, ['One.exe'])
+    assert entry['exe'] == 'One.exe' and entry['module'] == 'unknown' and entry['exception'] == ''
+    # no replacement strings at all, only the text
+    textonly = crashes.parse_event(dict(APPCRASH, props=[], message='P1: One.exe\nP4:\nP5: 1.0\n'), ['One.exe'])
+    assert textonly['exe'] == 'One.exe' and textonly['module'] == 'unknown'   # the text's "P4:" is not a module
+
+
+def test_a_1001_that_repeats_a_1000_is_shown_once_but_a_lone_1001_and_a_hang_stay():
+    first = dict(EVENT_1000, time='2026-10-12 11:50:27')
+    twin = dict(APPCRASH, time='2026-10-12 11:50:29')      # two seconds after, as Windows writes it
+    later = dict(APPCRASH, time='2026-10-12 12:30:00')     # no 1000 beside it
+    entries = crashes.entries_from([twin, later, HANG, first], ['One.exe'])
+    assert [(entry['when'][11:], entry['event']) for entry in entries] == [
+        ('11:50:27', '1000'), ('12:30:00', '1001'), ('13:00:00', '1001')]
+    other = dict(first, time='2026-10-12 11:50:28', props=['Other.exe'] + first['props'][1:])
+    assert len(crashes.entries_from([other, twin], ['One.exe', 'Other.exe'])) == 2   # a different exe is not a twin
+
+
+def test_crashes_txt_carries_the_event_name_and_the_reader_reads_it_back(tmp_path):
+    game = make_game(tmp_path)
+    text = crashes.crashes_text(game, windows=True, run=serve(APPCRASH, HANG), dumps_dir=tmp_path / 'none',
+                                wer_folders=[])
+    assert ('2026-10-12 11:50:29 | One.exe | faulting module: atiadlxx.dll_unloaded | module version: '
+            '32.0.21045.5002 | exception: c0000005 | offset: 0000000000068bc5 | Event ID: 1001 | module path:  | '
+            'event name: APPCRASH') in text

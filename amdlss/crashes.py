@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import host, identify
@@ -29,6 +30,10 @@ MAX_EVENTS = 500
 TIMEOUT = 30
 MAX_EXES = 200
 MAX_LISTED = 20
+MERGE_SECONDS = 10   # Windows writes Event 1001 about 2 s after the 1000 for the same crash (seen on a real PC)
+# WER's own event name -> (P number of the exception code, P number of the offset). Both are in the problem
+# signature of Event 1001, but BEX64 swaps them (a real BEX64 record: P7 0000000000032f8e, P8 c0000409).
+WER_CRASH = {'appcrash': (7, 8), 'bex64': (8, 7), 'bex': (8, 7)}
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # The events come back as base64 of UTF-8 JSON (PowerShell's console encoding would garble accented names), the
 # same shape amdlss.logs uses for the graphics card. No matching events is an empty list, never an error:
@@ -115,20 +120,44 @@ def _message(patterns, message):
     return ''
 
 
+def _wer_fields(props):
+    """The fields of an Event 1001 from its replacement strings, which do not depend on the Windows language:
+    [0] fault bucket, [1] bucket type, [2] event name, [3] response, [4] cab id, [5..14] P1..P10 (the order of
+    the event text's "Problem signature"). P1 is the application name; APPCRASH and BEX64 add P4 the faulting
+    module, P5 its version and the exception code and offset (WER_CRASH); AppHang* has no faulting module.
+    None when P1 is not an .exe name."""
+    def p(number):
+        return props[4 + number] if len(props) > 4 + number else ''
+
+    name = props[2] if len(props) > 2 else ''
+    if not p(1).lower().endswith('.exe'):
+        return None
+    found = {'app': p(1), 'name': name, 'hang': name.lower().startswith('apphang')}
+    if name.lower() in WER_CRASH:
+        code, where = WER_CRASH[name.lower()]
+        found.update(module=p(4), version=p(5), exception=p(code), offset=p(where))
+    return found
+
+
 def parse_event(raw, exe_names):
     """One raw event that names one of `exe_names`, as {when, exe, module, version, exception, offset, event,
-    path}, or None. Event 1000's replacement strings (props) hold the fields in a fixed order that does not
-    depend on the Windows language; the message text (English or Spanish) and WER's P1/P4 are the fallback."""
+    path} (plus `name`, WER's event name, for an Event 1001 whose replacement strings were read), or None.
+    The replacement strings (props) hold the fields in a fixed order that does not depend on the Windows
+    language (Event 1000: _wer_fields for 1001); the message text (English or Spanish) is the fallback."""
     message, props = str(raw.get('message') or ''), [str(value) for value in raw.get('props') or []]
-    app = module = version = exception = offset = app_path = module_path = ''
-    if str(raw.get('id')) == '1000' and len(props) >= 8 and props[0].lower().endswith('.exe'):
+    app = module = version = exception = offset = app_path = module_path = name = ''
+    wer = _wer_fields(props) if str(raw.get('id')) == '1001' else None
+    if wer:
+        app, name = wer['app'], wer['name']
+        module, version, exception, offset = (wer.get(key, '') for key in ('module', 'version', 'exception', 'offset'))
+    elif str(raw.get('id')) == '1000' and len(props) >= 8 and props[0].lower().endswith('.exe'):
         app, module, version, exception, offset = props[0], props[3], props[4], props[6], props[7]
         app_path, module_path = (props[10] if len(props) > 10 else ''), (props[11] if len(props) > 11 else '')
     else:
         app = _message((r'Faulting application name:\s*([^,\r\n]+)', 'Nombre de la aplicación con errores'
-                        r':\s*([^,\r\n]+)', r'\bP1:\s*(\S+\.exe)'), message)
-        module = _message((r'Faulting module name:\s*([^,\r\n]+)', r'Nombre del módulo con errores:\s*([^,\r\n]+)',
-                           r'\bP4:\s*(\S+)'), message)
+                        r':\s*([^,\r\n]+)', r'\bP1:[ \t]*(\S+\.exe)'), message)
+        module = _message((r'Faulting module name:\s*([^,\r\n]+)', r'Nombre del módulo con errores:\s*([^,\r\n]+)'),
+                          message)
         exception = _message((r'Exception code:\s*(\S+)', r'Código de excepción:\s*(\S+)'), message)
         offset = _message((r'Fault offset:\s*(\S+)', r'Desplazamiento de errores:\s*(\S+)'), message)
         app_path = _message((r'Faulting application path:\s*(.+)', r'Ruta de la aplicación con errores:\s*(.+)'),
@@ -145,14 +174,36 @@ def parse_event(raw, exe_names):
         return None
     if ('\\' in module or '/' in module) and not module_path:
         module_path = module
-    return {'when': str(raw.get('time') or ''), 'exe': hit, 'module': _basename(module) or 'unknown',
-            'version': version, 'exception': exception, 'offset': offset,
-            'event': str(raw.get('id') or ''), 'path': module_path}
+    entry = {'when': str(raw.get('time') or ''), 'exe': hit, 'module': _basename(module) or 'unknown',
+             'version': version, 'exception': exception, 'offset': offset,
+             'event': str(raw.get('id') or ''), 'path': module_path}
+    if name:
+        entry['name'] = name
+    return entry
+
+
+def _seconds(entry):
+    try:
+        return datetime.strptime(entry['when'], '%Y-%m-%d %H:%M:%S').timestamp()
+    except ValueError:
+        return None
+
+
+def _repeats_a_1000(entry, entries):
+    """True for an Event 1001 (not a hang) that Windows wrote for the Event 1000 of the same exe a moment
+    before or after: one crash, shown once, with the 1000's richer record."""
+    if entry['event'] != '1001' or entry.get('name', '').lower().startswith('apphang') or _seconds(entry) is None:
+        return False
+    return any(other['event'] == '1000' and other['exe'].lower() == entry['exe'].lower()
+               and _seconds(other) is not None and abs(_seconds(other) - _seconds(entry)) <= MERGE_SECONDS
+               for other in entries)
 
 
 def entries_from(raw, exe_names):
-    """The parsed crash records for `exe_names` out of raw events already queried, oldest first."""
+    """The parsed crash records for `exe_names` out of raw events already queried, oldest first, an Event 1001
+    that repeats an Event 1000 left out."""
     entries = [entry for entry in (parse_event(item, exe_names) for item in raw or []) if entry]
+    entries = [entry for entry in entries if not _repeats_a_1000(entry, entries)]
     return sorted(entries, key=lambda entry: entry['when'])
 
 
@@ -173,6 +224,8 @@ def format_entry(entry):
              f"module version: {_clean(entry['version'])}", f"exception: {_clean(entry['exception'])}",
              f"offset: {_clean(entry['offset'])}", f"Event ID: {_clean(entry['event'])}",
              f"module path: {_clean(entry['path'])}"]
+    if entry.get('name'):
+        parts.append(f"event name: {_clean(entry['name'])}")
     return ' | '.join(parts)
 
 
