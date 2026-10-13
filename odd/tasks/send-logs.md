@@ -26,7 +26,7 @@ OptiScaler installed, a helixsr/optiscaler/fakenvapi log, or an AMDLSS session l
 
 - [x] T1 receiver Worker + tests (delegated, Muse): `node --test receiver/`, 20 pass
 - [x] T2 client `ReportClient` + Send logs button + tests (delegated, Muse): 234 pass, 3 skipped (was 204 + 3)
-- [ ] T3 fetch CLI with quarantine + tests (delegated, Muse)
+- [x] T3 fetch CLI with quarantine + tests (delegated, Muse): 254 pytest pass, 3 skipped
 - [ ] T4 deploy: user runs `wrangler login`, then deploy, set `REPORT_URL`, release beta.9
 
 Route: delegated direct (3+ non-trivial files).

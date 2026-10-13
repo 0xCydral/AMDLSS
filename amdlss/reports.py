@@ -314,24 +314,51 @@ class ReportClient:
             raise ReportError('the report is too large to send')
         request = urllib.request.Request(self.endpoint(), data=body, method='POST', headers={
             'Content-Type': 'application/json', 'User-Agent': f'AMDLSS/{VERSION}'})
+        return self.code_of(self.exchange(request, MAX_ANSWER))
+
+    def fetch(self, code, token):
+        """The report stored under `code` (the developer's side: `token` is the server's READ_TOKEN), checked with
+        the same rules as an upload before anyone writes it anywhere."""
+        if not self.configured:
+            raise ReportError('no log server address is set')
+        if not valid_code(code):
+            raise ReportError('that is not a report code')
+        if not re.fullmatch('[\x21-\x7e]+', token or ''):
+            raise ReportError('the read token is empty or has characters a token never has')
+        request = urllib.request.Request(f'{self.endpoint()}/{code}', headers={
+            'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'User-Agent': f'AMDLSS/{VERSION}'})
+        answer = self.exchange(request, MAX_BODY)
+        try:
+            return validate(json.loads(answer))
+        except ValueError:
+            raise ReportError('the log server sent an answer that is not JSON')
+
+    def exchange(self, request, limit):
+        """The body of the answer to `request` (a connection error is tried once more). More than `limit` bytes,
+        or an HTTP error, is a ReportError."""
         for attempt in (1, 2):
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    answer = response.read(MAX_ANSWER + 1)
+                    answer = response.read(limit + 1)
                 break
             except urllib.error.HTTPError as error:   # before OSError: it is one
-                raise ReportError(self.refusal(error))
+                raise ReportError(self.refusal(error, request.get_method()))
             except (OSError, http.client.HTTPException) as error:
                 if attempt == 2:
                     raise ReportError(f'could not reach the log server ({error})')
                 if self.log:
-                    self.log(f'send logs: {error}; trying once more')
-        return self.code_of(answer)
+                    self.log(f'logs: {error}; trying once more')
+        if len(answer) > limit:
+            raise ReportError('the log server sent more than it should')
+        return answer
 
     @staticmethod
-    def refusal(error):
+    def refusal(error, method='POST'):
         if error.code == 429:
             return 'the log server is busy: try again in a minute'
+        if method == 'GET' and error.code in (401, 404):
+            return ('the read token was refused' if error.code == 401 else
+                    'no report has that code (the server deletes reports after 30 days)')
         try:
             reason = json.loads(error.read(2048)).get('error')
         except (OSError, ValueError, AttributeError):
@@ -342,7 +369,7 @@ class ReportClient:
     @staticmethod
     def code_of(answer):
         try:
-            code = json.loads(answer)['code'] if len(answer) <= MAX_ANSWER else None
+            code = json.loads(answer)['code']
         except (ValueError, KeyError, TypeError):
             code = None
         if not valid_code(code):

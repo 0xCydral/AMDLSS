@@ -88,6 +88,25 @@ def test_python_and_the_receivers_javascript_agree_on_every_name_text_and_limit(
     assert said['limits'] == [reports.MAX_BODY, reports.MAX_FILES]
 
 
+NODE_REPORTS = """
+import { validateReport } from './receiver/validate.js';
+console.log(JSON.stringify(JSON.parse(process.argv[1]).map((report) => validateReport(report).ok)));
+"""
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='no node')
+def test_the_receiver_accepts_what_the_app_builds_and_the_two_sides_share_the_file_limits(fake):  # noqa: F811
+    many = lambda count: {f'f{i}.txt': 'x' for i in range(count)}   # noqa: E731
+    built = build(fake, add_game(fake, 'Second Game', log='x'))
+    cases = [built, entries(**many(200)), entries(**many(201)), entries(**{'a/b/c/d/e.log': 'x'}),
+             entries(**{'a/b/c/d/e/f.log': 'x'}), {**built, 'game': 'x' * 121}]
+    root = Path(reports.__file__).resolve().parent.parent
+    done = subprocess.run(['node', '--input-type=module', '-e', NODE_REPORTS, json.dumps(cases)], cwd=root,
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [reports.problem_of(case) is None for case in cases] == [True, True, False, True, False, False]
+
+
 # --- building the report -----------------------------------------------------------------------------------------
 
 def add_game(fake_game, name, state='direct', log='', helixsr='1.9.0'):
@@ -278,16 +297,17 @@ def test_the_confirm_text_lists_the_games_and_how_many_files_each_sends(fake):  
 # --- the client --------------------------------------------------------------------------------------------------
 
 class Server:
-    """A local stand-in for the receiver: answers from `script` (one entry per request, the last one repeats) and
-    records what it was sent."""
+    """A local stand-in for the receiver: answers GET and POST from `script` (one entry per request, the last one
+    repeats) and records what it was sent."""
 
     def __init__(self, *script):
-        self.script, self.seen = list(script), []
+        self.script, self.seen, self.auth = list(script), [], []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                outer.auth.append(self.headers.get('Authorization'))
                 outer.seen.append((self.path, self.headers.get('Content-Type'), self.headers.get('User-Agent'), body))
                 step = outer.script[min(len(outer.seen), len(outer.script)) - 1]
                 if step == 'drop':
@@ -299,6 +319,8 @@ class Server:
                 self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            do_GET = do_POST
 
             def log_message(self, *args):
                 pass
@@ -355,10 +377,12 @@ def test_a_refusal_is_one_readable_error_and_is_not_tried_again(server):
 
 
 def test_an_answer_that_is_not_a_code_is_an_error(server):
-    for answer in (b'not json', {'code': 'short'}, {'code': 'abcd2345'}, {'code': 'ABCDEFGI'}, {'nope': 1}, [1], b'x' * 70000):
+    for answer in (b'not json', {'code': 'short'}, {'code': 'abcd2345'}, {'code': 'ABCDEFGI'}, {'nope': 1}, [1]):
         stub = server((200, answer))
         with pytest.raises(ReportError, match='not a report code'):
             ReportClient(stub.url).send(GOOD)
+    with pytest.raises(ReportError, match='more than it should'):
+        ReportClient(server((200, b'x' * 70000)).url).send(GOOD)
 
 
 def test_a_dropped_connection_is_tried_once_more(server):
@@ -398,6 +422,34 @@ def test_an_invalid_or_oversized_report_never_leaves_the_machine(server, monkeyp
     monkeypatch.setattr(reports, 'MAX_BODY', 50)
     with pytest.raises(ReportError, match='too large'):
         ReportClient(stub.url).send(GOOD)
+    assert stub.seen == []
+
+
+def test_a_report_is_fetched_with_the_token_and_checked_again(server):
+    stub = server((200, GOOD))
+    assert ReportClient(stub.url).fetch('ABCD2345', 'sekret-token') == GOOD
+    assert stub.seen[0][0] == '/reports/ABCD2345' and stub.auth == ['Bearer sekret-token']
+    for answer in (b'not json', entries(**{'../x.log': 'x'}), {**GOOD, 'extra': 1}, [], entries(**{'a.exe': 'x'})):
+        with pytest.raises(ReportError):
+            ReportClient(server((200, answer)).url).fetch('ABCD2345', 'sekret-token')
+    with pytest.raises(ReportError, match='token was refused'):
+        ReportClient(server((401, {'error': 'x'})).url).fetch('ABCD2345', 'wrong')
+    with pytest.raises(ReportError, match='no report has that code'):
+        ReportClient(server((404, {'error': 'x'})).url).fetch('ABCD2345', 'sekret-token')
+    with pytest.raises(ReportError, match='more than it should'):
+        ReportClient(server((200, b'x' * ((8 << 20) + 1))).url).fetch('ABCD2345', 'sekret-token')
+
+
+def test_fetch_checks_the_code_and_the_token_before_any_request(server):
+    stub = server((200, GOOD))
+    for code in ('../x', 'abcd2345', 'ABCD234', 'ILOU0000', '', None):
+        with pytest.raises(ReportError, match='not a report code'):
+            ReportClient(stub.url).fetch(code, 'tok')
+    for token in ('', None, 'a b', 'tok\r\nX-Evil: 1', 'tok\u00e9'):
+        with pytest.raises(ReportError, match='read token'):
+            ReportClient(stub.url).fetch('ABCD2345', token)
+    with pytest.raises(ReportError, match='no log server address'):
+        ReportClient('').fetch('ABCD2345', 'tok')
     assert stub.seen == []
 
 
