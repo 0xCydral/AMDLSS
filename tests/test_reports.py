@@ -217,6 +217,26 @@ def test_a_game_with_only_kept_history_still_reports(fake):  # noqa: F811
     assert '/history/' in log and report['files'][log] == 'the crash run\n'
 
 
+def test_one_report_asks_windows_for_crashes_once_for_every_game(fake):  # noqa: F811
+    from test_crashes import serve
+    event = {'time': '2026-10-13 14:20:11', 'id': 1000, 'provider': 'Application Error', 'message': '',
+             'props': ['Fake.exe', '1.0', '0x1', 'dxgi.dll', '0.9.4.0', '0x2', '0xc0000005', '0x99',
+                       '0x1', '0x1', r'E:\Games\Fake.exe', r'E:\Games\dxgi.dll']}
+    asked = []
+
+    def run(command):
+        asked.append(command)
+        return serve(event)(command)
+
+    second = add_game(fake, 'Second Game', log='x')
+    (Path(second.folder) / 'Second.exe').write_bytes(b'MZ')
+    report = reports.build_payload([fake[0], second], fake[1], fake[2], INFO, windows=True, crash_run=run)
+    assert len(asked) == 1 and 'Get-WinEvent -FilterHashtable' in asked[0][4]
+    assert 'faulting module: dxgi.dll' in report['files']['Fake-Game/crashes.txt']
+    assert 'No matching crash was recorded' in report['files']['Second-Game/crashes.txt']
+    assert 'listed only (not sent)' in report['files']['Fake-Game/crashes.txt']
+
+
 def test_folder_names_follow_the_zip_slug_and_are_unique_and_valid():
     names = ["Assassin's Creed: Shadows", 'MONSTER HUNTER STORIES 3', 'Game', 'game', 'GAME', 'Nul', 'Con.X', 'A...B',
              '???', '', 'x' * 100]

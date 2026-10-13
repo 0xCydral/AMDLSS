@@ -150,13 +150,16 @@ def parse_event(raw, exe_names):
             'event': str(raw.get('id') or ''), 'path': module_path}
 
 
+def entries_from(raw, exe_names):
+    """The parsed crash records for `exe_names` out of raw events already queried, oldest first."""
+    entries = [entry for entry in (parse_event(item, exe_names) for item in raw or []) if entry]
+    return sorted(entries, key=lambda entry: entry['when'])
+
+
 def crash_entries(exe_names, run=None, days=CRASH_DAYS):
     """(entries, why not): the parsed crash records for `exe_names`, oldest first."""
     raw, why = query_events(run, days)
-    if raw is None:
-        return [], why
-    entries = [entry for entry in (parse_event(item, exe_names) for item in raw) if entry]
-    return sorted(entries, key=lambda entry: entry['when']), None
+    return ([], why) if raw is None else (entries_from(raw, exe_names), None)
 
 
 def _clean(value):
@@ -234,8 +237,10 @@ def proton_log_path(game, home=None):
     return path if path.is_file() else None
 
 
-def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None, home=None, days=CRASH_DAYS):
-    """crashes.txt for one game (unredacted: the caller replaces the user name) (see the module text)."""
+def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None, home=None, days=CRASH_DAYS,
+                 events=None):
+    """crashes.txt for one game (unredacted: the caller replaces the user name) (see the module text).
+    `events` is a query_events() answer shared across games, so one report runs PowerShell once."""
     if not host.is_windows(windows):
         appid, proton = steam_appid(game), proton_log_path(game, home)
         lines = [f'Windows crashes for {game.name} (not collected on Linux)',
@@ -258,7 +263,11 @@ def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None,
     if not exes:
         lines.append('No .exe file was found in the game folder, so the event log was not searched.')
     else:
-        entries, why = crash_entries(exes, run, days)
+        if events is None:
+            entries, why = crash_entries(exes, run, days)
+        else:
+            raw, why = events
+            entries = [] if raw is None else entries_from(raw, exes)
         if why:
             lines.append(f'The Windows event log could not be read: {why}. Collection continued without it.')
         elif entries:
@@ -276,11 +285,11 @@ def crashes_text(game, windows=None, run=None, dumps_dir=None, wer_folders=None,
 
 
 def crashes_evidence(game, redact, windows=None, run=None, dumps_dir=None, wer_folders=None, home=None,
-                     days=CRASH_DAYS):
+                     days=CRASH_DAYS, events=None):
     """('crashes.txt', bytes) for Collect logs and Send logs, the user name already replaced. A failure to even
     build the text becomes the file's one line: collecting logs never stops for crash evidence."""
     try:
-        text = crashes_text(game, windows, run, dumps_dir, wer_folders, home, days)
+        text = crashes_text(game, windows, run, dumps_dir, wer_folders, home, days, events)
     except Exception as error:   # noqa: BLE001 (best effort by contract: see the module text)
         text = (f'Windows crashes for {game.name}\n'
                 f'The Windows event log could not be read: {error}. Collection continued without it.\n')

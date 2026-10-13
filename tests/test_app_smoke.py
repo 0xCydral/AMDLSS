@@ -305,7 +305,7 @@ def test_send_logs_button_sends_every_game_in_one_report_and_shows_the_code(wind
     (window[2] / 'Three' / 'OptiScaler.log').write_text('[Info] three\n', newline='')
     app.send_logs()
     title, text, _options = answers.asked[-1]
-    assert title == 'Send logs' and 'One: ' in text and 'Three: 2 files' in text and 'AMDLSS log server' in text
+    assert title == 'Send logs' and 'One: ' in text and 'Three: 3 files' in text and 'AMDLSS log server' in text
     wait(top, app, lambda: sent and not app.busy)
     assert sorted({n.split('/')[0] for n in sent[0]['files']}) == ['One', 'Three', 'games.txt', 'system.txt']
     assert sent[0]['files']['Three/exe-folder/OptiScaler.log'] == '[Info] three\n'

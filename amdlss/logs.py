@@ -493,17 +493,18 @@ def zip_name(game, now=None):
     return f'AMDLSS-logs-{slug(game.name)}-{time.strftime("%Y%m%d-%H%M", now or time.localtime())}.zip'
 
 
-def game_evidence(game, data_dir, redact, windows=None, crash_run=None):
+def game_evidence(game, data_dir, redact, windows=None, crash_run=None, crash_events=None):
     """[(name, bytes)] for one game, the user name already replaced: the files found, files.txt, the crash
-    record (amdlss.crashes; `crash_run` is its PowerShell seam, tests), the Proton log on Linux when present,
-    AMDLSS's own record of the installs and removals, and the kept history, newest snapshots last."""
+    record (amdlss.crashes; `crash_run` is its PowerShell seam, tests, and `crash_events` one query shared
+    across games), the Proton log on Linux when present, AMDLSS's own record of the installs and removals,
+    and the kept history, newest snapshots last."""
     found = []
     for name, source in gather(game):
         data = read_capped(source)
         if data is not None:
             found.append((name, redact_bytes(data, redact)))
     found.append(('files.txt', redact(files_text(game)).encode('utf-8')))
-    found.append(crashes.crashes_evidence(game, redact, windows, crash_run))
+    found.append(crashes.crashes_evidence(game, redact, windows, crash_run, events=crash_events))
     if not host.is_windows(windows):
         proton = crashes.proton_log_path(game)
         data = read_capped(proton) if proton else None

@@ -263,9 +263,10 @@ def build_payload(games, helixsr_folder, data_dir, info=None, windows=None, cras
     redact, folders = logs.redactor(), folder_names(games)
     held = [logs.system_evidence(helixsr_folder, redact, info),
             ('games.txt', redact(games_text(games, folders)).encode('utf-8'))]
+    shared = logs.crashes.query_events(crash_run) if logs.host.is_windows(windows) else None
     for game, folder in zip(games, folders):
         held += [(f'{folder}/{name}', data)
-                 for name, data in logs.game_evidence(game, data_dir, redact, windows, crash_run)]
+                 for name, data in logs.game_evidence(game, data_dir, redact, windows, crash_run, shared)]
     held = [(name, data) for name, data in held if not name_problem(name)]
 
     def rank(item):   # stable within a rank: AMDLSS's own writes, the current logs, then kept history
