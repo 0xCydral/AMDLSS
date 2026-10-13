@@ -73,3 +73,4 @@ Decisions:
   the client release that first sends history files
 
 Route: delegated direct (multi-file feature).
+- [x] T6 shipped 2026-10-13: receiver redeployed (version b06c5440) before the client; released v0.1.0-beta.11 (exe 65e79552, linux ec37799f); updater offers it on both hosts; real report TFTKA6A3 re-read through the new page answers FG Yes / crash No for AC Shadows and 10512 frames / crash No for Monster Hunter
