@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import covers, framegen, games, helixsr, identify, logs, update
+from . import covers, framegen, games, helixsr, identify, logs, reports, update
 
 
 def check_parsing():
@@ -105,6 +105,16 @@ def check_collect_logs():
         with zipfile.ZipFile(path) as archive:
             assert sorted(archive.namelist()) == ['exe-folder/HelixSR/helixsr.log', 'files.txt', 'system.txt']
             assert b'HelixSR 1.8.1' in archive.read('files.txt')
+
+def check_reports():
+    files = {'G/exe-folder/helixsr.log': 'ok\n', 'system.txt': 'x'}
+    sample = {'app': 'AMDLSS', 'version': '0.1.0', 'game': 'G', 'files': files}
+    assert reports.problem_of(sample) is None
+    for bad in ({'../x.log': 'x'}, {'G/a.exe': 'x'}, {'a.log': 'x\x00'}, {'a/b/c/d/e/f.log': 'x'}):
+        assert reports.problem_of({**sample, 'files': bad}), bad
+    assert reports.valid_code('ABCD2345') and not reports.ReportClient('').configured
+    assert reports.folder_names([games.Game(name='Far Cry 6'), games.Game(name='far cry 6')]) == ['Far-Cry-6', 'far-cry-6-2']
+
 
 def check_helixsr():
     assert helixsr.setup_command(windows=True) == ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
@@ -228,7 +238,7 @@ def check_covers():
 
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_helixsr, check_zip_slip, check_update, check_identify, check_covers):
+                  check_collect_logs, check_reports, check_helixsr, check_zip_slip, check_update, check_identify, check_covers):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

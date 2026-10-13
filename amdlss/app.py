@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, covers, framegen, games as gamelist, helixsr, host, logs, settings, update
+from . import VERSION, covers, framegen, games as gamelist, helixsr, host, logs, reports, settings, update
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
 
@@ -219,6 +219,8 @@ class App:
         self.rescan_button.pack(side='right')
         self.add_button = FlatButton(tk, self.look, bar, 'Add game folder…', self.add_folder, bg=BG)
         self.add_button.pack(side='right', padx=px(8))
+        self.send_button = FlatButton(tk, self.look, bar, 'Send logs', self.send_logs, bg=BG)
+        self.send_button.pack(side='right')
         field = tk.Frame(bar, bg=FIELD, highlightthickness=1, highlightbackground=LINE, padx=px(10))
         field.pack(side='right', padx=px(8))
         magnifier(tk, self.look, field, FIELD).pack(side='left')
@@ -236,6 +238,7 @@ class App:
         self.tree.bind('<<TreeviewSelect>>', lambda _e: self.selection_changed())
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label='Collect logs', command=self.collect_logs)
+        self.menu.add_command(label='Send logs', command=self.send_logs)
         foot = tk.Frame(games, bg=BG)
         foot.pack(side='bottom', fill='x', pady=(px(6), 0))
         self.empty = self.label(foot, 'Install HelixSR first, then your games show up here.', 'small', MUTED,
@@ -300,8 +303,9 @@ class App:
         self.update_buttons()
 
     def card_menu(self, _number, x, y):
-        """Right-click on a card: it is already selected, offer Collect logs."""
+        """Right-click on a card: it is already selected, offer Collect logs (this game) and Send logs (all games)."""
         self.menu.entryconfigure(0, state=self.game_logs.state)
+        self.menu.entryconfigure(1, state=self.send_button.state)
         self.menu.tk_popup(x, y)
 
     def fit_height(self, event):
@@ -334,6 +338,7 @@ class App:
                                       else 'disabled')
         self.rescan_button.configure(state='normal' if idle else 'disabled')   # before HelixSR is installed too
         self.add_button.configure(state='normal' if idle else 'disabled')
+        self.send_button.configure(state='normal' if idle and self.games else 'disabled')
         self.game_install.configure(state='normal' if ready and game and game.can_install else 'disabled',
                                     text='Update' if game and game.installed else 'Install')
         self.game_remove.configure(state='normal' if ready and game and game.installed else 'disabled')
@@ -641,6 +646,53 @@ class App:
         self.set_busy(False)
         self.log_line(f'logs collected: {path}')
         logs.reveal(path, self.log_line)
+
+    def send_logs(self):
+        """Uploads the logs of every game that has any in one report and shows the code to paste in the chat."""
+        if self.busy or not self.games:
+            return
+        if not reports.ReportClient().configured:
+            return self.offer_zip('Sending logs is not set up in this build.')
+        if not reports.reportable(self.games, self.data_dir):
+            self.messagebox.showinfo('AMDLSS', 'No game has an install or logs yet, so there is nothing to send.')
+            return
+        if not self.messagebox.askyesno('Send logs', reports.confirm_text(self.games, self.data_dir)):
+            return
+        self.set_busy(True, None)
+        self.progress.configure(text=plain('Sending logs…'))
+        games, folder, data_dir = list(self.games), self.helixsr_folder, self.data_dir
+
+        def send():
+            try:
+                client = reports.ReportClient(log=lambda text: self.post(self.log_line, text))
+                return client.send(reports.build_payload(games, folder, data_dir))
+            except reports.ReportError as error:
+                return error
+
+        self.work(send, self.logs_sent)
+
+    def logs_sent(self, result):
+        self.set_busy(False)
+        if isinstance(result, reports.ReportError):
+            self.log_line(f'send logs failed: {result}')
+            return self.offer_zip(f'The logs were not sent: {result}.')
+        text = reports.report_text(result)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.log_line(f'logs sent: {text}')
+        self.messagebox.showinfo('AMDLSS', f'The logs are sent. Paste this in the chat (it is on the clipboard):'
+                                           f'\n\n{text}')
+
+    def offer_zip(self, reason):
+        """After a failed or impossible send: the zip of the selected game is what the tester can send by hand."""
+        game = self.selected()
+        if game and game.folder and os.path.isdir(game.folder):
+            if self.messagebox.askyesno('Send logs', f'{reason}\n\nCollect the logs of {game.name} into a zip on your '
+                                                    'Desktop instead?'):
+                self.collect_logs()
+        else:
+            self.messagebox.showerror('AMDLSS', f'{reason}\n\nSelect a game and press Collect logs to make a zip '
+                                                'you can send by hand.')
 
     def refresh_helixsr_status(self):
         if self.helixsr:

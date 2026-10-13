@@ -355,14 +355,45 @@ def desktop_dir(windows=None):
     return Path.home() / 'Desktop'
 
 
+def slug(name):
+    """`name` as a short file-name-safe label (the zip's name and, in a report, the game's folder)."""
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', name).strip('-.')[:40] or 'game'
+
+
 def zip_name(game, now=None):
-    slug = re.sub(r'[^A-Za-z0-9._-]+', '-', game.name).strip('-.')[:40] or 'game'
-    return f'AMDLSS-logs-{slug}-{time.strftime("%Y%m%d-%H%M", now or time.localtime())}.zip'
+    return f'AMDLSS-logs-{slug(game.name)}-{time.strftime("%Y%m%d-%H%M", now or time.localtime())}.zip'
+
+
+def game_evidence(game, data_dir, redact):
+    """[(name, bytes)] for one game, the user name already replaced: the files found, files.txt, and AMDLSS's own
+    record of the installs and removals in the game's folder."""
+    found = []
+    for name, source in gather(game):
+        data = read_capped(source)
+        if data is not None:
+            found.append((name, redact_bytes(data, redact)))
+    found.append(('files.txt', redact(files_text(game)).encode('utf-8')))
+    own = session_log_path(data_dir, game.folder) if game.folder else None
+    data = read_capped(own) if own else None
+    if data is not None:
+        found.append((SESSION_LOG, redact_bytes(data, redact)))
+    return found
+
+
+def system_evidence(helixsr_folder, redact, info=None):
+    """('system.txt', bytes): `info` replaces the PowerShell query (tests)."""
+    return 'system.txt', redact(system_text(helixsr_folder, info)).encode('utf-8')
+
+
+def evidence(game, helixsr_folder, data_dir, info=None):
+    """[(name, bytes)] of everything Collect logs puts in the zip for `game`."""
+    redact = redactor()
+    return game_evidence(game, data_dir, redact) + [system_evidence(helixsr_folder, redact, info)]
 
 
 def collect(game, helixsr_folder, data_dir, out_dir=None, info=None, now=None):
     """Writes the zip for `game` and returns its path. `info` replaces the PowerShell query (tests)."""
-    redact = redactor()
+    held = evidence(game, helixsr_folder, data_dir, info)
     target = Path(out_dir) if out_dir else desktop_dir()
     target.mkdir(parents=True, exist_ok=True)
     path = target / zip_name(game, now)
@@ -373,16 +404,8 @@ def collect(game, helixsr_folder, data_dir, out_dir=None, info=None, now=None):
     partial = path.with_name(path.name + '.part')
     try:
         with zipfile.ZipFile(partial, 'w', zipfile.ZIP_DEFLATED) as archive:
-            for name, source in gather(game):
-                data = read_capped(source)
-                if data is not None:
-                    archive.writestr(name, redact_bytes(data, redact))
-            archive.writestr('files.txt', redact(files_text(game)))
-            archive.writestr('system.txt', redact(system_text(helixsr_folder, info)))
-            own = session_log_path(data_dir, game.folder) if game.folder else None
-            data = read_capped(own) if own else None
-            if data is not None:
-                archive.writestr(SESSION_LOG, redact_bytes(data, redact))
+            for name, data in held:
+                archive.writestr(name, data)
         os.replace(partial, path)
     finally:
         partial.unlink(missing_ok=True)

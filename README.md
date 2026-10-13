@@ -67,7 +67,9 @@ The zip answers four questions: did HelixSR load, did the game call DLSS or FSR 
 - `system.txt`: Windows version, graphics card and driver, CPU, RAM, the AMDLSS and HelixSR versions and `helixsr_setup.json`;
 - `amdlss-install.log`: what AMDLSS printed when it installed into that game.
 
-Your Windows user name is replaced by `<user>` in every path and text, and nothing else from your user folder is read. Nothing is uploaded. A log larger than 16 MB goes in as its last 16 MB.
+Your Windows user name is replaced by `<user>` in every path and text, and nothing else from your user folder is read. Collect logs uploads nothing. A log larger than 16 MB goes in as its last 16 MB.
+
+**Send logs** (next to Rescan, or right-click a game) does the same for every game that has an install or a log, in one upload to the AMDLSS log server, and shows a code such as `AMDLSS report K7M2Q9XD`; it is also copied to the clipboard. Paste it in the chat. Each game's files sit in a folder named after the game, `system.txt` and a `games.txt` (name, folder, install mode and HelixSR version of each game) sit at the top. The dialog lists the games and the file count of each before anything leaves your PC. Only text files go up (at most 8 MiB; the largest logs of each game are cut to their last lines to fit) and the server deletes a report after 30 days. The server is in `receiver/`; `tools/amdlss-logs.py fetch <code>` downloads a report.
 
 For a game installed through the OptiScaler route, AMDLSS turns OptiScaler's file logging on after the install (`LogToFile=true` and `LogLevel=2` in the `[Log]` section of `OptiScaler.ini`, the same way as the frame generation values: nothing else in the file changes). **Remove** puts the file back through HelixSR's own uninstall, drops AMDLSS's record and deletes the `OptiScaler.log` that this switch made. Only a game run after the install has an `OptiScaler.log`: start the game, play a minute, close it, then press Collect logs.
 

@@ -288,6 +288,69 @@ def test_collect_logs_button_writes_the_zip_and_shows_it(window, monkeypatch):
         assert 'install (optiscaler)' in archive.read('amdlss-install.log').decode()
 
 
+def test_send_logs_button_sends_every_game_in_one_report_and_shows_the_code(window, monkeypatch):
+    from amdlss import logs, reports
+    answers, sent = Answers(), []
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    monkeypatch.setattr(logs, 'system_info', lambda *args, **kwargs: {})
+    monkeypatch.setattr(reports, 'REPORT_URL', 'https://logs.example.test')
+    monkeypatch.setattr(reports.ReportClient, 'send', lambda self, report: sent.append(report) or 'ABCD2345')
+    assert app.send_button.state == 'normal'   # not tied to a selection
+    app.send_logs()   # nothing installed and no log anywhere: nothing to send and nothing asked
+    assert not answers.asked and 'nothing to send' in answers.told[-1] and not sent
+    app.tree.selection_set('0')
+    top.update()
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    (window[2] / 'Three' / 'OptiScaler.log').write_text('[Info] three\n')
+    app.send_logs()
+    title, text, _options = answers.asked[-1]
+    assert title == 'Send logs' and 'One: ' in text and 'Three: 2 files' in text and 'AMDLSS log server' in text
+    wait(top, app, lambda: sent and not app.busy)
+    assert sorted({n.split('/')[0] for n in sent[0]['files']}) == ['One', 'Three', 'games.txt', 'system.txt']
+    assert sent[0]['files']['Three/exe-folder/OptiScaler.log'] == '[Info] three\n'
+    assert 'AMDLSS report ABCD2345' in answers.told[-1] and top.clipboard_get() == 'AMDLSS report ABCD2345'
+    assert 'logs sent: AMDLSS report ABCD2345' in app.log.get('1.0', 'end')
+    assert app.send_button.state == 'normal' and not app.busy
+
+
+def test_a_failed_or_impossible_send_offers_the_zip_of_the_selected_game(window, monkeypatch):
+    import zipfile
+
+    from amdlss import logs, reports
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    desktop = window[2] / 'desktop'
+    monkeypatch.setattr(logs, 'desktop_dir', lambda: desktop)
+    monkeypatch.setattr(logs, 'system_info', lambda *args, **kwargs: {})
+    monkeypatch.setattr(logs, 'reveal', lambda path, say=print: None)
+    (one / 'OptiScaler.log').write_text('[Info] hooked\n')
+
+    def refused(self, report):
+        raise reports.ReportError('could not reach the log server (offline)')
+
+    monkeypatch.setattr(reports.ReportClient, 'send', refused)
+    app.tree.selection_set('0')
+    top.update()
+    app.send_logs()   # the build has no server address: no confirmation of a send, the zip is offered at once
+    offers = [(t, x) for t, x, _o in answers.asked if 'not set up in this build' in x]
+    assert offers and offers[0][0] == 'Send logs' and 'Collect the logs of One into a zip' in offers[0][1]
+    assert answers.asked[-1][0] == 'Collect logs for One'   # the tester said yes: the usual zip flow starts
+    wait(top, app, lambda: list(desktop.glob('AMDLSS-logs-One-*.zip')) and not app.busy)
+    assert len(list(desktop.glob('AMDLSS-logs-One-*.zip'))) == 1
+    shutil.rmtree(desktop)
+    monkeypatch.setattr(reports, 'REPORT_URL', 'https://logs.example.test')
+    app.send_logs()
+    assert [t for t, x, _o in answers.asked if 'AMDLSS log server' in x] == ['Send logs'] and not list(desktop.glob('*.zip'))
+    wait(top, app, lambda: any('The logs were not sent' in text for _t, text, _o in answers.asked))
+    failed = [text for _t, text, _o in answers.asked if 'The logs were not sent: could not reach' in text]
+    assert failed and 'Collect the logs of One into a zip on your Desktop instead?' in failed[0]
+    wait(top, app, lambda: list(desktop.glob('AMDLSS-logs-One-*.zip')) and not app.busy)
+    with zipfile.ZipFile(next(desktop.glob('AMDLSS-logs-One-*.zip'))) as archive:
+        assert 'exe-folder/OptiScaler.log' in archive.namelist()
+    assert 'send logs failed: could not reach the log server (offline)' in app.log.get('1.0', 'end')
+
+
 def rows_of(app):
     return [app.tree.item(i, 'values') for i in app.tree.get_children()]
 
