@@ -10,6 +10,6 @@ cd -- "$(dirname -- "$0")/.."
 uv run --no-project --managed-python --python 3.12 --with pyinstaller --with pillow python -m PyInstaller \
     --noconfirm --clean --log-level WARN --windowed --onefile \
     --name AMDLSS-linux-x86_64 --add-data "$PWD/amdlss.ico:." \
-    --hidden-import PIL.ImageTk --distpath dist --workpath out/pyi-work-linux --specpath out/pyi-work-linux \
+    --hidden-import PIL.ImageTk --hidden-import PIL._tkinter_finder --distpath dist --workpath out/pyi-work-linux --specpath out/pyi-work-linux \
     --paths "$PWD" "$PWD/AMDLSS.pyw"
 sha256sum dist/AMDLSS-linux-x86_64

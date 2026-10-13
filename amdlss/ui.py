@@ -10,6 +10,7 @@ widgets of the same names, without the animation layer.
 import colorsys
 import os
 import re
+import sys
 import zlib
 from collections import namedtuple
 from pathlib import Path
@@ -401,6 +402,7 @@ class Gallery:
         self.canvas.pack(side='left', fill='both', expand=True)
         self.cards, self.selected, self.outlines = [], None, {}
         self.photos, self.last_photos = {}, {}   # PhotoImages must stay referenced or Tk blanks them
+        self.cover_error = ''   # the first reason a cover could not be drawn
         self.size, self.total, self.scrolls = None, 0, False
         c = self.canvas
         c.bind('<Configure>', self.resized)
@@ -497,7 +499,10 @@ class Gallery:
         if key not in self.photos:
             try:
                 self.photos[key] = self.last_photos.get(key) or ImageTk.PhotoImage(cover_art(path, w, h, r))
-            except Exception:   # Pillow raises many kinds for a bad file; a card must never fail to draw over one
+            except Exception as error:   # Pillow raises many kinds for a bad file; a card must never fail to draw
+                if not self.cover_error:   # but say why once, or a broken build looks like "no covers"
+                    self.cover_error = f'{type(error).__name__}: {error}'
+                    print(f'AMDLSS: game cover not drawn ({path}): {self.cover_error}', file=sys.stderr)
                 return None
         return self.photos[key]
 

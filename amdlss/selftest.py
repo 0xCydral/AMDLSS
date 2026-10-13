@@ -190,6 +190,10 @@ def check_identify():
 
 
 def check_covers():
+    from . import ui
+    if ui.ImageTk is not None:   # ImageTk loads this on its first photo; a frozen build without it draws no cover
+        import importlib
+        importlib.import_module('PIL._tkinter_finder')
     jpeg = b'\xff\xd8\xff\xe0' + b'x' * 50
     asked = []
     found = [{'appid': '292030', 'name': 'The Witcher 3: Wild Hunt \u2014 Remastered'},
