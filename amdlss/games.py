@@ -210,6 +210,7 @@ MARKERS = (
     ('gameguard', 'GameGuard'), ('xigncode', 'XIGNCODE3'), ('punkbuster', 'PunkBuster'),
     ('faceit', 'FACEIT'), ('ricochet', 'Ricochet'), ('denuvoanticheat', 'Denuvo Anti-Cheat'),
     ('eaanticheat', 'EA anti-cheat'), ('mhyprot', 'HoYoverse anti-cheat'), ('anticheatexpert', 'ACE anti-cheat'),
+    ('ace-idw', 'ACE anti-cheat'), ('ace-base', 'ACE anti-cheat'),   # Tencent ACE's DLLs beside the game (Delta Force)
 )
 _MARKER_RES = tuple((re.compile(r'(?<![a-z0-9])' + re.escape(word) + r'\d*(?![a-z0-9])'), product)
                     for word, product in MARKERS)

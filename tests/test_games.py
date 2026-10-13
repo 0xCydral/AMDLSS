@@ -92,6 +92,13 @@ def test_anticheat_names_are_whole_words():
     assert games.anticheat_of('Binaries') is None
 
 
+def test_ace_is_caught_by_the_dlls_it_puts_next_to_the_game():
+    # Delta Force ships ACE-IDW64.dll in its game folder and no AntiCheatExpert folder there (tester report, 2026-10-13)
+    assert games.anticheat_of('ACE-IDW64.dll') == 'ACE anti-cheat'
+    assert games.anticheat_of('ACE-Base64.dll') == 'ACE anti-cheat'
+    assert games.anticheat_of('space-base.pak') is None and games.anticheat_of('race-idle.dat') is None
+
+
 def test_anticheat_scan_finds_nested_files_only_within_depth(tmp_path):
     deep = tmp_path / 'a' / 'b'
     deep.mkdir(parents=True)
