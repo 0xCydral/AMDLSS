@@ -24,6 +24,7 @@ import hashlib
 import http.client
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -369,6 +370,8 @@ def extract(part, target):
                     with archive.open(member) as source, open(temporary, 'wb') as out:
                         for block in iter(lambda: source.read(CHUNK), b''):
                             out.write(block)
+                    if (member.external_attr >> 16) & 0o111:   # zipfile drops the mode; the Linux setup runs these
+                        os.chmod(temporary, 0o755)
                     os.replace(temporary, destination)
                 except OSError:  # no half-written copy stays
                     temporary.unlink(missing_ok=True)
@@ -460,18 +463,43 @@ def setup_command(windows=None):
     return ['bash', SETUP_SH, '--yes']
 
 
-def build(folder, on_line=None, windows=None):
-    """Runs the setup in `folder`. Raises HelixSRError unless it ends with the network built."""
+def with_wine(env, data_dir):
+    """(env, found): the setup's environment, and whether it has a wine to run the shader compiler. The setup looks for
+    Proton in a few fixed Steam folders and for `wine` on PATH; a Proton in another Steam library would be missed, so a
+    one-line `wine` wrapper for it goes into <data dir>/bin, first on PATH."""
+    if host.setup_finds_wine(env):
+        return env, True
+    wine = host.find_proton_wine()
+    if wine is None:
+        return env, False
+    shim = Path(data_dir) / 'bin'
+    shim.mkdir(parents=True, exist_ok=True)
+    (shim / 'wine').write_text(f'#!/bin/sh\nexec {shlex.quote(str(wine))} "$@"\n', encoding='utf-8')
+    (shim / 'wine').chmod(0o755)
+    return {**env, 'PATH': f'{shim}{os.pathsep}{env.get("PATH", "")}'}, True
+
+
+NO_WINE_HINT = ('AMDLSS found no Proton in any Steam library and no wine on PATH: install Proton in Steam (any '
+                'library) or wine, then try again.')
+
+
+def build(folder, on_line=None, windows=None, data_dir=None):
+    """Runs the setup in `folder`. Raises HelixSRError unless it ends with the network built. On Linux `data_dir`
+    is where a wine wrapper may be written (see with_wine)."""
     folder = Path(folder)
     (folder / BUILT).unlink(missing_ok=True)  # a file of an earlier build must not pass for this one
-    env = child_env()
-    if not host.is_windows(windows) and find_python(False) is None:
-        # no Python with numpy: the setup would offer a sudo package install it cannot ask about from a window,
-        # so take its portable-Python route (the read-only-system one) instead
-        env['HELIXSR_FORCE_PORTABLE'] = '1'
+    env, wine = child_env(), True
+    if not host.is_windows(windows):
+        if find_python(False) is None:
+            # no Python with numpy: the setup would offer a sudo package install it cannot ask about from a window,
+            # so take its portable-Python route (the read-only-system one) instead
+            env['HELIXSR_FORCE_PORTABLE'] = '1'
+        if data_dir is not None:
+            env, wine = with_wine(env, data_dir)
     code, tail = run_streaming(setup_command(windows), folder, on_line, BUILD_TIMEOUT, env)
     if code != 0:
-        raise HelixSRError(f'HelixSR setup failed (exit {code}): {tail[-1] if tail else "no output"}')
+        hint = f' {NO_WINE_HINT}' if not wine and any('Proton or Wine' in line for line in tail) else ''
+        raise HelixSRError(f'HelixSR setup failed (exit {code}): {tail[-1] if tail else "no output"}{hint}')
     if not built(folder):
         raise HelixSRError(f'HelixSR setup finished but {BUILT} is missing in {folder}')
 
@@ -484,7 +512,7 @@ def install_helixsr(data_dir, consented, progress=None, on_line=None, force=Fals
     if force or not extracted(data_dir):
         fetch(data_dir, progress)
     folder = install_folder(data_dir)
-    build(folder, on_line)
+    build(folder, on_line, data_dir=data_dir)
     return folder
 
 

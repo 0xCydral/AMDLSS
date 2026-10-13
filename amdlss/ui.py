@@ -105,14 +105,45 @@ def round_rect(canvas, x0, y0, x1, y1, r, **options):
     return canvas.create_polygon(points, smooth=True, **options)
 
 
+# Font families in order of preference, per system: (sans, mono). The Tk of the Linux binary draws with the X server's
+# core fonts (no Xft), so the Linux lists end in the Type 1 families that ship with the X fonts; a family that is not
+# installed makes Tk pick a stand-in whose missing glyphs show up as stray symbols (a "®" for a "✗").
+FONT_CHOICES = {
+    True: (('Segoe UI', 'Arial', 'DejaVu Sans', 'Liberation Sans'), ('Consolas', 'DejaVu Sans Mono', 'Liberation Mono')),
+    False: (('Inter', 'Noto Sans', 'Cantarell', 'Ubuntu', 'DejaVu Sans', 'Liberation Sans', 'Nimbus Sans L',
+             'Helvetica'),
+            ('DejaVu Sans Mono', 'Noto Sans Mono', 'Liberation Mono', 'Nimbus Mono L', 'Courier'))}
+# The core fonts hold ✓ ✗ ⚠ • … at some sizes and weights only, and Tk fills the rest from whatever font it loaded
+# last (a "®" for a "✗", "®ƒ" for a "…"): on Linux the UI text uses ASCII for them.
+ASCII = str.maketrans({'✓': '+', '⚠': '!', '✗': 'x', '•': '-', '…': '...'})
+
+
+def plain(text, windows=None):
+    """`text` as the window draws it: unchanged on Windows, ✓ ✗ ⚠ • … as ASCII on Linux."""
+    return text if host.is_windows(windows) else text.translate(ASCII)
+
+
+def pick_fonts(families, default_sans, default_mono, windows=None):
+    """(sans, mono): the first preferred family that is installed (compared without case: the core fonts are
+    lower case), else the system's own default families (on Windows the names the window always used)."""
+    installed = {f.lower(): f for f in families}
+    sans_choices, mono_choices = FONT_CHOICES[host.is_windows(windows)]
+    sans = next((installed[f.lower()] for f in sans_choices if f.lower() in installed), None)
+    mono = next((installed[f.lower()] for f in mono_choices if f.lower() in installed), None)
+    return sans or default_sans, mono or default_mono
+
+
 class Look:
     """Scale and fonts shared by every control: px() scales by the display's DPI."""
 
     def __init__(self, root, tkfont):
         self.dpi = root.winfo_fpixels('1i') / 96.0
-        families = set(tkfont.families(root))
-        sans = next((f for f in ('Segoe UI', 'Arial', 'DejaVu Sans', 'Liberation Sans') if f in families), 'Arial')
-        mono = next((f for f in ('Consolas', 'DejaVu Sans Mono', 'Liberation Mono') if f in families), 'Consolas')
+        if host.WINDOWS:
+            default_sans, default_mono = 'Arial', 'Consolas'
+        else:
+            default_sans = tkfont.nametofont('TkDefaultFont', root=root).actual('family')
+            default_mono = tkfont.nametofont('TkFixedFont', root=root).actual('family')
+        sans, mono = pick_fonts(tkfont.families(root), default_sans, default_mono)
         self.fonts = {'body': (sans, 10), 'body_bold': (sans, 10, 'bold'), 'small': (sans, 9),
                       'chip': (sans, 8, 'bold'), 'h1': (sans, 24, 'bold'), 'h2': (sans, 14, 'bold'),
                       'mono': (mono, 9)}
@@ -126,8 +157,9 @@ class Look:
 
     def fit(self, spec, text, width):
         """`text` cut with an ellipsis so it is at most `width` pixels wide in font `spec`."""
+        dots = plain('…')
         while len(text) > 1 and self.measure(spec, text) > width:
-            text = text[:-2].rstrip() + '…' if text.endswith('…') else text[:-1].rstrip() + '…'
+            text = text[:-len(dots) - 1].rstrip() + dots if text.endswith(dots) else text[:-1].rstrip() + dots
         return text
 
 
@@ -135,6 +167,7 @@ class FlatButton:
     """A flat button: kind 'ghost' (quiet) or 'primary' (accent). Geometry methods go to the canvas."""
 
     def __init__(self, tk, look, parent, text, command, kind='ghost', bg=CARD, height=34, wide=False):
+        text = plain(text)
         self.look, self.text, self.command, self.kind, self.bg = look, text, command, kind, bg
         self.state, self.hover, self.pressed = 'normal', 0.0, False
         self.font = look.fonts['body_bold' if wide else 'body']
@@ -187,7 +220,7 @@ class FlatButton:
             self.canvas.configure(cursor='hand2' if self.state == 'normal' else 'arrow')
             self.hover = 0.0
         if 'text' in options:
-            self.text = options['text']
+            self.text = plain(options['text'])
             self.canvas.itemconfigure(self.label, text=self.text)
         self.paint()
 

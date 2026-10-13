@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import VERSION, covers, framegen, games as gamelist, helixsr, host, logs, settings, update
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
-                 Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, segmented, short_path)
+                 Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
 
 LINKS = (('HelixSR', 'https://github.com/lonewolf0622/HelixSR'),
          ('HelixSR license', 'https://github.com/lonewolf0622/HelixSR/blob/HEAD/LICENSE'),
@@ -98,7 +98,7 @@ class App:
         style.map('Vertical.TScrollbar', background=[('active', LINE_HI)])
 
     def label(self, parent, text, font='body', fg=TEXT, bg=BG, **options):
-        return self.tk.Label(parent, text=text, font=self.look.fonts[font], fg=fg, bg=bg, **options)
+        return self.tk.Label(parent, text=plain(text), font=self.look.fonts[font], fg=fg, bg=bg, **options)
 
     def card(self, parent, pady=12, **pack):
         """A bordered panel one section tall, packed with a gap below it."""
@@ -126,12 +126,14 @@ class App:
         status.pack(fill='x', pady=(0, gap))
         row = tk.Frame(status, bg=BG)
         row.pack(fill='x')
+        # the button is packed first: it keeps its room however long the status text is, and the text wraps in what is left
+        self.install_button = FlatButton(tk, self.look, row, 'Install HelixSR', self.install_helixsr, 'primary', bg=BG)
+        self.install_button.pack(side='right')
         self.glyph = self.label(row, '•', 'body_bold', DIM)
         self.glyph.pack(side='left')
         self.status = self.label(row, 'Looking for HelixSR…', 'body', TEXT, anchor='w', justify='left')
         self.status.pack(side='left', padx=px(8), fill='x', expand=True)
-        self.install_button = FlatButton(tk, self.look, row, 'Install HelixSR', self.install_helixsr, 'primary', bg=BG)
-        self.install_button.pack(side='right')
+        self.status.bind('<Configure>', lambda e: self.status.configure(wraplength=max(e.width, 1)))
         self.bar = Bar(tk, self.look, status, 400, bg=BG)
         self.progress = self.label(status, '', 'small', MUTED, anchor='w')
 
@@ -268,8 +270,8 @@ class App:
 
     def set_status(self, text):
         glyph = text[0] if text[:1] in GLYPH_COLORS else '•'
-        self.glyph.configure(text=glyph, fg=GLYPH_COLORS.get(glyph, DIM))
-        self.status.configure(text=text[1:].strip() if text[:1] in GLYPH_COLORS else text)
+        self.glyph.configure(text=plain(glyph), fg=GLYPH_COLORS.get(glyph, DIM))
+        self.status.configure(text=plain(text[1:].strip() if text[:1] in GLYPH_COLORS else text))
 
     def log_line(self, text, final=True):
         if not final:  # a progress update (carriage return): shown under the status, not kept in the log
@@ -330,8 +332,8 @@ class App:
         ready = idle and self.helixsr is not None
         self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale)
                                       else 'disabled')
-        self.rescan_button.configure(state='normal' if ready else 'disabled')
-        self.add_button.configure(state='normal' if ready else 'disabled')
+        self.rescan_button.configure(state='normal' if idle else 'disabled')   # before HelixSR is installed too
+        self.add_button.configure(state='normal' if idle else 'disabled')
         self.game_install.configure(state='normal' if ready and game and game.can_install else 'disabled',
                                     text='Update' if game and game.installed else 'Install')
         self.game_remove.configure(state='normal' if ready and game and game.installed else 'disabled')
@@ -455,13 +457,18 @@ class App:
     def rescan(self):
         self.failed.clear()
         self.cover_tried.clear()   # covers that could not be fetched are asked for again
-        self.refresh_games()
+        if self.helixsr is None:   # no HelixSR yet: look for it again (one installed by hand), which lists the games
+            self.refresh_helixsr()
+            if self.helixsr is None:
+                self.log_line('HelixSR is still not installed or built.')
+        else:
+            self.refresh_games()
 
     def refresh_games(self):
         if self.helixsr is None or self.busy:
             return
         self.set_busy(True, None)
-        self.progress.configure(text='Looking for games…')
+        self.progress.configure(text=plain('Looking for games…'))
         extras = list(self.extras)
         # HelixSR climbs four parent folders to look for a game around a folder with nothing in it, which can take
         # minutes on a big drive: a folder that failed is not handed over again until Rescan.
@@ -506,7 +513,7 @@ class App:
         if self.helixsr is None:
             self.empty.configure(text='Install HelixSR first, then your games show up here.')
         elif not self.games:
-            self.empty.configure(text='No game with DLSS, XeSS or FSR found. Use "Add game folder…".')
+            self.empty.configure(text=plain('No game with DLSS, XeSS or FSR found. Use "Add game folder…".'))
         else:
             self.empty.configure(text=gamelist.count_text(self.games))
         self.update_buttons()
@@ -520,6 +527,10 @@ class App:
             self.extras.append(folder)
             settings.save_folders(self.data_dir, self.extras)
         self.failed.pop(folder, None)  # picked again: look at it again
+        if self.helixsr is None:
+            text = f'Saved {short_path(folder)}. It will be listed once HelixSR is installed.'
+            self.log_line(text)
+            self.empty.configure(text=text)
         self.refresh_games()
 
     def forget_folder(self):
@@ -548,7 +559,7 @@ class App:
         if not self.messagebox.askyesno(f'Install into {game.name}', plan, icon='warning', default='no'):
             return
         self.set_busy(True, None)
-        self.progress.configure(text=f'Installing into {game.name}…')
+        self.progress.configure(text=plain(f'Installing into {game.name}…'))
         self.set_status(f'• Installing HelixSR into {game.name}…')
         extras = list(self.extras)
         route = self.route_var.get() if game.route_choice else None
@@ -594,7 +605,7 @@ class App:
                                         'Remove it?', icon='warning', default='no'):
             return
         self.set_busy(True, None)
-        self.progress.configure(text=f'Removing from {game.name}…')
+        self.progress.configure(text=plain(f'Removing from {game.name}…'))
         extras = list(self.extras)
         record = self.game_log(game, 'remove')
 
@@ -623,7 +634,7 @@ class App:
         if not self.messagebox.askyesno(f'Collect logs for {game.name}', logs.confirm_text(game, self.data_dir)):
             return
         self.set_busy(True, None)
-        self.progress.configure(text=f'Collecting logs for {game.name}…')
+        self.progress.configure(text=plain(f'Collecting logs for {game.name}…'))
         self.work(lambda: logs.collect(game, self.helixsr_folder, self.data_dir), self.logs_done)
 
     def logs_done(self, path):
@@ -764,7 +775,7 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     def update_progress(self, release, fraction):
-        self.update_label.configure(text=f'Downloading AMDLSS {release.version}… {int(fraction * 100)}%')
+        self.update_label.configure(text=plain(f'Downloading AMDLSS {release.version}… {int(fraction * 100)}%'))
         self.update_bar.set(fraction)
 
     def update_failed(self, release, message):

@@ -7,6 +7,8 @@ sides on either host."""
 import ntpath
 import os
 import posixpath
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -68,3 +70,50 @@ def open_folder(folder):
         os.startfile(folder)
     else:
         xdg_open(folder)
+
+
+# --- Linux: where a Proton wine can be, for HelixSR's shell setup ---------------------------------------------
+
+def steam_libraries(home=None):
+    """Every Steam folder that can hold Proton: the usual Steam roots and the library paths listed in their
+    steamapps/libraryfolders.vdf (a game drive is a second library), without repeats."""
+    home = Path(home or Path.home())
+    roots = [home / '.local' / 'share' / 'Steam', home / '.steam' / 'steam', home / '.steam' / 'root']
+    found = list(roots)
+    for root in roots:
+        try:
+            text = (root / 'steamapps' / 'libraryfolders.vdf').read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        found += [Path(path.replace('\\\\', '\\')) for path in re.findall(r'"path"\s+"([^"]+)"', text)]
+    unique = {}
+    for folder in found:
+        unique.setdefault(os.path.realpath(folder), folder)
+    return list(unique.values())
+
+
+def _proton_rank(wine):
+    """Sort key of .../<Proton name>/files/bin/wine: 'Proton - Experimental' first, then the highest version."""
+    name = wine.parents[2].name
+    return 'Experimental' in name, tuple(int(n) for n in re.findall(r'\d+', name))
+
+
+def find_proton_wine(home=None):
+    """The best Proton wine in any Steam library (official Proton first, then custom builds in
+    compatibilitytools.d), or None."""
+    libraries = steam_libraries(home)
+    ranked = []
+    for pattern in ('steamapps/common/Proton*/files/bin/wine', 'compatibilitytools.d/*/files/bin/wine'):
+        wines = [w for library in libraries for w in library.glob(pattern) if os.access(w, os.X_OK)]
+        ranked += sorted(wines, key=_proton_rank, reverse=True)
+    return ranked[0] if ranked else None
+
+
+def setup_finds_wine(env, home=None):
+    """True when helixsr-setup.sh finds a wine by itself: one of the four Proton places it globs, else `wine` on PATH."""
+    home = Path(home or Path.home())
+    places = ('.local/share/Steam/steamapps/common/Proton*', '.steam/steam/steamapps/common/Proton*',
+              '.local/share/Steam/compatibilitytools.d/*', '.steam/root/compatibilitytools.d/*')
+    if any(os.access(w, os.X_OK) for place in places for w in home.glob(f'{place}/files/bin/wine')):
+        return True
+    return shutil.which('wine', path=env.get('PATH', os.defpath)) is not None

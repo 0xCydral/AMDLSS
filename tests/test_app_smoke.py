@@ -55,6 +55,40 @@ def test_without_helixsr_the_window_asks_for_the_install(window):
     assert app.install_button.state == 'normal' and app.game_install.state == 'disabled'
 
 
+def test_add_folder_and_rescan_work_before_helixsr_is_installed(window, monkeypatch):
+    root, make_app, tmp = window
+    app = make_app()
+    pump(root, app, 0.5)
+    assert app.helixsr is None and app.add_button.state == 'normal' and app.rescan_button.state == 'normal'
+    assert app.game_install.state == 'disabled' and app.game_forget.state == 'disabled'   # nothing selected
+    game = tmp / 'Game'
+    game.mkdir()
+    app.filedialog = type('Pick', (), {'askdirectory': staticmethod(lambda **options: str(game))})
+    app.add_folder()
+    assert app.extras == [str(game)] and settings.load_folders(tmp / 'data') == [str(game)]
+    assert 'listed once HelixSR is installed' in app.empty.cget('text')
+    app.rescan()   # still nothing: a line in the log says so
+    assert 'still not installed' in app.log.get('1.0', 'end')
+    other = tmp / 'Other'
+    other.mkdir()
+    folder = make(tmp, [{'name': 'Other', 'folder': str(other), 'fsr': True, 'inputs': ['DLSS']}])   # installed by hand
+    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    (folder / helixsr.BUILT).write_text('{}')
+    monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
+    app.rescan()
+    pump(root, app)
+    assert app.helixsr is not None and 'Other' in [r[0] for r in rows_of(app)]   # the manual install is picked up
+
+
+def test_the_status_text_cannot_push_the_install_button_off_the_window(window):
+    root, make_app, _tmp = window
+    app = make_app()
+    row = app.status.master
+    order = [str(w) for w in row.pack_slaves()]
+    assert order.index(str(app.install_button.canvas)) < order.index(str(app.status))   # the button gets its room first
+    assert app.status.bind('<Configure>')   # and the text wraps in the width the button leaves it
+
+
 def test_games_are_listed_and_buttons_follow_the_selection(window, monkeypatch):
     root, make_app, tmp = window
     one = tmp / 'One'

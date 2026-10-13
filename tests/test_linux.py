@@ -100,6 +100,104 @@ def test_no_usable_python_is_one_clear_line(tmp_path, monkeypatch):
         client.list_games()
 
 
+# --- Proton in a second Steam library -----------------------------------------------------------------------------
+
+def fake_wine(folder):
+    wine = folder / 'files' / 'bin' / 'wine'
+    wine.parent.mkdir(parents=True)
+    wine.write_text('#!/bin/sh\necho wine-fake "$@"\n')
+    wine.chmod(0o755)
+    return wine
+
+
+def steam_home(tmp_path, libraries):
+    """A home whose Steam lists `libraries` (folders) in libraryfolders.vdf, the way Steam writes it."""
+    home = tmp_path / 'home'
+    apps = home / '.steam' / 'steam' / 'steamapps'
+    apps.mkdir(parents=True)
+    entries = ''.join(f'\t"{n}"\n\t{{\n\t\t"path"\t\t"{str(lib).replace(chr(92), chr(92) * 2)}"\n\t}}\n'
+                      for n, lib in enumerate(libraries))
+    (apps / 'libraryfolders.vdf').write_text(f'"libraryfolders"\n{{\n{entries}}}\n')
+    return home
+
+
+def test_a_proton_in_a_second_steam_library_is_found_newest_first(tmp_path):
+    drive = tmp_path / 'Data' / 'SteamLibrary'
+    common = drive / 'steamapps' / 'common'
+    old, experimental, new = (fake_wine(common / n) for n in ('Proton 9.0-4', 'Proton - Experimental', 'Proton 10.0'))
+    home = steam_home(tmp_path, [tmp_path / 'main', drive])
+    assert host.steam_libraries(home)[-1] == drive
+    assert host.find_proton_wine(home) == experimental
+    experimental.unlink()
+    assert host.find_proton_wine(home) == new      # 10.0 beats 9.0-4, not the other way round as text
+    new.unlink()
+    assert host.find_proton_wine(home) == old
+    old.unlink()
+    custom = fake_wine(home / '.steam' / 'steam' / 'compatibilitytools.d' / 'GE-Proton9-5')
+    assert host.find_proton_wine(home) == custom
+    custom.unlink()
+    assert host.find_proton_wine(home) is None
+
+
+def test_the_setup_finds_wine_only_in_its_own_places(tmp_path):
+    drive = tmp_path / 'Data'
+    fake_wine(drive / 'steamapps' / 'common' / 'Proton - Experimental')
+    home = steam_home(tmp_path, [drive])
+    nowhere = {'PATH': str(tmp_path / 'empty')}
+    assert host.setup_finds_wine(nowhere, home) is False              # the second library is not one of its globs
+    fake_wine(home / '.local' / 'share' / 'Steam' / 'steamapps' / 'common' / 'Proton 9.0')
+    assert host.setup_finds_wine(nowhere, home) is True
+    if os.name != 'nt':   # a wine on PATH counts too
+        bare = tmp_path / 'bare'
+        (bare / 'bin').mkdir(parents=True)
+        (bare / 'bin' / 'wine').symlink_to(fake_wine(bare / 'x'))
+        assert host.setup_finds_wine({'PATH': str(bare / 'bin')}, bare) is True
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='the wrapper is a POSIX shell script')
+def test_a_wine_wrapper_for_the_other_library_goes_first_on_path(tmp_path, monkeypatch):
+    drive = tmp_path / 'Data'
+    real = fake_wine(drive / 'steamapps' / 'common' / 'Proton - Experimental')
+    home = steam_home(tmp_path, [drive])
+    monkeypatch.setattr(Path, 'home', lambda: home)
+    env, found = helixsr.with_wine({'PATH': str(tmp_path / 'empty')}, tmp_path / 'data')
+    shim = tmp_path / 'data' / 'bin' / 'wine'
+    assert found and env['PATH'].split(os.pathsep)[0] == str(shim.parent) and os.access(shim, os.X_OK)
+    assert shim.read_text().startswith('#!/bin/sh\nexec ') and str(real) in shim.read_text()
+    assert helixsr.subprocess.run([shim, '--version'], capture_output=True, text=True).stdout == 'wine-fake --version\n'
+    other = helixsr.with_wine({'PATH': str(shim.parent)}, tmp_path / 'data2')   # a wine on PATH: nothing written
+    assert other[1] and not (tmp_path / 'data2').exists()
+
+
+def test_without_any_wine_the_failure_says_what_to_install(tmp_path, monkeypatch):
+    home = steam_home(tmp_path, [])
+    monkeypatch.setattr(Path, 'home', lambda: home)
+    monkeypatch.setenv('PATH', str(tmp_path / 'empty'))
+    line = '[helixsr-setup] error: no Proton or Wine found (needed to run the shader compiler); install Proton or Wine'
+    monkeypatch.setattr(helixsr, 'run_streaming', lambda *a, **k: (1, [line]))
+    monkeypatch.setattr(helixsr, 'find_python', lambda windows=None: Path('python3'))
+    with pytest.raises(helixsr.HelixSRError, match=r'exit 1.*no Proton or Wine found.*any Steam library'):
+        helixsr.build(tmp_path, windows=False, data_dir=tmp_path / 'data')
+    assert not (tmp_path / 'data').exists()
+
+
+# --- fonts and glyphs -------------------------------------------------------------------------------------------
+
+def test_linux_picks_an_installed_family_whatever_its_case():
+    core = ['fixed', 'helvetica', 'nimbus mono l', 'nimbus sans l', 'symbol']   # what the Tk of the binary lists
+    assert ui.pick_fonts(core, 'tk-sans', 'tk-mono', windows=False) == ('nimbus sans l', 'nimbus mono l')
+    assert ui.pick_fonts(['DejaVu Sans', 'DejaVu Sans Mono', 'Noto Sans'], 's', 'm', windows=False) == \
+        ('Noto Sans', 'DejaVu Sans Mono')
+    assert ui.pick_fonts(['symbol'], 'tk-sans', 'tk-mono', windows=False) == ('tk-sans', 'tk-mono')   # the Tk default
+    assert ui.pick_fonts(['Segoe UI', 'Consolas', 'Arial'], 's', 'm', windows=True) == ('Segoe UI', 'Consolas')
+    assert ui.pick_fonts([], 'Arial', 'Consolas', windows=True) == ('Arial', 'Consolas')
+
+
+def test_linux_draws_the_icons_as_ascii_and_windows_keeps_them():
+    assert ui.plain('✓ ✗ ⚠ • Add game folder…', windows=False) == '+ x ! - Add game folder...'
+    assert ui.plain('✓ ✗ ⚠ • Add game folder…', windows=True) == '✓ ✗ ⚠ • Add game folder…'
+
+
 # --- the update asset and the self-replace ---------------------------------------------------------------------
 
 def release(tag, assets):
@@ -254,3 +352,19 @@ def test_short_path_on_linux(monkeypatch):
     monkeypatch.setenv('LOCALAPPDATA', 'C:\\Users\\x\\AppData\\Local')
     assert ui.short_path('C:\\Users\\x\\AppData\\Local\\AMDLSS\\HelixSR-1.9.0', windows=True) == \
         '%LOCALAPPDATA%\\AMDLSS\\HelixSR-1.9.0'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Unix file modes')
+def test_extract_keeps_the_executable_bit_the_linux_setup_needs(tmp_path):
+    # HelixSR 1.9.0 ships setup/lib/model/launch_synth as 0o755; without the bit its setup fails with EACCES
+    import zipfile
+    part = tmp_path / 'h.zip'
+    with zipfile.ZipFile(part, 'w') as archive:
+        for name, mode in ((helixsr.SETUP, 0o644), (helixsr.DLL, 0o644), ('setup/lib/model/launch_synth', 0o755)):
+            info = zipfile.ZipInfo(f'{helixsr.TOP}/{name}')
+            info.external_attr = mode << 16
+            archive.writestr(info, b'x')
+    helixsr.extract(part, tmp_path / 'out')
+    top = tmp_path / 'out' / helixsr.TOP
+    assert os.access(top / 'setup/lib/model/launch_synth', os.X_OK)
+    assert not os.access(top / helixsr.DLL, os.X_OK)
