@@ -7,16 +7,16 @@ const report = (files = { 'files.txt': 'ok\n' }, extra = {}) => ({ app: 'AMDLSS'
 
 test('the names a zip of logs uses are accepted', () => {
   for (const name of ['files.txt', 'system.txt', 'amdlss-install.log', 'exe-folder/OptiScaler.log',
-    'exe-folder/HelixSR/helixsr-install.json', 'fsr-dll-folder-2/helixsr.ini', 'a/b/c.LOG']) {
+    'exe-folder/HelixSR/helixsr-install.json', 'fsr-dll-folder-2/helixsr.ini', 'a/b/c.LOG', 'a/b/c/d/e.log']) {
     assert.equal(nameProblem(name), null, name);
   }
 });
 
 test('traversal, absolute, hidden and odd names are refused', () => {
   const bad = ['', '../x.log', 'a/../x.log', '/etc/passwd.txt', '.hidden.log', 'a/.x.log', 'a/./x.log', 'a//x.log',
-    'a/b/c/d.log', 'a\\b.log', 'C:/x.log', 'x.log ', 'x .log', 'x.log.', 'x..log', 'noext', '.log', 'x.exe', 'x.dll',
+    'a/b/c/d/e/f.log', 'a\\b.log', 'C:/x.log', 'x.log ', 'x .log', 'x.log.', 'x..log', 'noext', '.log', 'x.exe', 'x.dll',
     'x.log.exe', 'x.sh', 'x.zip', 'x.log/', 'a./b.log', 'nul.log', 'COM1.txt', 'a/aux.ini', 'caf\u00e9.log',
-    'x\u0000.log', 'x\n.log', 'a'.repeat(121) + '.log', '__proto__'];
+    'x\u0000.log', 'x\n.log', 'a'.repeat(157) + '.log', '__proto__'];
   for (const name of bad) assert.notEqual(nameProblem(name), null, JSON.stringify(name));
   assert.notEqual(nameProblem(42), null);
   assert.notEqual(nameProblem(undefined), null);
@@ -57,7 +57,7 @@ test('version and game are short printable strings', () => {
   }
 });
 
-test('files: an object of 1 to 24 allowed names with text values', () => {
+test('files: an object of 1 to 200 allowed names with text values', () => {
   assert.equal(validateReport(report({})).ok, false);
   assert.equal(validateReport(report([])).ok, false);
   assert.equal(validateReport(report('x')).ok, false);

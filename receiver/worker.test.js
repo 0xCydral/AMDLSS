@@ -57,9 +57,9 @@ test('a content type other than application/json is refused', async () => {
   assert.equal((await worker.fetch(post(GOOD, { 'Content-Type': 'application/json; charset=utf-8' }), env())).status, 200);
 });
 
-test('a body over 2 MiB is refused by its Content-Length and by the bytes actually read', async () => {
+test('a body over 8 MiB is refused by its Content-Length and by the bytes actually read', async () => {
   const e = env();
-  const big = JSON.stringify({ ...GOOD, files: { 'a.txt': 'x'.repeat(2 << 20) } });
+  const big = JSON.stringify({ ...GOOD, files: { 'a.txt': 'x'.repeat(8 << 20) } });
   assert.equal((await worker.fetch(post(big), e)).status, 413);
   const stream = new Request('https://r.test/reports', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, duplex: 'half',

@@ -12,10 +12,10 @@ Everything else is 404 or 405.
 
 ## What a report may hold
 
-The body is JSON: `{"app": "AMDLSS", "version": str, "game": str, "files": {name: text}}`, at most 2 MiB (the
-`Content-Length` and the bytes actually read are both checked), at most 24 files.
+The body is JSON: `{"app": "AMDLSS", "version": str, "game": str, "files": {name: text}}`, at most 8 MiB (the
+`Content-Length` and the bytes actually read are both checked), at most 200 files.
 
-- File names: 1 to 3 parts joined by `/`, each part made of `A-Z a-z 0-9 _ . -`, no `..`, no part starting or ending
+- File names: 1 to 5 parts joined by `/`, each part made of `A-Z a-z 0-9 _ . -`, no `..`, no part starting or ending
   with `.`, no Windows device names (`con`, `nul`, `com1` ...), and the last part ends in `.log`, `.ini`, `.json` or
   `.txt`.
 - File text: no NUL and no control character except tab, line feed and carriage return (DEL and the C1 range are

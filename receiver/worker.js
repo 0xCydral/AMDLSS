@@ -68,14 +68,14 @@ async function upload(request, env) {
   }
   const announced = request.headers.get('Content-Length');
   if (announced !== null && (!/^\d+$/.test(announced) || Number(announced) > MAX_BODY_BYTES)) {
-    return refuse(413, 'the report is larger than 2 MiB');
+    return refuse(413, 'the report is larger than 8 MiB');
   }
   if (env.UPLOAD_LIMITER) {
     const { success } = await env.UPLOAD_LIMITER.limit({ key: request.headers.get('CF-Connecting-IP') || 'unknown' });
     if (!success) return refuse(429, 'too many reports, try again in a minute', { 'Retry-After': '60' });
   }
   const bytes = await readCapped(request, MAX_BODY_BYTES);
-  if (bytes === null) return refuse(413, 'the report is larger than 2 MiB');
+  if (bytes === null) return refuse(413, 'the report is larger than 8 MiB');
   let value;
   try {
     value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
