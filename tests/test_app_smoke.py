@@ -310,9 +310,16 @@ def test_leftovers_and_games_without_upscalers_are_hidden_until_show_all(window,
     assert app.extras == [] and 'Typo' not in [r[0] for r in rows_of(app)]
 
 
-def new_release(version='0.1.0-beta.5'):
+def next_version():
+    """The beta after the running one, so the fixture stays newer at every version bump."""
     from amdlss import update
-    return update.Release(version, 'https://example.test/AMDLSS.exe', 'a' * 64, 10, 'https://example.test/notes')
+    base, number = update.VERSION.rsplit('.', 1)
+    return f'{base}.{int(number) + 1}'
+
+
+def new_release(version=None):
+    from amdlss import update
+    return update.Release(version or next_version(), 'https://example.test/AMDLSS.exe', 'a' * 64, 10, 'https://example.test/notes')
 
 
 def test_an_update_is_a_card_with_a_link_and_from_source_no_update_button(window, monkeypatch):
@@ -327,7 +334,7 @@ def test_an_update_is_a_card_with_a_link_and_from_source_no_update_button(window
     assert app.update_card is None
     app.update_checked(new_release(), manual=False)
     top.update()
-    assert shown(app.update_card) and 'AMDLSS 0.1.0-beta.5 is available.' in app.update_label.cget('text')
+    assert shown(app.update_card) and f'AMDLSS {next_version()} is available.' in app.update_label.cget('text')
     assert not hasattr(app, 'update_button')   # from source nothing is replaced
 
 
@@ -387,7 +394,7 @@ def test_update_replaces_the_exe_and_restarts_it_then_the_window_closes(window, 
     assert answers.told == ['Wait until HelixSR is done, then update.'] and not done
     app.busy = False
     app.install_update(new_release())
-    assert answers.asked[-1][0] == 'Update to 0.1.0-beta.5'
+    assert answers.asked[-1][0] == f'Update to {next_version()}'
     wait(top, app, lambda: destroyed)
     assert done[-1] == ('restart', tmp / 'AMDLSS.exe') and destroyed == [1]
 
