@@ -184,7 +184,8 @@ class App:
                                      selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
                                      disabledforeground=DIM, font=self.look.fonts['small'], anchor='w', bd=0,
                                      highlightthickness=0, command=self.update_buttons)
-        self.fg_box.pack(side='left')
+        self.fg_box.pack(side='top', anchor='w')
+        self.fg_note = self.label(self.fg_row, '', 'small', CAUTION, CARD)
         actions = tk.Frame(detail, bg=CARD)
         actions.pack(fill='x', pady=(px(10), 0))
         self.game_install = FlatButton(tk, self.look, actions, 'Install', self.install_game, 'primary', height=40,
@@ -377,10 +378,18 @@ class App:
         self.fg_row.pack_forget()
         if game and game.route_choice:
             self.route_row.pack(side='right')
+        self.fg_note.pack_forget()
+        offered = not game or game.streamline
         if game and game.exe_folder and self.route_of(game) == 'optiscaler':
             self.fg_row.pack(fill='x', pady=(self.look.px(6), 0))
-        for widget in (*self.route_buttons, self.fg_box):
+            if not offered:   # nothing to replace: shown off and greyed, with why
+                turns_off = ' Update turns it off.' if game.installed and framegen.is_on(game.exe_folder) else ''
+                self.fg_var.set(False)
+                self.fg_note.configure(text=plain(game.framegen_reason + turns_off))
+                self.fg_note.pack(side='top', anchor='w', padx=(self.look.px(24), 0))
+        for widget in self.route_buttons:
             widget.configure(state='normal' if idle else 'disabled')
+        self.fg_box.configure(state='normal' if idle and offered else 'disabled')
 
     def set_busy(self, busy, progress=None):
         self.busy = busy
@@ -485,6 +494,7 @@ class App:
             for game in found:
                 if game.folder and not game.reason:
                     game.anticheat = gamelist.scan_anticheat(game.folder)
+                    game.streamline = gamelist.scan_streamline(game.folder)
             return found
 
         self.work(scan, self.games_done)
@@ -570,6 +580,8 @@ class App:
         extras = list(self.extras)
         route = self.route_var.get() if game.route_choice else None
         frame_gen = self.fg_var.get() if self.route_of(game) == 'optiscaler' and game.exe_folder else None
+        if frame_gen is not None and not game.streamline:
+            frame_gen = False   # nothing to replace: never on, and an update turns an earlier "on" off
         record = self.game_log(game, f'{"update" if game.installed else "install"} ({self.route_of(game)})')
 
         def install():

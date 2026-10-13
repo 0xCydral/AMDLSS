@@ -83,3 +83,12 @@ Route: delegated direct (multi-file feature).
   the install log (kept run), so Monster Hunter's latest run answers frame generation No like its earlier run;
   "Yes" cites the counts line. Linux 313 passed and 3 skipped; wine 306 passed and 10 skipped; `--selftest`
   exit 0. Not released.
+- [x] T8 frame generation only where it can work (2026-10-13, from the Deivi reports): OptiScaler's `FGInput=dlssg`
+  is "limited to games that use Streamline v2 and DLSSG", and Ready Or Not (UE5, no Streamline) was marked
+  "frame generation: on". `games.scan_streamline` looks for `sl.interposer.dll` and `sl.dlss_g.dll` anywhere up to
+  seven folders down (Assassin's Creed Shadows keeps them in `NVStreamline\production`, an Unreal plugin six folders
+  down); the names are confirmed by NVIDIA's Streamline guides and by Monster Hunter Stories 3's real `files.txt`
+  (Streamline 2.8.0.0). Without both, the option is greyed and unchecked with "This game has no DLSS Frame
+  Generation for AMDLSS to replace.", Install never writes it on, and Update turns an earlier "on" off.
+  Tests: fake folders for present at depth, split, absent and too deep; the UI disabled state; install and update
+  writing it off. Route: inline (one coherent change, 2 source files).

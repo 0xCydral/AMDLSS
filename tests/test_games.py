@@ -108,6 +108,43 @@ def test_anticheat_scan_finds_nested_files_only_within_depth(tmp_path):
     assert games.scan_anticheat(tmp_path / 'missing') == []
 
 
+def streamline_files(folder, *names):
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (folder / name).write_bytes(b'MZ')
+
+
+def test_streamline_is_found_in_a_subfolder_like_assassins_creed_shadows(tmp_path):
+    streamline_files(tmp_path / 'NVStreamline' / 'production', 'sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll')
+    assert games.scan_streamline(tmp_path)
+
+
+def test_streamline_is_found_six_folders_down_like_an_unreal_plugin(tmp_path):
+    plugin = tmp_path / 'Proj' / 'Plugins' / 'Streamline' / 'Binaries' / 'ThirdParty' / 'Win64'
+    streamline_files(plugin, 'SL.Interposer.dll', 'sl.dlss_g.dll')   # case does not matter
+    assert games.scan_streamline(tmp_path) and not games.scan_streamline(tmp_path, depth=5)
+
+
+def test_streamline_may_be_split_over_two_folders(tmp_path):
+    streamline_files(tmp_path, 'sl.interposer.dll')
+    streamline_files(tmp_path / 'plugins', 'sl.dlss_g.dll')
+    assert games.scan_streamline(tmp_path)
+
+
+def test_a_game_without_both_streamline_dlls_has_no_dlss_frame_generation(tmp_path):
+    assert not games.scan_streamline(tmp_path / 'missing')
+    assert not games.scan_streamline(tmp_path)   # Ready Or Not: an exe folder with no sl.* files
+    streamline_files(tmp_path / 'a', 'sl.interposer.dll', 'sl.dlss.dll', 'nvngx_dlss.dll')   # DLSS upscaling only
+    assert not games.scan_streamline(tmp_path)
+    streamline_files(tmp_path / 'b', 'sl.dlss_g.dll')
+    assert games.scan_streamline(tmp_path)   # the pair, wherever the two files are
+
+
+def test_the_frame_generation_reason_follows_the_scan():
+    assert games.Game('Unscanned').framegen_reason == ''
+    assert 'no DLSS Frame Generation' in games.Game('Bare', streamline=False).framegen_reason
+
+
 # --- which games the list shows ---------------------------------------------------------------------------------
 
 def installed_game(tmp_path, name, exe=True, **fields):

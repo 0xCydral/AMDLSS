@@ -187,6 +187,9 @@ def two_game_app(window, monkeypatch, answers=None):
     one = tmp / 'One'
     one.mkdir()
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    (one / 'NVStreamline' / 'production').mkdir(parents=True)   # One has DLSS Frame Generation, Three has none
+    for name in ('sl.interposer.dll', 'sl.dlss_g.dll'):
+        (one / 'NVStreamline' / 'production' / name).write_bytes(b'MZ')
     (tmp / 'Three').mkdir()
     folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']},
                         {'name': 'Three', 'folder': str(tmp / 'Three'), 'fsr': False, 'inputs': ['XeSS']}])
@@ -211,6 +214,54 @@ def test_the_route_choice_and_frame_generation_boxes_follow_the_game(window, mon
     app.tree.selection_set('1')  # Three: OptiScaler is its only route, so no choice but the box
     top.update()
     assert not shown(app.route_row) and shown(app.fg_row)
+
+
+def test_frame_generation_is_disabled_with_a_reason_where_the_game_has_no_streamline(window, monkeypatch):
+    top, app, _one = two_game_app(window, monkeypatch)
+    app.tree.selection_set('0')   # One ships Streamline DLSS-G in a subfolder
+    top.update()
+    assert str(app.fg_box.cget('state')) == 'normal' and not shown(app.fg_note)
+    app.tree.selection_set('1')   # Three has none: the box is greyed, unchecked, with the reason beside it
+    top.update()
+    assert shown(app.fg_row) and str(app.fg_box.cget('state')) == 'disabled' and not app.fg_var.get()
+    assert shown(app.fg_note) and 'no DLSS Frame Generation for AMDLSS to replace' in app.fg_note.cget('text')
+    app.tree.selection_set('0')
+    top.update()
+    assert str(app.fg_box.cget('state')) == 'normal' and not shown(app.fg_note)
+
+
+def test_install_never_writes_frame_generation_on_without_streamline(window, monkeypatch):
+    answers = Answers()
+    top, app, _one = two_game_app(window, monkeypatch, answers)
+    three = window[2] / 'Three'
+    app.tree.selection_set('1')
+    top.update()
+    app.fg_var.set(True)   # as if the box had been ticked on another game
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    ini = (three / 'OptiScaler.ini').read_bytes()
+    assert b'FGInput=auto\r\n' in ini and b'FGOutput=auto\r\n' in ini and 'Turn on DLSS' not in answers.told[0]
+    assert not (window[2] / 'data' / 'framegen.json').exists() or 'dlssg' not in (window[2] / 'data' / 'framegen.json').read_text()
+
+
+def test_update_turns_frame_generation_off_when_the_game_has_no_streamline(window, monkeypatch):
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    app.tree.selection_set('0')
+    top.update()
+    app.fg_var.set(True)
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert b'FGInput=dlssg\r\n' in (one / 'OptiScaler.ini').read_bytes()
+    shutil.rmtree(one / 'NVStreamline')   # e.g. an earlier AMDLSS turned it on in a game that never had it
+    app.refresh_games()
+    wait(top, app, lambda: not app.busy and not app.games[0].streamline)
+    app.tree.selection_set('0')
+    top.update()
+    assert not app.fg_var.get() and 'Update turns it off' in app.fg_note.cget('text')
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
 
 
 def wait(top, app, until, seconds=10):

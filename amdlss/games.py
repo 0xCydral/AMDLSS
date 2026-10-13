@@ -37,6 +37,12 @@ class Game:
     reason: str = ''            # why the list hides this game ('' = ready); set by classify()
     manual: bool = False        # the folder was added by hand with "Add game folder"
     helixsr: str = ''           # the HelixSR version installed in the game; '' when none or unknown
+    streamline: bool = True     # the game ships Streamline DLSS-G; set by scan_streamline(), True while unscanned
+
+    @property
+    def framegen_reason(self):
+        """Why the frame generation option is not offered, or ''."""
+        return '' if self.streamline else NO_DLSSG
 
     @property
     def supports(self):
@@ -241,6 +247,32 @@ def scan_anticheat(folder, depth=3):
             if level < depth and entry.is_dir(follow_symlinks=False):
                 todo.append((entry.path, level + 1))
     return sorted(found)
+
+
+# --- Streamline DLSS-G ------------------------------------------------------------------------------------------
+# OptiScaler's FGInput=dlssg is "limited to games that use Streamline v2 and DLSSG" (its own ini). Such a game ships
+# NVIDIA's interposer and the DLSS-G plugin (names as in NVIDIA's Streamline guide and in Monster Hunter Stories 3's
+# files). They may sit in a subfolder (Assassin's Creed Shadows: NVStreamline\production) or, in Unreal Engine games,
+# under <Project>\Plugins\...\Binaries\ThirdParty\Win64, six folders down.
+NO_DLSSG = "This game has no DLSS Frame Generation for AMDLSS to replace."
+STREAMLINE_DLLS = frozenset(('sl.interposer.dll', 'sl.dlss_g.dll'))
+
+
+def scan_streamline(folder, depth=7):
+    """True when `folder` holds both Streamline DLLs, in any two places up to `depth` levels down (links not followed)."""
+    found, todo = set(), [(folder, 0)]
+    while todo and found != STREAMLINE_DLLS:
+        path, level = todo.pop()
+        try:
+            entries = list(os.scandir(path))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.lower() in STREAMLINE_DLLS:
+                found.add(entry.name.lower())
+            elif level < depth and entry.is_dir(follow_symlinks=False):
+                todo.append((entry.path, level + 1))
+    return found == STREAMLINE_DLLS
 
 
 # --- what the window says ---------------------------------------------------------------------------------------

@@ -134,6 +134,17 @@ def check_history_and_crashes():
         assert 'Get-WinEvent -FilterHashtable' in crashes.event_command()[4]
 
 
+def check_streamline():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder) / 'Game' / 'NVStreamline' / 'production'
+        root.mkdir(parents=True)
+        (root / 'sl.interposer.dll').write_bytes(b'MZ')
+        assert not games.scan_streamline(Path(folder))   # one of the two DLLs is not DLSS frame generation
+        (root / 'sl.dlss_g.dll').write_bytes(b'MZ')
+        assert games.scan_streamline(Path(folder)) and not games.scan_streamline(Path(folder) / 'none')
+        assert games.Game(name='x', streamline=False).framegen_reason == games.NO_DLSSG
+
+
 def check_reports():
     files = {'G/exe-folder/helixsr.log': 'ok\n', 'system.txt': 'x'}
     sample = {'app': 'AMDLSS', 'version': '0.1.0', 'game': 'G', 'files': files}
@@ -284,8 +295,8 @@ def check_covers():
 
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
-                  check_collect_logs, check_history_and_crashes, check_reports, check_helixsr, check_running_game,
-                  check_zip_slip, check_update, check_identify, check_covers):
+                  check_collect_logs, check_history_and_crashes, check_streamline, check_reports,
+                  check_helixsr, check_running_game, check_zip_slip, check_update, check_identify, check_covers):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

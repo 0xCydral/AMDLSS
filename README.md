@@ -49,7 +49,7 @@ HelixSR picks one of two ways for each game. AMDLSS shows the result after the i
 
 Some games, such as Dragon's Dogma 2, offer only NVIDIA's DLSS Frame Generation, which cannot run on AMD. For a game installed through the OptiScaler route, the box **Frame generation: use the game's DLSS Frame Generation option (runs AMD FSR frame generation)** is off by default. When you turn it on and press Install (or Update), AMDLSS sets two values in the `OptiScaler.ini` that HelixSR placed next to the game's exe: `FGInput=dlssg` and `FGOutput=fsrfg` in `[FrameGen]`. Every other byte of the file stays as it was. In the game, turn on DLSS Frame Generation; it runs AMD's frame generation. Keep NVIDIA Reflex off.
 
-- It only works in games that use NVIDIA Streamline for DLSS frame generation. That is OptiScaler's limit, not AMDLSS's.
+- It only works in games that use NVIDIA Streamline for DLSS frame generation. That is OptiScaler's limit, not AMDLSS's, so AMDLSS offers the box only where it finds `sl.interposer.dll` and `sl.dlss_g.dll` in the game's folder (up to seven folders down; they often sit in a subfolder such as `NVStreamline\production`). Without them the box is greyed out and says "This game has no DLSS Frame Generation for AMDLSS to replace." Install never turns frame generation on there, and Update turns it off if an earlier version had.
 - It is untested on real games so far.
 - Update with the box off puts the two values back as they were (AMDLSS keeps them in `%LOCALAPPDATA%\AMDLSS\framegen.json`). **Remove** runs HelixSR's own uninstall, which restores or deletes `OptiScaler.ini`, so nothing stays behind.
 
