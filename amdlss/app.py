@@ -13,8 +13,8 @@ import webbrowser
 from pathlib import Path
 
 from . import VERSION, framegen, games as gamelist, helixsr, logs, settings, update
-from .ui import (BAD, BG, BLOOD, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, GOLD, LINE, MUTED, OK, TEXT, Bar, FlatButton,
-                 Look, mix, short_path)
+from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT, Bar, Card,
+                 FlatButton, Gallery, Look, logo, magnifier, mix, segmented, short_path)
 
 LINKS = (('HelixSR', 'https://github.com/lonewolf0622/HelixSR'),
          ('HelixSR license', 'https://github.com/lonewolf0622/HelixSR/blob/HEAD/LICENSE'),
@@ -24,6 +24,14 @@ LINKS = (('HelixSR', 'https://github.com/lonewolf0622/HelixSR'),
 FOOTER = ('AMDLSS is unofficial and is not affiliated with HelixSR, NVIDIA or AMD. AMDLSS is free software '
           '(GPL-2.0-or-later); HelixSR is freeware under its own license.')
 MAX_LOG_LINES = 3000
+
+
+def card_of(game):
+    """What a game's card shows: the name, what it supports, and the state (or why it is not offered)."""
+    supports = game.supports.replace(', ', ' / ') if game.fsr31 or game.inputs else ''
+    if game.reason:
+        return Card(game.name, supports, game.reason, 'none', True)
+    return Card(game.name, supports, game.state_text, 'ok' if game.installed else 'none', False)
 
 
 def resource(name):
@@ -50,6 +58,7 @@ class App:
         # a beta user keeps getting betas unless they say no
         self.beta_var = tk.BooleanVar(value=settings.load_beta(self.data_dir, update.is_prerelease(update.current_version())))
         self.update_card = None     # the "AMDLSS x is available" card, once an update was found
+        self.log_hidden = False     # the log strip is dropped while the window is short
         self.calls = queue.Queue()  # work for the Tk thread from worker threads
         root.title(f'AMDLSS {VERSION}')
         root.configure(bg=BG)
@@ -63,163 +72,168 @@ class App:
         self.style()
         self.build()
         root.protocol('WM_DELETE_WINDOW', self.close)
+        root.bind('<Configure>', self.fit_height)
         root.after(50, self.pump)
         root.after(100, self.refresh_helixsr)
         root.after(300, self.start_update_check)
 
     # ---- look -----------------------------------------------------------------------------------
     def style(self):
-        style, px, fonts = self.ttk.Style(), self.look.px, self.look.fonts
+        style = self.ttk.Style()
         style.theme_use('clam')
-        style.configure('Treeview', background=FIELD, fieldbackground=FIELD, foreground=TEXT, borderwidth=0,
-                        rowheight=px(28), font=fonts['body'])
-        style.configure('Treeview.Heading', background=CARD, foreground=MUTED, borderwidth=0, relief='flat',
-                        font=fonts['small'])
-        style.map('Treeview', background=[('selected', mix(FIELD, GOLD, .22))], foreground=[('selected', TEXT)])
-        style.map('Treeview.Heading', background=[('active', CARD)])
-        style.configure('Vertical.TScrollbar', background=CARD, troughcolor=FIELD, bordercolor=FIELD,
-                        arrowcolor=MUTED, lightcolor=CARD, darkcolor=CARD)
+        style.configure('Vertical.TScrollbar', background=LINE, troughcolor=BG, bordercolor=BG, arrowcolor=MUTED,
+                        lightcolor=LINE, darkcolor=LINE, gripcount=0)
+        style.map('Vertical.TScrollbar', background=[('active', LINE_HI)])
 
     def label(self, parent, text, font='body', fg=TEXT, bg=BG, **options):
         return self.tk.Label(parent, text=text, font=self.look.fonts[font], fg=fg, bg=bg, **options)
 
-    def choice(self, parent, text, value):
-        button = self.tk.Radiobutton(parent, text=text, value=value, variable=self.route_var, bg=CARD, fg=TEXT,
-                                     selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
-                                     disabledforeground=DIM, font=self.look.fonts['small'], bd=0, highlightthickness=0,
-                                     command=self.update_buttons)
-        button.pack(side='left', padx=(self.look.px(10), 0))
-        return button
-
-    def card(self, parent, **pack):
-        frame = self.tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=LINE,
-                              padx=self.look.px(14), pady=self.look.px(12))
-        frame.pack(fill='x', pady=(0, self.look.px(10)), **pack)
+    def card(self, parent, pady=12, **pack):
+        """A bordered panel one section tall, packed with a gap below it."""
+        px = self.look.px
+        frame = self.tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=LINE, padx=px(18),
+                              pady=px(pady))
+        frame.pack(fill='x', pady=(0, px(10)), **pack)
         return frame
 
     def build(self):
         tk, px = self.tk, self.look.px
-        page = self.page = tk.Frame(self.root, bg=BG, padx=px(22), pady=px(16))
+        gap = px(10)
+        page = self.page = tk.Frame(self.root, bg=BG, padx=px(28), pady=px(16))
         page.pack(fill='both', expand=True)
 
         head = tk.Frame(page, bg=BG)
-        head.pack(fill='x', pady=(0, px(10)))
-        self.label(head, 'AMDLSS', 'h1').pack(side='left')
-        self.label(head, 'HelixSR for DLSS games on AMD cards, one click per game', 'body', MUTED).pack(
-            side='left', padx=px(14), pady=(px(8), 0))
+        head.pack(fill='x', pady=(0, gap))
+        logo(tk, self.look, head).pack(side='left')
+        self.label(head, 'AMDLSS', 'h1').pack(side='left', padx=(px(12), 0))
+        self.label(head, VERSION, 'body', MUTED).pack(side='left', padx=px(10), pady=(px(10), 0))
+        self.label(head, 'HelixSR for your AMD card', 'body', MUTED).pack(side='right', pady=(px(10), 0))
 
         # HelixSR itself
-        status = self.status_card = self.card(page)
-        row = tk.Frame(status, bg=CARD)
+        status = self.status_card = tk.Frame(page, bg=BG)
+        status.pack(fill='x', pady=(0, gap))
+        row = tk.Frame(status, bg=BG)
         row.pack(fill='x')
-        self.glyph = self.label(row, '•', 'body_bold', DIM, CARD)
+        self.glyph = self.label(row, '•', 'body_bold', DIM)
         self.glyph.pack(side='left')
-        self.status = self.label(row, 'Looking for HelixSR…', 'body', TEXT, CARD, anchor='w', justify='left')
+        self.status = self.label(row, 'Looking for HelixSR…', 'body', TEXT, anchor='w', justify='left')
         self.status.pack(side='left', padx=px(8), fill='x', expand=True)
-        self.install_button = FlatButton(tk, self.look, row, 'Install HelixSR', self.install_helixsr, 'primary')
+        self.install_button = FlatButton(tk, self.look, row, 'Install HelixSR', self.install_helixsr, 'primary', bg=BG)
         self.install_button.pack(side='right')
-        self.bar = Bar(tk, self.look, status, 400)
-        self.progress = self.label(status, '', 'small', MUTED, CARD, anchor='w')
+        self.bar = Bar(tk, self.look, status, 400, bg=BG)
+        self.progress = self.label(status, '', 'small', MUTED, anchor='w')
 
-        # games
-        games = self.card(page, expand=True)
-        games.pack_configure(fill='both')
-        bar = tk.Frame(games, bg=CARD)
-        bar.pack(fill='x', pady=(0, px(8)))
-        self.label(bar, 'Your games', 'h2', TEXT, CARD).pack(side='left')
-        tk.Checkbutton(bar, text='Show all games', variable=self.show_all, command=self.fill_tree, bg=CARD, fg=TEXT,
-                       selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT, font=self.look.fonts['small'],
-                       bd=0, highlightthickness=0).pack(side='left', padx=(px(14), 0), pady=(px(4), 0))
-        self.rescan_button = FlatButton(tk, self.look, bar, 'Rescan', self.rescan)
-        self.rescan_button.pack(side='right')
-        self.add_button = FlatButton(tk, self.look, bar, 'Add game folder…', self.add_folder)
-        self.add_button.pack(side='right', padx=px(8))
-        self.search = tk.StringVar()
-        self.search.trace_add('write', lambda *_: self.fill_tree())
-        tk.Entry(bar, textvariable=self.search, bg=FIELD, fg=TEXT, insertbackground=TEXT, relief='flat',
-                 font=self.look.fonts['body'], width=22, highlightthickness=1, highlightbackground=LINE,
-                 highlightcolor=MUTED).pack(side='right', padx=px(8), ipady=px(5))
-        self.label(bar, 'Search', 'small', MUTED, CARD).pack(side='right')
+        # What stays visible when the window is short comes first: the bottom sections are packed from the bottom up
+        # before the game cards, so it is the cards that give up room (and scroll).
+        footer = self.label(page, FOOTER, 'small', DIM, anchor='w', justify='left', wraplength=px(780))
+        footer.pack(side='bottom', fill='x', pady=(px(2), 0))
+        footer.bind('<Configure>', lambda e: footer.configure(wraplength=e.width))
+        links = tk.Frame(page, bg=BG)
+        links.pack(side='bottom', fill='x', pady=(0, px(6)))
+        for title, url in LINKS:
+            link = self.label(links, title, 'small', BLOOD_HI, BG, cursor='hand2')
+            link.pack(side='left', padx=(0, px(18)))
+            link.bind('<Button-1>', lambda _e, url=url: webbrowser.open(url))
+            link.bind('<Enter>', lambda _e, link=link: link.configure(fg=TEXT))
+            link.bind('<Leave>', lambda _e, link=link: link.configure(fg=BLOOD_HI))
+        FlatButton(tk, self.look, links, 'Check for updates', lambda: self.check_updates(True), bg=BG).pack(side='right')
+        tk.Checkbutton(links, text='Beta versions', variable=self.beta_var, command=self.beta_changed, bg=BG, fg=TEXT,
+                       selectcolor=FIELD, activebackground=BG, activeforeground=TEXT, font=self.look.fonts['small'],
+                       bd=0, highlightthickness=0).pack(side='right', padx=(0, px(12)))
 
-        table = tk.Frame(games, bg=CARD)
-        table.pack(fill='both', expand=True)
-        columns = ('name', 'supports', 'state', 'notes')
-        self.tree = self.ttk.Treeview(table, columns=columns, show='headings', selectmode='browse', height=9)
-        for key, title, width in (('name', 'Game', 300), ('supports', 'Supports', 160), ('state', 'State', 170),
-                                  ('notes', 'Notes', 200)):
-            self.tree.heading(key, text=title, anchor='w')
-            self.tree.column(key, width=px(width), anchor='w', stretch=key in ('name', 'notes'))
-        self.tree.tag_configure('installed', foreground=OK)
-        self.tree.tag_configure('warn', foreground=CAUTION)
-        self.tree.tag_configure('hidden', foreground=DIM)
-        scroll = self.ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side='left', fill='both', expand=True)
-        scroll.pack(side='right', fill='y')
-        self.tree.bind('<<TreeviewSelect>>', lambda _e: self.update_buttons())
-        self.tree.bind('<Double-1>', lambda _e: self.open_folder())
-        self.menu = tk.Menu(self.tree, tearoff=0)
-        self.menu.add_command(label='Collect logs', command=self.collect_logs)
-        self.tree.bind('<Button-3>', self.row_menu)
-        self.empty = self.label(games, 'Install HelixSR first, then your games show up here.', 'small', MUTED, CARD,
-                                anchor='w')
-        self.empty.pack(fill='x', pady=(px(6), 0))
+        # log
+        logs = self.log_card = self.card(page, pady=8, side='bottom')
+        self.label(logs, 'Log', 'body_bold', MUTED, CARD).pack(side='left', padx=(0, px(12)))
+        FlatButton(tk, self.look, logs, 'Copy log', self.copy_log).pack(side='right', padx=(px(12), 0))
+        self.log = tk.Text(logs, height=2, bg=FIELD, fg=MUTED, font=self.look.fonts['mono'], relief='flat', wrap='word',
+                           state='disabled', highlightthickness=1, highlightbackground=LINE, padx=px(8), pady=px(4))
+        self.log.pack(side='left', fill='x', expand=True)
 
-        actions = tk.Frame(games, bg=CARD)
-        actions.pack(fill='x', pady=(px(10), 0))
-        self.game_install = FlatButton(tk, self.look, actions, 'Install', self.install_game, 'primary')
-        self.game_install.pack(side='left')
-        self.game_remove = FlatButton(tk, self.look, actions, 'Remove', self.remove_game)
-        self.game_remove.pack(side='left', padx=px(8))
-        self.game_folder = FlatButton(tk, self.look, actions, 'Open game folder', self.open_folder)
-        self.game_folder.pack(side='left')
-        self.game_forget = FlatButton(tk, self.look, actions, 'Forget folder', self.forget_folder)
-        self.game_forget.pack(side='left', padx=px(8))
-        self.game_logs = FlatButton(tk, self.look, actions, 'Collect logs', self.collect_logs)
-        self.game_logs.pack(side='left')
-        self.label(games, 'Close the game first. No online or anti-cheat games: the account can be banned.',
-                   'small', CAUTION, CARD, anchor='w').pack(fill='x', pady=(px(6), 0))
-
-        # per-game choices: which route (only when both work) and frame generation (OptiScaler route only)
-        options = tk.Frame(games, bg=CARD)
+        # the selected game: name and state, the route and frame generation choices, the actions
+        detail = self.detail = self.card(page, side='bottom')
+        title = tk.Frame(detail, bg=CARD)
+        title.pack(fill='x')
+        self.game_title = self.label(title, 'No game selected', 'h2', TEXT, CARD)
+        self.game_title.pack(side='left')
+        self.game_state = self.label(title, '', 'small', MUTED, CARD)
+        self.game_state.pack(side='left', padx=px(12), pady=(px(4), 0))
+        # per-game choices: which route (only when both work, on the title row) and frame generation (OptiScaler route)
+        self.route_row = tk.Frame(title, bg=CARD)
+        options = self.options = tk.Frame(detail, bg=CARD)
         options.pack(fill='x')
-        self.route_row = tk.Frame(options, bg=CARD)
-        self.label(self.route_row, 'Install as', 'small', MUTED, CARD).pack(side='left')
-        self.route_buttons = [self.choice(self.route_row, text, value) for text, value in
-                              (('DLSS (OptiScaler)', 'optiscaler'), ('AMD FSR (drop-in)', 'direct'))]
+        self.label(self.route_row, 'Install as', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
+        self.route_buttons = segmented(tk, self.look, self.route_row, (('DLSS (OptiScaler)', 'optiscaler'),
+                                                              ('AMD FSR (drop-in)', 'direct')),
+                                       self.route_var, self.update_buttons)
         self.fg_row = tk.Frame(options, bg=CARD)
         self.fg_box = tk.Checkbutton(self.fg_row, text=gamelist.FRAMEGEN_LABEL, variable=self.fg_var, bg=CARD, fg=TEXT,
                                      selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
                                      disabledforeground=DIM, font=self.look.fonts['small'], anchor='w', bd=0,
                                      highlightthickness=0, command=self.update_buttons)
         self.fg_box.pack(side='left')
-        self.options = options
+        actions = tk.Frame(detail, bg=CARD)
+        actions.pack(fill='x', pady=(px(10), 0))
+        self.game_install = FlatButton(tk, self.look, actions, 'Install', self.install_game, 'primary', height=40,
+                                       wide=True)
+        self.game_install.pack(side='left')
+        self.game_remove = FlatButton(tk, self.look, actions, 'Remove', self.remove_game, height=40)
+        self.game_remove.pack(side='left', padx=px(8))
+        self.game_logs = FlatButton(tk, self.look, actions, 'Collect logs', self.collect_logs, height=40)
+        self.game_logs.pack(side='left')
+        self.game_folder = FlatButton(tk, self.look, actions, 'Open game folder', self.open_folder, height=40)
+        self.game_folder.pack(side='left', padx=px(8))
+        self.game_forget = FlatButton(tk, self.look, actions, 'Forget folder', self.forget_folder, height=40)
+        self.game_forget.pack(side='left')
+        hint = tk.Frame(detail, bg=CARD)
+        hint.pack(fill='x', pady=(px(8), 0))
+        self.game_notes = self.label(hint, '', 'small', CAUTION, CARD)
+        self.game_notes.pack(side='right')
+        self.hint_lead = self.label(hint, '', 'small', MUTED, CARD)
+        self.hint_lead.pack(side='left')
+        self.hint = self.label(hint, '', 'small', BLOOD_HI, CARD)
+        self.hint.pack(side='left', padx=(px(4), 0))
+        self.label(detail, 'Close the game first. No online or anti-cheat games: the account can be banned.',
+                   'small', CAUTION, CARD, anchor='w').pack(fill='x', pady=(px(4), 0))
 
-        # log
-        logs = self.card(page)
-        head = tk.Frame(logs, bg=CARD)
-        head.pack(fill='x', pady=(0, px(6)))
-        self.label(head, 'Log', 'body_bold', MUTED, CARD).pack(side='left')
-        FlatButton(tk, self.look, head, 'Copy log', self.copy_log).pack(side='right')
-        self.log = tk.Text(logs, height=6, bg=FIELD, fg=MUTED, font=self.look.fonts['mono'], relief='flat', wrap='word',
-                           state='disabled', highlightthickness=1, highlightbackground=LINE, padx=px(8), pady=px(6))
-        self.log.pack(fill='x')
+        # games: the cards are the view, the hidden tree is what the window selects in and reads from
+        games = tk.Frame(page, bg=BG)
+        games.pack(fill='both', expand=True, pady=(0, gap))
+        bar = tk.Frame(games, bg=BG)
+        bar.pack(fill='x', pady=(0, px(8)))
+        self.label(bar, 'Your games', 'h2').pack(side='left')
+        self.rescan_button = FlatButton(tk, self.look, bar, 'Rescan', self.rescan, bg=BG)
+        self.rescan_button.pack(side='right')
+        self.add_button = FlatButton(tk, self.look, bar, 'Add game folder…', self.add_folder, bg=BG)
+        self.add_button.pack(side='right', padx=px(8))
+        field = tk.Frame(bar, bg=FIELD, highlightthickness=1, highlightbackground=LINE, padx=px(10))
+        field.pack(side='right', padx=px(8))
+        magnifier(tk, self.look, field, FIELD).pack(side='left')
+        self.search = tk.StringVar()
+        entry = tk.Entry(field, textvariable=self.search, bg=FIELD, fg=TEXT, insertbackground=TEXT, relief='flat',
+                         font=self.look.fonts['body'], width=20, highlightthickness=0)
+        entry.pack(side='left', padx=(px(8), 0), ipady=px(7))
+        self.placeholder = self.label(field, 'Search games', 'body', DIM, FIELD)
+        self.placeholder.place(x=px(36), rely=.5, anchor='w')
+        self.placeholder.bind('<Button-1>', lambda _e: entry.focus_set())
+        self.search.trace_add('write', lambda *_: self.search_changed())
 
-        # links and footer
-        links = tk.Frame(page, bg=BG)
-        links.pack(fill='x')
-        for title, url in LINKS:
-            link = self.label(links, title, 'small', GOLD, BG, cursor='hand2')
-            link.pack(side='left', padx=(0, px(16)))
-            link.bind('<Button-1>', lambda _e, url=url: webbrowser.open(url))
-            link.bind('<Enter>', lambda _e, link=link: link.configure(fg=TEXT))
-            link.bind('<Leave>', lambda _e, link=link: link.configure(fg=GOLD))
-        FlatButton(tk, self.look, links, 'Check for updates', lambda: self.check_updates(True), bg=BG).pack(side='right')
-        tk.Checkbutton(links, text='Beta versions', variable=self.beta_var, command=self.beta_changed, bg=BG, fg=TEXT,
+        columns = ('name', 'supports', 'state', 'notes')
+        self.tree = self.ttk.Treeview(games, columns=columns, show='headings', selectmode='browse')
+        self.tree.bind('<<TreeviewSelect>>', lambda _e: self.selection_changed())
+        self.menu = tk.Menu(self.root, tearoff=0)
+        self.menu.add_command(label='Collect logs', command=self.collect_logs)
+        foot = tk.Frame(games, bg=BG)
+        foot.pack(side='bottom', fill='x', pady=(px(6), 0))
+        self.empty = self.label(foot, 'Install HelixSR first, then your games show up here.', 'small', MUTED,
+                                anchor='w')
+        self.empty.pack(side='left')
+        tk.Checkbutton(foot, text='Show all games', variable=self.show_all, command=self.fill_tree, bg=BG, fg=TEXT,
                        selectcolor=FIELD, activebackground=BG, activeforeground=TEXT, font=self.look.fonts['small'],
-                       bd=0, highlightthickness=0).pack(side='right', padx=(0, px(12)))
-        self.label(page, FOOTER, 'small', DIM, BG, anchor='w', justify='left', wraplength=px(900)).pack(
-            fill='x', pady=(px(8), 0))
+                       bd=0, highlightthickness=0).pack(side='right')
+        self.gallery = Gallery(tk, self.ttk, self.look, games, self.pick, lambda _n: self.open_folder(),
+                               self.card_menu)
+        self.gallery.frame.pack(fill='both', expand=True)
+
         self.update_buttons()
 
     # ---- helpers --------------------------------------------------------------------------------
@@ -256,14 +270,39 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(self.log.get('1.0', 'end-1c'))
 
-    def row_menu(self, event):
-        """Right-click on a game row: select it and offer Collect logs."""
-        row = self.tree.identify_row(event.y)
-        if row:
-            self.tree.selection_set(row)
-            self.update_buttons()
-            self.menu.entryconfigure(0, state=self.game_logs.state)
-            self.menu.tk_popup(event.x_root, event.y_root)
+    def pick(self, number):
+        """A card was chosen (click or key): the tree holds the selection, the cards show it."""
+        self.tree.selection_set(str(number))
+        self.selection_changed()
+
+    def selection_changed(self):
+        chosen = self.tree.selection()
+        self.gallery.select(int(chosen[0]) if chosen else None)
+        self.update_buttons()
+
+    def card_menu(self, _number, x, y):
+        """Right-click on a card: it is already selected, offer Collect logs."""
+        self.menu.entryconfigure(0, state=self.game_logs.state)
+        self.menu.tk_popup(x, y)
+
+    def fit_height(self, event):
+        """A short window drops the log strip (status line and message boxes still say what happened) so the cards
+        keep room."""
+        short = event.widget is self.root and event.height < self.look.px(720)
+        if event.widget is not self.root or short == self.log_hidden:
+            return
+        self.log_hidden = short
+        if short:
+            self.log_card.pack_forget()
+        else:
+            self.log_card.pack(fill='x', pady=(0, self.look.px(10)), side='bottom', before=self.detail)
+
+    def search_changed(self):
+        if self.search.get():
+            self.placeholder.place_forget()
+        else:
+            self.placeholder.place(x=self.look.px(36), rely=.5, anchor='w')
+        self.fill_tree()
 
     def selected(self):
         chosen = self.tree.selection()
@@ -282,7 +321,18 @@ class App:
         self.game_logs.configure(state='normal' if idle and game and game.folder and os.path.isdir(game.folder)
                                  else 'disabled')
         self.game_forget.configure(state='normal' if idle and game and game.manual and not game.installed else 'disabled')
+        self.update_detail(game)
         self.update_options(game, idle)
+
+    def update_detail(self, game):
+        """The panel's heading: the game's name and state, and why to be careful (anti-cheat) or why it is not offered."""
+        note = game and (game.reason or (f'anti-cheat: {", ".join(game.anticheat)}' if game.anticheat else ''))
+        self.game_title.configure(text=game.name if game else 'No game selected', fg=TEXT if game else MUTED)
+        self.game_state.configure(text=game.state_text if game and not game.reason else '')
+        self.game_notes.configure(text=note)
+        hint = game and game.can_install
+        self.hint_lead.configure(text='After install,' if hint else '')
+        self.hint.configure(text=f'in the game choose {game.in_game(self.route_of(game))}.' if hint else '')
 
     def route_of(self, game):
         """The route Install will use for `game`: the installed one, the box's pick, or HelixSR's default."""
@@ -301,9 +351,9 @@ class App:
         self.route_row.pack_forget()
         self.fg_row.pack_forget()
         if game and game.route_choice:
-            self.route_row.pack(fill='x', pady=(self.look.px(8), 0))
+            self.route_row.pack(side='right')
         if game and game.exe_folder and self.route_of(game) == 'optiscaler':
-            self.fg_row.pack(fill='x', pady=(self.look.px(4), 0))
+            self.fg_row.pack(fill='x', pady=(self.look.px(6), 0))
         for widget in (*self.route_buttons, self.fg_box):
             widget.configure(state='normal' if idle else 'disabled')
 
@@ -429,6 +479,7 @@ class App:
                 tags = ('installed',) if game.installed else ('warn',) if game.anticheat else ()
                 values = (game.name, game.supports, game.state_text, notes)
             self.tree.insert('', 'end', iid=str(number), tags=tags, values=values)
+        self.gallery.set_items(card_of(game) for game in self.shown)
         if self.helixsr is None:
             self.empty.configure(text='Install HelixSR first, then your games show up here.')
         elif not self.games:
@@ -598,18 +649,22 @@ class App:
         if self.update_card:
             self.update_card.destroy()
         tk, px = self.tk, self.look.px
-        card = self.update_card = tk.Frame(self.page, bg=CARD, highlightthickness=1, highlightbackground=BLOOD,
-                                           padx=px(14), pady=px(8))
+        fill = mix(CARD, BLOOD, .13)
+        card = self.update_card = tk.Frame(self.page, bg=fill, highlightthickness=1,
+                                           highlightbackground=mix(LINE, BLOOD, .45))
         card.pack(fill='x', pady=(0, px(10)), before=self.status_card)
-        self.update_label = self.label(card, f'AMDLSS {release.version} is available.', 'body_bold', TEXT, CARD)
+        tk.Frame(card, bg=BLOOD, width=px(4)).pack(side='left', fill='y')
+        body = tk.Frame(card, bg=fill, padx=px(16), pady=px(6))
+        body.pack(side='left', fill='x', expand=True)
+        self.update_label = self.label(body, f'AMDLSS {release.version} is available.', 'body_bold', TEXT, fill)
         self.update_label.pack(side='left')
-        notes = FlatButton(tk, self.look, card, 'Release notes', lambda: webbrowser.open(release.page))
+        notes = FlatButton(tk, self.look, body, 'Release notes', lambda: webbrowser.open(release.page), bg=fill)
         notes.pack(side='right')
         if update.FROZEN:
-            self.update_button = FlatButton(tk, self.look, card, 'Update', lambda: self.install_update(release),
-                                            'primary')
+            self.update_button = FlatButton(tk, self.look, body, 'Update', lambda: self.install_update(release),
+                                            'primary', bg=fill)
             self.update_button.pack(side='right', padx=px(8))
-            self.update_bar = Bar(tk, self.look, card, 120)
+            self.update_bar = Bar(tk, self.look, body, 120, bg=fill)
 
     def install_update(self, release):
         if self.busy:

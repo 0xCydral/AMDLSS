@@ -411,3 +411,50 @@ def test_a_failed_update_is_one_line_and_the_card_is_usable_again(window, monkey
     assert answers.told == ['ERROR Update failed: the download does not match the SHA-256 GitHub lists, '
                             'nothing was changed']
     assert not app.busy and app.update_button.state == 'normal' and 'is available.' in app.update_label.cget('text')
+
+
+def test_the_cards_follow_the_hidden_tree_and_the_tree_follows_the_cards(window, monkeypatch):
+    top, app, _one = two_game_app(window, monkeypatch)
+    assert not shown(app.tree)  # the tree is the model, the cards are the view
+    assert [c.name for c in app.gallery.cards] == ['One', 'Three'] == [r[0] for r in rows_of(app)]
+    assert len(app.gallery.outlines) == 2 and app.gallery.selected is None
+    app.gallery.clicked(None, 1)  # a click on the second card selects its tree row
+    assert app.tree.selection() == ('1',) and app.gallery.selected == 1
+    app.tree.selection_set('0')  # a tree selection lights its card
+    top.update()
+    assert app.gallery.selected == 0
+    app.gallery.key('Right')
+    assert app.tree.selection() == ('1',)
+    app.gallery.key('Right')  # past the last card stays on it
+    assert app.tree.selection() == ('1',)
+    app.gallery.key('Home')
+    assert app.tree.selection() == ('0',) and app.game_title.cget('text') == 'One'
+    app.search.set('thr')
+    top.update()
+    assert [c.name for c in app.gallery.cards] == ['Three']
+
+
+def test_the_segmented_toggle_drives_the_install_route(window, monkeypatch):
+    from amdlss.ui import BLOOD
+    top, app, _one = two_game_app(window, monkeypatch)
+    app.tree.selection_set('0')  # One: both routes work
+    top.update()
+    optiscaler, direct = app.route_buttons
+    assert app.route_var.get() == 'optiscaler' and shown(app.route_row)
+    assert optiscaler.itemcget(optiscaler.rect, 'fill') == BLOOD != direct.itemcget(direct.rect, 'fill')
+    direct.choose()  # a click, or Return/space on the focused half
+    assert app.route_var.get() == 'direct' and not shown(app.fg_row)  # the drop-in has no frame generation
+    assert direct.itemcget(direct.rect, 'fill') == BLOOD != optiscaler.itemcget(optiscaler.rect, 'fill')
+    direct.step()  # an arrow key hands the choice to the other half
+    assert app.route_var.get() == 'optiscaler' and shown(app.fg_row)
+    direct.configure(state='disabled')
+    direct.choose()
+    assert app.route_var.get() == 'optiscaler'
+
+
+def test_monogram_and_tint_come_from_the_name_alone():
+    from amdlss.ui import monogram, tint
+    names = {"Dragon's Dogma 2": 'DD2', 'Final Fantasy XVI': 'XVI', 'Stellar Blade': 'SB', 'Cyberpunk 2077': '2077',
+             'The Witcher 3': 'W3', 'Far Cry 6': 'FC6', 'Like a Dragon Gaiden': 'LDG', 'Where Winds Meet': 'WWM'}
+    assert {name: monogram(name) for name in names} == names
+    assert monogram('???') == '?' and tint('Far Cry 6') == tint('Far Cry 6')
