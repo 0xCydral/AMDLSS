@@ -92,7 +92,8 @@ def test_every_file_lands_in_the_reports_own_folder_private_and_not_executable(s
     assert status == 0 and err == ''
     folder = tmp_path / CODE
     written = sorted(str(p.relative_to(folder)).replace(os.sep, '/') for p in folder.rglob('*') if p.is_file())
-    assert written == sorted(FULL['files'])
+    assert written == sorted([*FULL['files'], 'report.html'])   # the report's files, plus the readable page
+    assert 'Far Cry 6' in (folder / 'report.html').read_text(encoding='utf-8')
     for path in folder.rglob('*'):
         mode = path.stat().st_mode & 0o777
         assert mode == (0o700 if path.is_dir() else 0o600), (path, oct(mode))   # nothing is executable, nothing is shared
@@ -217,7 +218,77 @@ def test_each_game_shows_at_most_20_problem_lines_so_a_noisy_one_cannot_hide_the
     assert '    Calm/a.log:1: crash once' in lines
 
 
+def test_the_summary_leaves_ini_files_comments_and_known_noise_out():
+    noisy = report(**{'G/exe-folder/OptiScaler.ini': 'this error is inside an ini\n',
+                      'G/exe-folder/OptiScaler.log': ('; Might cause crashes, especially with Async\n'
+                                                      '[E] nvngx_update.exe failed\nGetLatency: Not enough data\n'
+                                                      'a real failure here\n')})
+    lines = tool.summary(noisy, CODE, Path('/x'))
+    shown = [line for line in lines if ': ' in line and line.startswith('    G/')]
+    assert shown == ['    G/exe-folder/OptiScaler.log:4: a real failure here']
+
+
 def test_a_long_line_is_cut_for_the_summary():
     lines = tool.summary(report(**{'G/a.log': 'error ' + 'x' * 500 + '\n'}), CODE, Path('/x'))
     [shown] = [line for line in lines if line.startswith('    G/a.log:1:')]
     assert len(shown) < 200
+
+
+# --- sync ---------------------------------------------------------------------------------------------------------
+
+OTHER = report(**{'games.txt': 'Quiet/ | Quiet | C:\\Q | install: none | HelixSR: unknown\n', 'Quiet/files.txt': 'x\n'})
+LISTED = {'reports': [{'code': CODE, 'created': 2_000_000_000}, {'code': 'WXYZ6789', 'created': 1_900_000_000}]}
+
+
+def sync_it(tmp_path, url, environ, capsys):
+    status = tool.main(['sync', '--url', url, '--out', str(tmp_path)], environ)
+    shown = capsys.readouterr()
+    return status, shown.out, shown.err
+
+
+def test_sync_downloads_every_new_report_once_and_builds_the_pages(server, tmp_path, capsys):  # noqa: F811
+    environ = {'AMDLSS_LOGS_TOKEN': 'tok', 'XDG_CONFIG_HOME': str(tmp_path / 'cfg')}
+    stub = server((200, LISTED), (200, FULL), (200, OTHER))
+    status, out, err = sync_it(tmp_path, stub.url, environ, capsys)
+    assert status == 0 and err == '', err
+    assert '2 new reports downloaded' in out
+    assert [seen[0] for seen in stub.seen] == ['/reports', f'/reports/{CODE}', '/reports/WXYZ6789']
+    for code, name in ((CODE, 'Far Cry 6'), ('WXYZ6789', 'Quiet')):
+        page_text = (tmp_path / code / 'report.html').read_text(encoding='utf-8')
+        assert name in page_text and (tmp_path / code / 'report.html').stat().st_mode & 0o777 == 0o600
+    index = (tmp_path / 'index.html').read_text(encoding='utf-8')
+    assert index.index(f'{CODE}/report.html') < index.index('WXYZ6789/report.html')   # newest first
+    kept = (tmp_path / CODE / 'system.txt').read_bytes()
+    again = server((200, LISTED))   # a second sync asks for the list and downloads nothing
+    status, out, err = sync_it(tmp_path, again.url, environ, capsys)
+    assert status == 0 and '0 new reports' in out and '2 already here' in out
+    assert [seen[0] for seen in again.seen] == ['/reports']
+    assert (tmp_path / CODE / 'system.txt').read_bytes() == kept
+
+
+def test_sync_reads_the_token_from_the_saved_file_and_needs_one(server, tmp_path, capsys):  # noqa: F811
+    config = tmp_path / 'cfg'
+    environ = {'XDG_CONFIG_HOME': str(config)}
+    stub = server((200, {'reports': []}))
+    status, out, err = sync_it(tmp_path / 'out', stub.url, environ, capsys)   # no token anywhere yet
+    assert status == 2 and 'AMDLSS_LOGS_TOKEN' in err and stub.seen == []
+    saved = config / 'amdlss-logs' / 'token'
+    saved.parent.mkdir(parents=True)
+    saved.write_text('tok-from-file\n', encoding='utf-8')
+    status, out, err = sync_it(tmp_path / 'out', stub.url, environ, capsys)
+    assert status == 0 and stub.auth == ['Bearer ' + 'tok-from-file']   # the file's token, whitespace gone
+    assert 'tok-from-file' not in out + err   # and it is never shown
+    assert (tmp_path / 'out' / 'index.html').is_file()
+
+
+def test_sync_under_isolated_python_against_the_stub(server, tmp_path):  # noqa: F811
+    stub = server((200, {'reports': [{'code': CODE, 'created': 2_000_000_000}]}), (200, FULL))
+    done = run(['sync', '--out', str(tmp_path)],
+               {'AMDLSS_LOGS_URL': stub.url, 'AMDLSS_LOGS_TOKEN': 'tok', 'HOME': str(tmp_path / 'home')})
+    assert done.returncode == 0, done.stderr
+    assert '1 new report downloaded' in done.stdout
+    assert (tmp_path / 'index.html').is_file() and (tmp_path / CODE / 'report.html').is_file()
+    refused = server((401, {'error': 'x'}))
+    done = run(['sync', '--out', str(tmp_path)],
+               {'AMDLSS_LOGS_URL': refused.url, 'AMDLSS_LOGS_TOKEN': 'wrong', 'HOME': str(tmp_path / 'home')})
+    assert done.returncode == 1 and 'read token was refused' in done.stderr

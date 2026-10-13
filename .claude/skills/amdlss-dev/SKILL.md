@@ -22,7 +22,7 @@ HelixSR's own installer (`amdlss/helixsr.py`) and shows the result. Repo: `~/Pro
 | `amdlss/reports.py` | Send logs: payload rules, trimming, `ReportClient` |
 | `amdlss/update.py` | Self-update from GitHub releases |
 | `receiver/` | Cloudflare Worker that stores sent reports (Workers KV) |
-| `tools/amdlss-logs.py` | Pulls a sent report onto your disk |
+| `tools/amdlss-logs.py`, `tools/report_html.py` | Pull sent reports onto your disk (`sync`/`fetch`) and render them readable |
 | `packaging/release.sh` | Builds and checks both release files |
 | `odd/tasks/` | Feature task files |
 
@@ -40,20 +40,25 @@ The two install routes matter in every bug report:
 Testers press **Send logs**. One report holds every game that has HelixSR or OptiScaler installed or any log, and
 they paste `AMDLSS report <CODE>` in the chat.
 
-On the owner's PC, open **AMDLSS Logs** from the app menu (`tools/amdlss-logs-gui.sh`) and paste the tester's message:
-it finds the code, downloads the report, shows the summary and opens the folder. The read token is asked once and
-kept in `~/.config/amdlss-logs/token` (0600); never read that file. From a shell:
+On the owner's PC, open **AMDLSS Logs** from the app menu (`tools/amdlss-logs-gui.sh`): it syncs (downloads every
+report not on disk yet) and opens `~/amdlss-reports/index.html`, newest first with a red/amber/green badge per
+game. Each report links to its `report.html`: the system as a table, one card per game with a plain-words status,
+what AMDLSS did, the real problems (OptiScaler `[E]` lines, HelixSR errors, traceback ends; .ini files, comments
+and known noise left out), HelixSR's evidence, and the raw files collapsed below. No code to paste. The read token
+is asked once and kept in `~/.config/amdlss-logs/token` (0600); never read that file. `sync` reads the token from
+`AMDLSS_LOGS_TOKEN` or that file, and the address from `AMDLSS_LOGS_URL` or the live receiver. From a shell:
 
 ```bash
 cd ~/Projects/AMDLSS
-AMDLSS_LOGS_URL=https://amdlss-reports.amdlss-reports.workers.dev \
-AMDLSS_LOGS_TOKEN='<READ_TOKEN>' python -I tools/amdlss-logs.py fetch <CODE>
+python -I tools/amdlss-logs.py sync
+AMDLSS_LOGS_TOKEN='<READ_TOKEN>' python -I tools/amdlss-logs.py fetch <CODE>   # one report; writes its report.html too
 ```
 
 - The token is the `READ_TOKEN` secret set on the Worker. It lives with the owner, not in this repo or this file.
   Never print it, commit it or pass it through a chat.
 - Files land in `~/amdlss-reports/<CODE>/` (`--out` moves it), mode 0600, never overwritten, never executable.
-  The command prints each game's files and its first error/crash/fail lines.
+  `fetch` prints each game's files and its first error/crash/fail lines (same noise filter as the pages);
+  `sync` prints how many were new and rebuilds `index.html` over every downloaded report.
 - Reports expire after 30 days. A report sent a minute ago can take up to 60 s to be readable (KV propagation).
 - The code is 8 Crockford base32 characters (no I, L, O, U); anything else is refused before any request.
 
@@ -136,6 +141,8 @@ Windows Defender sometimes flags a fresh unsigned exe; testers have to allow it.
 `receiver/validate.js` and mirrored in `amdlss/reports.py`; a pytest test runs both against the same cases, so change
 both together. Limits: 8 MiB body, 200 files, names of up to 5 parts ending in `.log/.ini/.json/.txt`, text without
 control characters, 10 uploads per minute per IP. Only the re-validated object is stored, never the raw body.
+Uploads also store KV metadata (arrival time, app version, game count); `GET /reports` answers the codes and
+arrival times, newest first, to the read-token holder only. That list is what `sync` is built on.
 
 ```bash
 cd receiver

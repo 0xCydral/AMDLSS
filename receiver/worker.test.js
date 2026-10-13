@@ -169,7 +169,7 @@ test('other paths and methods are 404 or 405', async () => {
   assert.equal((await send('HEAD', '/reports/ABCDEFGH')).status, 405);
 });
 
-test('listing the reports needs the Bearer [REDACTED] and reveals no code without it', async () => {
+test('listing the reports needs the read token and reveals no code without it', async () => {
   const e = env();
   const { code } = await (await worker.fetch(post(GOOD), e)).json();
   for (const request of [get('/reports'), get('/reports', 'wrong')]) {

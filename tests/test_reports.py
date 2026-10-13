@@ -454,6 +454,36 @@ def test_fetch_checks_the_code_and_the_token_before_any_request(server):
     assert stub.seen == []
 
 
+def test_the_report_list_is_read_with_the_token_and_checked_entry_by_entry(server):
+    listed = {'reports': [{'code': 'ABCD2345', 'created': 300}, {'code': 'EFGH6789', 'created': None}]}
+    stub = server((200, listed))
+    assert ReportClient(stub.url).list('sekret-token') == listed['reports']
+    assert stub.seen[0][0] == '/reports' and stub.auth == ['Bearer ' + 'sekret-token']
+    assert ReportClient(server((200, {'reports': []})).url).list('sekret-token') == []
+    for answer in (b'not json', [], {'reports': {}}, {'reports': [{'code': 'bad', 'created': 1}]},
+                   {'reports': [{'code': 'ABCD2345', 'created': 'now'}]}, {'reports': [{'created': 1}]},
+                   {'reports': [{'code': 'ABCD2345'}]}):
+        with pytest.raises(ReportError):
+            ReportClient(server((200, answer)).url).list('sekret-token')
+    with pytest.raises(ReportError, match='token was refused'):
+        ReportClient(server((401, {'error': 'x'})).url).list('wrong')
+
+
+def test_list_checks_the_token_and_the_address_before_any_request(server):
+    stub = server((200, {'reports': []}))
+    for token in ('', None, 'a b', 'tok\r\nX-Evil: 1'):
+        with pytest.raises(ReportError, match='read token'):
+            ReportClient(stub.url).list(token)
+    with pytest.raises(ReportError, match='no log server address'):
+        ReportClient('').list('tok')
+    assert stub.seen == []
+
+
+def test_the_default_address_is_the_live_receiver():
+    assert reports.DEFAULT_LOGS_URL == 'https://amdlss-reports.amdlss-reports.workers.dev'
+    assert reports.REPORT_URL == reports.DEFAULT_LOGS_URL
+
+
 def test_the_code_to_paste():
     assert reports.report_text('ABCD2345') == 'AMDLSS report ABCD2345'
     assert reports.valid_code('ABCD2345') and not any(map(reports.valid_code, ['abcd2345', 'ABCD234', 'ABCD23456', 'ILOU0000', None]))

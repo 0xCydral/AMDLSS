@@ -24,7 +24,8 @@ from pathlib import Path
 
 from . import VERSION, framegen, logs
 
-REPORT_URL = 'https://amdlss-reports.amdlss-reports.workers.dev'   # the receiver's address (receiver/README.md); empty: sending is not set up in this build
+DEFAULT_LOGS_URL = 'https://amdlss-reports.amdlss-reports.workers.dev'   # the receiver's address (receiver/README.md)
+REPORT_URL = DEFAULT_LOGS_URL   # where Send logs uploads; empty: sending is not set up in this build
 TIMEOUT = 30
 MAX_BODY = 8 << 20
 MAX_FILES = 200
@@ -33,6 +34,7 @@ MAX_NAME_CHARS = 160
 MAX_LABEL_CHARS = 120
 MAX_FILE_CHARS = 2 << 20      # one file may not take more than a quarter of the budget
 MAX_ANSWER = 64 << 10
+MAX_LIST = 1 << 20        # the report list: one short entry per stored report
 EXTENSIONS = ('log', 'ini', 'json', 'txt')
 KEYS = {'app', 'version', 'game', 'files'}
 OWN_FILES = ('files.txt', logs.SESSION_LOG)   # kept first when there are more files than MAX_FILES
@@ -316,6 +318,13 @@ class ReportClient:
             'Content-Type': 'application/json', 'User-Agent': f'AMDLSS/{VERSION}'})
         return self.code_of(self.exchange(request, MAX_ANSWER))
 
+    @staticmethod
+    def checked_token(token):
+        """`token`, or ReportError when it could never be the server's READ_TOKEN (or would break the header)."""
+        if not re.fullmatch('[\x21-\x7e]+', token or ''):
+            raise ReportError('the read token is empty or has characters a token never has')
+        return token
+
     def fetch(self, code, token):
         """The report stored under `code` (the developer's side: `token` is the server's READ_TOKEN), checked with
         the same rules as an upload before anyone writes it anywhere."""
@@ -323,15 +332,39 @@ class ReportClient:
             raise ReportError('no log server address is set')
         if not valid_code(code):
             raise ReportError('that is not a report code')
-        if not re.fullmatch('[\x21-\x7e]+', token or ''):
-            raise ReportError('the read token is empty or has characters a token never has')
         request = urllib.request.Request(f'{self.endpoint()}/{code}', headers={
-            'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'User-Agent': f'AMDLSS/{VERSION}'})
+            'Authorization': f'Bearer {self.checked_token(token)}', 'Accept': 'application/json',
+            'User-Agent': f'AMDLSS/{VERSION}'})
         answer = self.exchange(request, MAX_BODY)
         try:
             return validate(json.loads(answer))
         except ValueError:
             raise ReportError('the log server sent an answer that is not JSON')
+
+    def list(self, token):
+        """[{'code', 'created'}] of every report the server holds, newest first as the server sent them
+        (`created` is Unix seconds, or None for a report stored before the server kept it). The developer's
+        side, like fetch(): anything about the answer that does not fit is one ReportError."""
+        if not self.configured:
+            raise ReportError('no log server address is set')
+        request = urllib.request.Request(self.endpoint(), headers={
+            'Authorization': f'Bearer {self.checked_token(token)}', 'Accept': 'application/json',
+            'User-Agent': f'AMDLSS/{VERSION}'})
+        try:
+            parsed = json.loads(self.exchange(request, MAX_LIST))
+        except ValueError:
+            raise ReportError('the log server sent an answer that is not JSON')
+        entries = parsed.get('reports') if isinstance(parsed, dict) else None
+        if not isinstance(entries, list):
+            raise ReportError('the log server sent a report list that cannot be read')
+        found = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {'code', 'created'}:
+                raise ReportError('the log server sent a report list that cannot be read')
+            if not valid_code(entry['code']) or not (entry['created'] is None or type(entry['created']) is int):
+                raise ReportError('the log server sent a report list that cannot be read')
+            found.append({'code': entry['code'], 'created': entry['created']})
+        return found
 
     def exchange(self, request, limit):
         """The body of the answer to `request` (a connection error is tried once more). More than `limit` bytes,
