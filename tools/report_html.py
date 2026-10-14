@@ -75,6 +75,8 @@ def parse_system(text):
             date = re.search(r'driver date (\S+)', body)
             if version:
                 rows.append(('Driver', version.group(1).strip() + (f' ({date.group(1)})' if date else '')))
+        elif line.startswith('FSR 4 card:'):
+            rows.append(('FSR 4 card', line.partition(':')[2].strip()))
         elif line.startswith(('CPU:', 'RAM:')):
             label, _, value = line.partition(':')
             rows.append((label, value.strip()))
@@ -90,9 +92,9 @@ def parse_games(text):
         if len(parts) < 2 or not parts[0]:
             continue
         game = {'folder': parts[0].rstrip('/'), 'name': parts[1] or parts[0].rstrip('/'),
-                'install': 'unknown', 'helixsr': 'unknown', 'framegen': None}
+                'install': 'unknown', 'helixsr': 'unknown', 'framegen': None, 'upscaler': ''}
         for part in parts[2:]:
-            for prefix, key in (('install: ', 'install'), ('HelixSR: ', 'helixsr')):
+            for prefix, key in (('install: ', 'install'), ('HelixSR: ', 'helixsr'), ('upscaler: ', 'upscaler')):
                 if part.startswith(prefix):
                     game[key] = part[len(prefix):]
             if part.startswith('frame generation: '):
@@ -669,7 +671,7 @@ def timeline_lines(run, verdicts=True):
     else:
         lines.append('How it ended: unknown, no log of the run is in this report.')
     if verdicts:
-        for question, answer in (('Did HelixSR run?', run['helix_ran']),
+        for question, answer in ((f"Did {run.get('name', 'HelixSR')} run?", run['helix_ran']),
                                  ('Did frame generation work?', run['framegen']),
                                  ('Did the game crash?', run['crashed'])):
             lines.append(f"{question} {answer['verdict']}. Evidence: {_short(answer['evidence'])}")
@@ -760,7 +762,8 @@ def analyse(report, code, created=None):
     day = report_date_of(files, created)
     games = parse_games(files.get('games.txt', ''))
     if not games:
-        games = [{'folder': folder, 'name': folder, 'install': 'unknown', 'helixsr': 'unknown', 'framegen': None}
+        games = [{'folder': folder, 'name': folder, 'install': 'unknown', 'helixsr': 'unknown', 'framegen': None,
+                  'upscaler': ''}
                  for folder in sorted({name.split('/')[0] for name in files if '/' in name})]
     for game in games:
         own = {name: text for name, text in files.items() if name.startswith(game['folder'] + '/')}
@@ -768,6 +771,9 @@ def analyse(report, code, created=None):
                    if not name.startswith(game['folder'] + '/history/')}
         runs, crashes, proton = runs_of(files, game['folder'], day)
         game['runs'], game['timeline'], game['crashes'], game['proton'] = runs, runs[0], crashes, proton
+        if game['upscaler'].startswith('FSR 4.1.1'):   # AMD's DLL writes no log: HelixSR's silence says nothing here
+            runs[0]['name'] = 'FSR 4.1.1'
+            runs[0]['helix_ran'] = {'verdict': 'Unknown', 'evidence': "AMD's FSR 4.1.1 DLL writes no log of its own"}
         game['proton_note'] = 'Proton log: included (proton.log).' if proton else PROTON_NOTE if linux else ''
         game['actions'] = parse_actions(own.get(f"{game['folder']}/{SESSION_LOG}", ''))
         game['problems'] = problems_in(current)
@@ -814,6 +820,8 @@ def _game_card(game):
     out = ['<section class="card">',
            f'<h2>{esc(game["name"])}<span class="badge {game["level"]}">{esc(game["status"])}</span></h2>']
     rows = [('Install', game['install']), ('HelixSR', game['helixsr'])]
+    if game['upscaler']:
+        rows.append(('Upscaler', game['upscaler']))
     if game['framegen'] is not None:
         rows.append(('Frame generation', 'on' if game['framegen'] else 'off'))
     out.append('<table>' + ''.join(f'<tr><th>{esc(label)}</th><td>{esc(value)}</td></tr>'
@@ -822,7 +830,7 @@ def _game_card(game):
         out.append(f'<p class="warn">{esc(game["third_party"])}</p>')
     latest = game['timeline']
     out.append('<h3>Answers (latest run)</h3>')
-    answers = [('Did HelixSR run?', latest['helix_ran']), ('Did frame generation work?', latest['framegen']),
+    answers = [(f"Did {latest.get('name', 'HelixSR')} run?", latest['helix_ran']), ('Did frame generation work?', latest['framegen']),
                ('Did the game crash?', latest['crashed'])]
     out.append('<table>' + ''.join(
         f'<tr><th>{esc(question)}</th><td>{esc(answer["verdict"])}</td>'

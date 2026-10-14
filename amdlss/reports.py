@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import VERSION, framegen, helixsr, logs
+from . import VERSION, framegen, fsr4, helixsr, logs
 
 DEFAULT_LOGS_URL = 'https://amdlss-reports.amdlss-reports.workers.dev'   # the receiver's address (receiver/README.md)
 REPORT_URL = DEFAULT_LOGS_URL   # where Send logs uploads; empty: sending is not set up in this build
@@ -238,7 +238,8 @@ def install_mode(game):
         exe = Path(game.exe_folder or game.folder)
         dll = next((n for n in logs.OPTI_NAMES if (exe / n).is_file() and logs.owner_of(exe / n) == 'OptiScaler'), '')
         return f'OptiScaler as {dll}' if dll else 'OptiScaler'
-    return {'direct': 'drop-in DLL', 'dlss': 'DLSS loader (experimental)', 'none': 'none'}.get(game.state, 'unknown')
+    return {'direct': 'drop-in DLL', 'fsr4': 'drop-in DLL', 'dlss': 'DLSS loader (experimental)',
+            'none': 'none'}.get(game.state, 'unknown')
 
 
 def games_text(games, folders):
@@ -247,7 +248,9 @@ def games_text(games, folders):
     lines = []
     for game, folder in zip(games, folders):
         fields = [f'{folder}/', game.name, game.folder, f'install: {install_mode(game)}',
-                  f'HelixSR: {game.helixsr or "unknown"}']
+                  f'HelixSR: {"none" if game.state == "fsr4" else game.helixsr or "unknown"}']
+        if game.upscaler == 'fsr4':
+            fields.append(f'upscaler: {fsr4.NAME} ({fsr4.describe(game)})')
         if game.exe_folder and framegen.ini_path(game.exe_folder).is_file():
             fields.append(f'frame generation: {"on" if framegen.is_on(game.exe_folder) else "off"}')
         lines.append(ANY_CONTROL.sub(' ', ' | '.join(fields)))

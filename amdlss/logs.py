@@ -31,7 +31,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from . import VERSION, crashes, framegen, games as gamelist, helixsr, host
+from . import VERSION, crashes, framegen, fsr4, games as gamelist, gpu, helixsr, host
 
 MAX_BYTES = 16 << 20        # a larger file goes in as its last 16 MiB, with a note on top
 HISTORY_MAX_FILE_BYTES = 2 << 20   # one kept log: its last 2 MiB are enough to read a run back
@@ -43,13 +43,13 @@ CRASHES = 'crashes.txt'
 PROTON_LOG = 'proton.log'
 # What is collected from every place HelixSR or OptiScaler may write to (matched on the lower-cased name).
 PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'optiscaler*.ini', 'fakenvapi*.ini',
-            'helixsr-install*.json', 'helixsr.ini')
+            'helixsr-install*.json', 'helixsr.ini', 'amdlss-fsr4*.json')
 # DLLs whose owner is worth saying: the upscalers and the files OptiScaler and HelixSR take their names.
 UPSCALER_PREFIXES = ('amd_fidelityfx', 'helixsr', 'nvngx', 'libxess', 'ffx_', 'fakenvapi', 'optiscaler')
 OPTI_NAMES = ('dxgi.dll', 'winmm.dll', 'version.dll', 'dbghelp.dll', 'd3d12.dll', 'wininet.dll', 'winhttp.dll')
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # The JSON goes out as base64 of its UTF-8 bytes: PowerShell's console encoding would garble a name like "básico".
-SYSTEM_SCRIPT = ("$g=@(Get-CimInstance Win32_VideoController|Select-Object Name,DriverVersion,"
+SYSTEM_SCRIPT = ("$g=@(Get-CimInstance Win32_VideoController|Select-Object Name,PNPDeviceID,DriverVersion,"
                  "@{n='DriverDate';e={if($_.DriverDate){$_.DriverDate.ToString('yyyy-MM-dd')}}});"
                  "$c=(Get-CimInstance Win32_Processor|Select-Object -First 1 -ExpandProperty Name);"
                  "$m=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory;"
@@ -322,6 +322,8 @@ def owner_of(path):
                 return 'HelixSR DLSS loader'
             if (name in OPTI_NAMES or name.startswith('optiscaler')) and b'OptiScaler' in head + stream.read(28 << 20):
                 return 'OptiScaler'
+            if name.startswith('amd_fidelityfx') and fsr4.recognise(path):
+                return fsr4.recognise(path)
     except OSError:
         return 'unreadable'
     return 'not HelixSR'
@@ -332,6 +334,10 @@ def files_text(game):
     lines = [f'Game: {game.name}', f'Folder: {game.folder}', f'.exe folder: {game.exe_folder}',
              f'State: {game.state_text} (route {game.active_route})', f'Supports: {game.supports}',
              f'Anti-cheat files: {", ".join(game.anticheat) or "none found"}']
+    if game.upscaler == 'fsr4':
+        lines.append(f'Upscaler: {fsr4.NAME} ({fsr4.describe(game)})')
+    if game.fsr4:
+        lines.append(game.fsr4.card_text + ('' if game.fsr4.ok else f' ({game.fsr4.reason})'))
     if game.exe_folder:
         lines.append(f'Frame generation on: {framegen.is_on(game.exe_folder)}; '
                      f'OptiScaler logging on: {framegen.is_on(game.exe_folder, framegen.LOGGING)}')
@@ -353,8 +359,9 @@ def files_text(game):
 
 
 def _linux_system_info():
-    """CPU and RAM from /proc, in the shape of the Windows answer (the graphics card has no one standard place)."""
-    info = {}
+    """CPU and RAM from /proc, in the shape of the Windows answer, and the cards' PCI ids from sysfs (their names have no
+    one standard place)."""
+    info = {'gpu_pci': [{'PNPDeviceID': f'VEN_{card.vendor}&DEV_{card.device}'} for card in gpu.read_sysfs()]}
     try:
         for line in Path('/proc/cpuinfo').read_text(errors='replace').splitlines():
             if line.startswith('model name'):
@@ -394,11 +401,14 @@ def system_text(helixsr_folder, info=None, windows=None):
     lines = [f'AMDLSS {VERSION}', f'HelixSR {helixsr.version_of(helixsr_folder) or "?"}' if helixsr_folder else
              'HelixSR folder: unknown',
              f'{"Windows" if host.is_windows(windows) else "Linux"}: {platform.platform()} ({platform.version()})']
-    for number, gpu in enumerate(gpus, 1):
-        lines.append(f'GPU {number}: {gpu.get("Name", "?")}, driver {gpu.get("DriverVersion", "?")}, '
-                     f'driver date {str(gpu.get("DriverDate") or "?")[:10]}')
+    for number, card in enumerate(gpus, 1):
+        lines.append(f'GPU {number}: {card.get("Name", "?")}, driver {card.get("DriverVersion", "?")}, '
+                     f'driver date {str(card.get("DriverDate") or "?")[:10]}')
     if not gpus:
         lines.append('GPU: could not be read')
+    cards = gpu.from_info(gpus + list(info.get('gpu_pci') or []))
+    family = gpu.classify(cards)
+    lines.append(f'FSR 4 card: {family} ({gpu.TEXT[family]})' if cards else 'FSR 4 card: could not be read')
     lines.append(f'CPU: {(info.get("cpu") or "").strip() or platform.processor() or "?"}')
     ram = info.get('ram')
     lines.append(f'RAM: {round(int(ram) / 2**30, 1)} GB' if ram else 'RAM: unknown')

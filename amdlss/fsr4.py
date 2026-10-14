@@ -494,6 +494,44 @@ def restore_optiscaler(exe_folder, data_dir):
 
 # --- what is installed in a game ---------------------------------------------------------------------------------
 
+def label_of(path):
+    """"AMD's DLL 4.1.1.2740" for AMD's official FSR 4 DLL, else "your DLL <file version>"; '' when unreadable."""
+    try:
+        if os.stat(path).st_size == AMD_SIZE and sha256_of(path) == AMD_SHA256:
+            return f"AMD's DLL {AMD_VERSION}"
+        return f"your DLL {pe.inspect(path).version or '?'}"
+    except (OSError, pe.PEError):
+        return ''
+
+
+def recognise(path):
+    """Which of AMD's two DLLs a file is, by size and SHA-256 ("AMD's FSR 4.1.1 DLL", "AMD's FSR loader"), else ''."""
+    try:
+        size = os.stat(path).st_size
+        for expected, digest, name in ((AMD_SIZE, AMD_SHA256, f"AMD's FSR {AMD_VERSION[:5]} DLL"),
+                                       (LOADER_SIZE, LOADER_SHA256, "AMD's FSR loader")):
+            if size == expected and sha256_of(path) == digest:
+                return name
+    except OSError:
+        pass
+    return ''
+
+
+def describe(game):
+    """Which FSR 4 DLL runs in `game` ("AMD's DLL 4.1.1.2740", "your DLL 4.1.1.9"), '' when FSR 4.1.1 is not installed."""
+    if game.upscaler != 'fsr4':
+        return ''
+    if game.state == 'fsr4':
+        for folder in dropin_folders(target_folders(game)):
+            try:
+                label = json.loads((Path(folder) / MARKER).read_text(encoding='utf-8')).get('dll')
+            except (OSError, ValueError, AttributeError):
+                continue
+            if label:
+                return str(label)
+        return 'unknown DLL'
+    return label_of(opti_folder(game.exe_folder) / OPTI_COPIES[1]) or 'unknown DLL'
+
 def target_folders(game):
     """The folders of the game's FSR 3.1 DLLs, once each: where a drop-in is recorded."""
     return list(dict.fromkeys(str(Path(target).parent) for target in game.fsr_targets))
