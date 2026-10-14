@@ -422,7 +422,7 @@ def test_the_reader_reads_back_what_crashes_py_writes_for_an_unreal_game(tmp_pat
     assert 'Unreal Engine recorded a crash' in rendered and 'UECC-Windows-ABC_0000' in rendered
 
 
-# --- VRXKXVKN (beta.14): a crash while closing ----------------------------------
+# --- VRXKXVKN (beta.14): a crash while closing, and a crash of a helper program ----------------------------------
 
 AC_RUN = ('[23:06:50.000000] [W] OptiScaler v0.9.4-final (7534ad0) loaded\n'
           '[23:07:05.000000] [W] FGHooks::hkFGRelease Preserving FG Swapchain from release\n'
@@ -432,6 +432,10 @@ AC_CRASH = ('Windows crashes for AC (Application log, last 14 days, Event ID 100
             '2026-10-13 23:07:45 | ACShadows.exe | faulting module: ucrtbase.dll | module version: 10.0.26100.7019 | '
             'exception: c0000409 | offset: 00000000000a4ace | Event ID: 1000 | '
             'module path: C:\\WINDOWS\\System32\\ucrtbase.dll\n')
+AC_FILES = ('Game: AC\n.exe folder: E:\\AC\n\n== exe-folder: E:\\AC\n'
+            'ACShadows.exe                                       454074720 2026-10-12 10:46:11  -\n'
+            'UbisoftConnectInstaller.exe                         264202144 2026-10-12 10:46:11  174.2.0.13389\n'
+            '== exe-folder/HelixSR: E:\\AC\\HelixSR\n')
 
 
 def test_a_crash_within_a_minute_after_the_clean_shutdown_marker_is_a_crash_while_closing():
@@ -452,3 +456,48 @@ def test_a_crash_long_after_the_marker_or_a_hang_is_not_a_crash_while_closing():
     hang = AC_CRASH.replace('Event ID: 1000', 'Event ID: 1002').replace('module path:', 'event name: AppHang | x:')
     assert page.timeline_of({'AC/exe-folder/OptiScaler.log': AC_RUN}, 'Latest run', '2026-10-13',
                             page.parse_crashes(hang))['ended'] == 'clean'
+
+
+DELTA_FILES = ('Game: Delta Force\n.exe folder: F:\\DF\\Game\\DeltaForce\\Binaries\\Win64\n\n'
+               '== exe-folder: F:\\DF\\Game\\DeltaForce\\Binaries\\Win64\n'
+               'DeltaForceClient-Win64-Shipping.exe                 517627888 2026-10-12 19:32:08  4.24.2.0\n'
+               'icafe_iigw_handler.exe                                 378208 2026-10-12 19:32:08  1.0.0.1\n')
+DELTA_CRASH = ('Windows crashes for Delta Force (Application log, last 14 days, Event ID 1000, 1001 and 1002)\n'
+               'Game executables checked: DeltaForceClient-Win64-Shipping.exe, tbs_browser.exe\n'
+               'Running when collected: no\n\n'
+               '2026-10-13 14:20:00 | tbs_browser.exe | faulting module: qbcore.dll | module version: 94.0.80.81 | '
+               'exception: 80000003 | offset: 0000000002f702f4 | Event ID: 1000 | '
+               'module path: F:\\DF\\Launcher\\Service\\qbcore.dll\n')
+
+
+def delta_run(crash_text, files_text=DELTA_FILES):
+    files = {'D/files.txt': files_text, 'D/crashes.txt': crash_text, 'D/exe-folder/helixsr.log': STOPS}
+    return page.runs_of(files, 'D', '2026-10-13')
+
+
+def test_a_crash_of_a_helper_program_is_not_a_game_crash():
+    runs, crashes, _proton = delta_run(DELTA_CRASH)
+    run = runs[0]
+    assert run['crashed']['verdict'] == 'Unknown'
+    [entry] = crashes['entries']
+    assert page.crash_plain(entry).startswith('2026-10-13 14:20:00: a helper program (tbs_browser.exe) crashed '
+                                              'inside qbcore.dll')
+    assert 'crash(es) of helper programs, not of the game' in run['crash_note']
+    assert 'the game crashed' not in run['crash_note'] and not run['crashed']['verdict'].startswith('Yes')
+
+
+def test_the_unreal_shipping_exe_and_the_largest_exe_are_the_game():
+    own = DELTA_CRASH.replace('tbs_browser.exe |', 'DeltaForceClient-Win64-Shipping.exe |')
+    assert delta_run(own)[0][0]['crashed']['verdict'] == 'Yes'
+    at_two = AC_CRASH.replace('23:07:45', '14:20:00')   # inside the window of delta_run's log
+    plain = delta_run(at_two.replace('ACShadows.exe |', 'UbisoftConnectInstaller.exe |'), AC_FILES)
+    assert plain[0][0]['crashed']['verdict'] == 'Unknown' and plain[1]['entries'][0]['helper']
+    assert delta_run(at_two, AC_FILES)[0][0]['crashed']['verdict'] == 'Yes'
+    assert page.main_exes(AC_FILES) == {'acshadows.exe'}
+
+
+def test_without_a_files_list_no_crash_is_called_a_helper():
+    assert page.main_exes('') is None
+    assert delta_run(DELTA_CRASH, '')[0][0]['crashed']['verdict'] == 'Yes'
+    [entry] = delta_run(DELTA_CRASH, '')[1]['entries']
+    assert 'helper' not in entry

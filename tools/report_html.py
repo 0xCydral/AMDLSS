@@ -390,24 +390,57 @@ def parse_crashes(text):
             'checked': 'Application log' in text, 'failed': 'could not be read' in text}
 
 
+EXE_LINE = re.compile(r'^(\S.*?\.exe)\s+(\d+)\s+\d{4}-\d\d-\d\d ', re.IGNORECASE)
+
+
+def main_exes(files_text):
+    """Lower-cased names of the game's own executables from a game's files.txt: every Unreal `*-Shipping.exe`
+    listed, else the largest .exe in its exe-folder section. None when the file lists neither, so nothing is
+    judged. The other .exe files of a game folder (launchers, installers, a bundled browser) are helpers."""
+    shipping, in_exe_folder, largest = set(), False, (0, '')
+    for line in (files_text or '').splitlines():
+        if line.startswith('== '):
+            in_exe_folder = line.startswith('== exe-folder:')
+            continue
+        match = EXE_LINE.match(line)
+        if not match:
+            continue
+        name, size = match.group(1).lower(), int(match.group(2))
+        if name.endswith('-shipping.exe'):
+            shipping.add(name)
+        if in_exe_folder:
+            largest = max(largest, (size, name))
+    return shipping or ({largest[1]} if largest[1] else None)
+
+
+def mark_helpers(crashes, files_text):
+    """Flags every crash entry whose exe is not one of the game's own (main_exes) as a helper's. An Unreal crash
+    folder belongs to the game, and a game whose files.txt names no main exe is left unjudged."""
+    main = main_exes(files_text)
+    for entry in crashes['entries'] if main else ():
+        entry['helper'] = not entry.get('unreal') and entry['exe'].lower() not in main
+    return crashes
+
+
 def crash_what(entry):
     """What one record says happened. An Event 1001 from a hang names no module; an old AMDLSS wrote WER's
     unread "P5:" label where the module belongs, and that is said as it is, never as a module."""
     if entry.get('unreal'):
         return 'Unreal Engine recorded a crash (a folder in Saved/Crashes)'
+    who = f"a helper program ({entry['exe']})" if entry.get('helper') else 'the game'
     if (entry.get('name') or '').lower().startswith('apphang'):
-        return 'the game stopped responding (hang)'
+        return f'{who} stopped responding (hang)'
     if re.fullmatch(r'P\d+:?', entry['module'] or ''):
         return ('crash recorded by Windows Error Reporting; this AMDLSS version could not read the faulting '
                 'module')
     owner = module_owner(entry['module'], entry['path'])
-    return f"the game crashed inside {entry['module'] or 'an unnamed module'} ({owner})"
+    return f"{who} crashed inside {entry['module'] or 'an unnamed module'} ({owner})"
 
 
 def crash_plain(entry):
     """One crash record in plain words, the faulting module named with its owner."""
     text = f"{entry['when']}: {crash_what(entry)}"
-    if entry['exe']:
+    if entry['exe'] and not entry.get('helper'):
         text += f": {entry['exe']}"
     if entry['exception']:
         text += f", exception {entry['exception']}"
@@ -479,6 +512,7 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
         ended = 'running'   # the game had not ended when the report was made: a log that stops is not a crash
     ended_evidence = opti['clean_line'] if opti['clean'] else last_session.get('destroy_line', '')
     entries = (crashes or {}).get('entries') or []
+    game_entries = [entry for entry in entries if not entry.get('helper')]
 
     def seconds(clock):
         try:
@@ -489,7 +523,7 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
 
     low = seconds(started) - 600 if seconds(started) is not None else None
     high = seconds(max(lasts)) + 600 if lasts and seconds(max(lasts)) is not None else None
-    mine = [entry for entry in entries if report_date and entry['when'].startswith(report_date)
+    mine = [entry for entry in game_entries if report_date and entry['when'].startswith(report_date)
             and (seconds(entry['when'][11:19]) is None or low is None
                  or low <= seconds(entry['when'][11:19]) <= (high if high is not None else 24 * 3600))]
     end = seconds(opti['clean_at'] or last_session.get('destroy_at'))
@@ -500,8 +534,8 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
         ended = 'closing'
         crashed = {'verdict': f"Yes, while closing ({closing['module'] or 'unnamed module'}, "
                               f"{closing['exception'] or 'no exception code'})", 'evidence': crash_plain(closing)}
-    elif mine or (entries and not report_date and ended not in ('clean', 'running')):
-        hit = (mine or entries)[-1]
+    elif mine or (game_entries and not report_date and ended not in ('clean', 'running')):
+        hit = (mine or game_entries)[-1]
         crashed = {'verdict': 'Yes', 'evidence': crash_plain(hit)}
     elif ended == 'clean':
         crashed = {'verdict': 'No', 'evidence': ended_evidence or 'a clean shutdown marker is in the log'}
@@ -514,11 +548,15 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
     else:
         crashed = {'verdict': 'Unknown', 'evidence': 'no HelixSR, OptiScaler or fakenvapi log in this report'}
     note = ''
-    if entries and not crashed['verdict'].startswith('Yes'):
-        latest = entries[-1]
-        who = 'Unreal Engine and Windows' if any(entry.get('unreal') for entry in entries) else 'Windows'
-        note = (f"{who} also recorded {len(entries)} crash(es) of this game in the last 14 days; the latest is "
+    if game_entries and not crashed['verdict'].startswith('Yes'):
+        latest = game_entries[-1]
+        who = 'Unreal Engine and Windows' if any(entry.get('unreal') for entry in game_entries) else 'Windows'
+        note = (f"{who} also recorded {len(game_entries)} crash(es) of this game in the last 14 days; the latest is "
                 f"{latest['when']}: {crash_what(latest)}. See Windows crashes below.")
+    helpers = [entry for entry in entries if entry.get('helper')]
+    if helpers:
+        note = (note + ' ' if note else '') + (f"Windows also recorded {len(helpers)} crash(es) of helper programs, "
+                                               f"not of the game; the latest is {crash_plain(helpers[-1])}.")
     if opti['present'] and opti['fg_delivered'] > 0:
         framegen = {'verdict': 'Yes', 'evidence': (
             f"{opti['fg_delivered']} frames delivered by {'FSR ' if 'FSRFG' in opti['fg_first_delivered'] else ''}"
@@ -656,7 +694,8 @@ def runs_of(files, folder, report_date=''):
     install = next((game['install'] for game in parse_games((files or {}).get('games.txt', ''))
                     if game['folder'] == folder), '')
     actions = parse_actions((files or {}).get(prefix + SESSION_LOG, ''))
-    crashes = parse_crashes((files or {}).get(prefix + 'crashes.txt', ''))
+    crashes = mark_helpers(parse_crashes((files or {}).get(prefix + 'crashes.txt', '')),
+                           (files or {}).get(prefix + 'files.txt', ''))
     current, history = {}, {}
     for name, text in (files or {}).items():
         if not name.startswith(prefix):

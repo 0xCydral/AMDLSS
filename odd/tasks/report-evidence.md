@@ -111,3 +111,14 @@ Route: delegated direct (multi-file feature).
   and Streamline scans) never walks outside the corrected folder. Upstream draft:
   ~/amdlss-reports/helixsr-issue-draft.md. Linux 344 passed and 4 skipped; wine 337 passed and 11 skipped;
   `--selftest` exit 0; the env-gated real-HelixSR regression passes against HelixSR 1.9.0. Not released.
+- [x] T11 three fixes from tester report VRXKXVKN (2026-10-13, beta.14, AC Shadows and Delta Force):
+  (1) frame generation also sets `[FrameGen] PreserveSwapChain=false` (remembered and restored like FGInput and
+  FGOutput; the line is optional; a game switched on by beta.14 gets it on the next Update and the box still
+  reads on), because the log chain "Preserving FG Swapchain from release" -> swapchain reuse -> repeated frame
+  ids -> crash appears in VRXKXVKN, GZ633MDH and 7B47A27X and OptiScaler's own game list turns the key off for
+  DLSSG games; (2) the report reader says "crashed while closing" and answers "Yes, while closing (<module>,
+  <exception>)" when a game's Event 1000/1001 lands within 60 s after the clean-shutdown marker; (3) a crash of
+  an exe that is not the game's own (an Unreal `*-Shipping.exe`, else the largest exe of the exe folder in
+  files.txt) reads "a helper program (<exe>) crashed" and no longer answers the game-crash question Yes (Delta
+  Force: tbs_browser.exe in qbcore.dll). Linux 354 passed and 4 skipped; wine 347 passed and 11 skipped;
+  `--selftest` exit 0. Not released.
