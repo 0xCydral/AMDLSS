@@ -21,7 +21,7 @@ def setup(tmp_path, monkeypatch):
     source.parent.mkdir()
     source.write_bytes(FSR4_BYTES)
     license_file = tmp_path / 'amd' / fsr4.LICENSE
-    license_file.write_text('AMD license\n')
+    license_file.write_bytes(b'AMD license\n')
     monkeypatch.setattr(fsr4, 'LOADER_SIZE', len(LOADER_BYTES))
     monkeypatch.setattr(fsr4, 'LOADER_SHA256', hashlib.sha256(LOADER_BYTES).hexdigest())
     asked = []
