@@ -507,10 +507,13 @@ def test_the_manual_check_answers_and_a_failure_is_one_log_line(window, monkeypa
 def test_the_check_runs_off_the_window_thread_with_the_beta_switch(window, monkeypatch):
     from amdlss import update
     top, make_app, tmp = window
+    monkeypatch.setattr(update, 'current_version', lambda: '1.0.0')
+    assert make_app().beta_var.get() is False   # a final release: the switch starts off
+    monkeypatch.setattr(update, 'current_version', lambda: '1.0.0-beta.1')
     app = make_app()
     asked = []
     monkeypatch.setattr(update, 'fetch_release', lambda beta: asked.append(beta) or new_release())
-    assert app.beta_var.get() is True   # the running version is a beta: the switch starts on
+    assert app.beta_var.get() is True   # a beta: the switch starts on
     app.check_updates(False)
     wait(top, app, lambda: app.update_card is not None)
     assert asked == [True] and app.update_card is not None
