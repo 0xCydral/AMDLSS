@@ -63,6 +63,20 @@ def test_a_stale_record_is_not_used_on_a_fresh_ini(exe, tmp_path):
     assert b'FGOutput=xefg' in ini(exe)
 
 
+ENABLED = (INI.replace(b'[FrameGen]\r\n', b'[FrameGen]\r\n; true or false - auto is false\r\nEnabled=auto\r\n')
+           .replace(b'[FSRFG]\r\n', b'[FSRFG]\r\nEnabled=auto\r\n'))
+
+
+def test_frame_generation_is_switched_on_in_optiscaler_and_back(exe, tmp_path):
+    # OptiScaler 0.9.4 generates nothing while [FrameGen] Enabled is false (its default), and only its overlay menu
+    # sets it; the game's own frame generation setting never does.
+    (exe / 'OptiScaler.ini').write_bytes(ENABLED)
+    assert framegen.apply(exe, True, tmp_path)
+    assert ini(exe).count(b'Enabled=true') == 1 and b'[FSRFG]\r\nEnabled=auto' in ini(exe)
+    framegen.apply(exe, False, tmp_path)
+    assert ini(exe) == ENABLED
+
+
 PRESERVE = INI.replace(b'FTInput=auto\r\n', b'FTInput=auto\r\nPreserveSwapChain = auto\r\n')
 
 

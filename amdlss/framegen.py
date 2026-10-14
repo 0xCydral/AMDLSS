@@ -4,7 +4,11 @@
 Frame generation (opt-in). Some games (Dragon's Dogma 2) offer only NVIDIA's DLSS Frame Generation, which cannot run on
 AMD. OptiScaler 0.9.4 can take the game's DLSS FG calls as its input and run AMD's FSR frame generation as the output:
 
-    [FrameGen]  FGInput=dlssg  FGOutput=fsrfg  PreserveSwapChain=false
+    [FrameGen]  Enabled=true  FGInput=dlssg  FGOutput=fsrfg  PreserveSwapChain=false
+
+Enabled is OptiScaler's own frame generation switch: false by default, and in 0.9.4 only its overlay menu turns it on
+(menu_common.cpp); the game's frame generation setting never does. With it on, OptiScaler generates frames whenever
+the game sends DLSS data, so the game's own FSR frame generation must stay off or two frame generators run at once.
 
 PreserveSwapChain is OptiScaler's "keep the frame generation swapchain when the game releases it" (auto means true).
 Tester logs of Assassin's Creed Shadows show that path, then a flood of repeated frame ids and a crash, and OptiScaler's
@@ -35,7 +39,8 @@ from .helixsr import HelixSRError
 Setting = namedtuple('Setting', 'section values tag optional', defaults=((),))
 ON = {'FGInput': 'dlssg', 'FGOutput': 'fsrfg'}
 SECTION = b'FrameGen'
-FRAMEGEN = Setting(SECTION, {**ON, 'PreserveSwapChain': 'false'}, '', ('PreserveSwapChain',))
+FRAMEGEN = Setting(SECTION, {'Enabled': 'true', **ON, 'PreserveSwapChain': 'false'}, '',
+                   ('Enabled', 'PreserveSwapChain'))
 LOGGING = Setting(b'Log', {'LogToFile': 'true', 'LogLevel': '2'}, '#log')
 RECORD = 'framegen.json'
 INI = 'OptiScaler.ini'
