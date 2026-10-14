@@ -420,3 +420,35 @@ def test_the_reader_reads_back_what_crashes_py_writes_for_an_unreal_game(tmp_pat
         'UE/crashes.txt': text}}
     rendered = page.render_report(page.analyse(report, 'ABCD2345'))
     assert 'Unreal Engine recorded a crash' in rendered and 'UECC-Windows-ABC_0000' in rendered
+
+
+# --- VRXKXVKN (beta.14): a crash while closing ----------------------------------
+
+AC_RUN = ('[23:06:50.000000] [W] OptiScaler v0.9.4-final (7534ad0) loaded\n'
+          '[23:07:05.000000] [W] FGHooks::hkFGRelease Preserving FG Swapchain from release\n'
+          '[23:07:39.000000] [W] MenuCommon::WndProc IsShuttingDown = true\n')
+AC_CRASH = ('Windows crashes for AC (Application log, last 14 days, Event ID 1000, 1001 and 1002)\n'
+            'Game executables checked: ACShadows.exe, UbisoftConnectInstaller.exe\nRunning when collected: no\n\n'
+            '2026-10-13 23:07:45 | ACShadows.exe | faulting module: ucrtbase.dll | module version: 10.0.26100.7019 | '
+            'exception: c0000409 | offset: 00000000000a4ace | Event ID: 1000 | '
+            'module path: C:\\WINDOWS\\System32\\ucrtbase.dll\n')
+
+
+def test_a_crash_within_a_minute_after_the_clean_shutdown_marker_is_a_crash_while_closing():
+    run = page.timeline_of({'AC/exe-folder/OptiScaler.log': AC_RUN}, 'Latest run', '2026-10-13',
+                           page.parse_crashes(AC_CRASH))
+    assert run['ended'] == 'closing'
+    assert run['crashed']['verdict'] == 'Yes, while closing (ucrtbase.dll, c0000409)'
+    lines = '\n'.join(page.timeline_lines(run))
+    assert 'How it ended: crashed while closing' in lines and 'clean shutdown at' not in lines
+    assert 'Did the game crash? Yes, while closing (ucrtbase.dll, c0000409).' in lines
+    assert page.timeline_of({'AC/exe-folder/OptiScaler.log': AC_RUN}, 'Latest run', '2026-10-13')['ended'] == 'clean'
+
+
+def test_a_crash_long_after_the_marker_or_a_hang_is_not_a_crash_while_closing():
+    late = AC_CRASH.replace('23:07:45', '23:08:40')   # 61 s after the 23:07:39 marker
+    run = page.timeline_of({'AC/exe-folder/OptiScaler.log': AC_RUN}, 'Latest run', '2026-10-13', page.parse_crashes(late))
+    assert run['ended'] == 'clean' and run['crashed']['verdict'] == 'Yes'
+    hang = AC_CRASH.replace('Event ID: 1000', 'Event ID: 1002').replace('module path:', 'event name: AppHang | x:')
+    assert page.timeline_of({'AC/exe-folder/OptiScaler.log': AC_RUN}, 'Latest run', '2026-10-13',
+                            page.parse_crashes(hang))['ended'] == 'clean'

@@ -492,7 +492,15 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
     mine = [entry for entry in entries if report_date and entry['when'].startswith(report_date)
             and (seconds(entry['when'][11:19]) is None or low is None
                  or low <= seconds(entry['when'][11:19]) <= (high if high is not None else 24 * 3600))]
-    if mine or (entries and not report_date and ended not in ('clean', 'running')):
+    end = seconds(opti['clean_at'] or last_session.get('destroy_at'))
+    closing = next((entry for entry in mine if ended == 'clean' and end is not None and entry['event'] in ('1000', '1001')
+                    and not (entry.get('name') or '').lower().startswith('apphang')
+                    and 0 <= (seconds(entry['when'][11:19]) or -1) - end <= 60), None)
+    if closing:   # the log ended with its clean-shutdown marker, then the game process crashed
+        ended = 'closing'
+        crashed = {'verdict': f"Yes, while closing ({closing['module'] or 'unnamed module'}, "
+                              f"{closing['exception'] or 'no exception code'})", 'evidence': crash_plain(closing)}
+    elif mine or (entries and not report_date and ended not in ('clean', 'running')):
         hit = (mine or entries)[-1]
         crashed = {'verdict': 'Yes', 'evidence': crash_plain(hit)}
     elif ended == 'clean':
@@ -506,7 +514,7 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
     else:
         crashed = {'verdict': 'Unknown', 'evidence': 'no HelixSR, OptiScaler or fakenvapi log in this report'}
     note = ''
-    if entries and crashed['verdict'] != 'Yes':
+    if entries and not crashed['verdict'].startswith('Yes'):
         latest = entries[-1]
         who = 'Unreal Engine and Windows' if any(entry.get('unreal') for entry in entries) else 'Windows'
         note = (f"{who} also recorded {len(entries)} crash(es) of this game in the last 14 days; the latest is "
@@ -541,6 +549,7 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
             'route': route, 'opti': opti, 'helix': helix, 'dx12_upscaler': dx12, 'fg_enabled': enabled,
             'fg_input': fg_input, 'fg_output': fg_output, 'ended': ended, 'ended_evidence': ended_evidence,
             'ended_at': opti['clean_at'] or last_session.get('destroy_at'),
+            'closing_at': closing['when'] if closing else '',
             'helix_ran': ran, 'framegen': framegen, 'crashed': crashed, 'crash_note': note,
             'errors': problems_in(run_files), 'fake_present': bool(fake_text),
             'truncated': opti['truncated'] or helix['truncated']}
@@ -603,6 +612,9 @@ def timeline_lines(run, verdicts=True):
         lines.append(vram + '.')
     if run['ended'] == 'clean':
         lines.append('How it ended: clean shutdown' + (f" at {run['ended_at']}" if run['ended_at'] else '') + '.')
+    elif run['ended'] == 'closing':
+        lines.append(f"How it ended: crashed while closing. The log's clean shutdown marker is at {run['ended_at']}; "
+                     f"Windows recorded the crash at {run['closing_at']}.")
     elif run['ended'] == 'running':
         lines.append('How it ended: it had not ended, the game was still running when the report was made' +
                      (f" (last log line {run['last']})" if run['last'] else '') + '.')
