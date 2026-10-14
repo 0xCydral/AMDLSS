@@ -44,6 +44,8 @@ ZIP_SHA256 = '190bc0a62e467b362eeb47d37e14571e51e5b7d75dca5a70e6eafba9b6797337'
 TOP = f'HelixSR-{VERSION}'  # the folder the zip extracts to
 DLL = 'amd_fidelityfx_dx12.dll'
 BUILT = 'helixsr_setup.json'  # written beside the DLL when the setup has built the network
+MARKER_FILE = 'helixsr-install.json'   # HelixSR's install record beside a drop-in DLL
+FSR4_MARKER = 'amdlss-fsr4.json'       # AMDLSS's own record of an FSR 4.1.1 drop-in (amdlss.fsr4)
 SETUP_PS1, SETUP_SH = 'helixsr-setup.ps1', 'helixsr-setup.sh'
 SETUP = SETUP_PS1 if host.WINDOWS else SETUP_SH
 INSTALLER = Path('setup') / 'helixsr_install.py'
@@ -310,15 +312,21 @@ def consent_text(windows=None):
 # --- download and extract -----------------------------------------------------------------------------------------
 
 def _download(part, progress):
-    """Fills `part` with the zip, resuming what an earlier run left; the caller checks the hash."""
+    """Fills `part` with HelixSR's zip (see download)."""
+    download(part, progress, ZIP_URL, ZIP_SIZE)
+
+
+def download(part, progress, url, size):
+    """Fills `part` with the file at `url` (exactly `size` bytes), resuming what an earlier run left; the caller checks
+    the hash."""
     for attempt in range(4):
         have = part.stat().st_size if part.exists() else 0
-        if have > ZIP_SIZE:
+        if have > size:
             part.unlink()
             have = 0
-        if have == ZIP_SIZE:
+        if have == size:
             return
-        request = urllib.request.Request(ZIP_URL, headers={'User-Agent': 'AMDLSS'})
+        request = urllib.request.Request(url, headers={'User-Agent': 'AMDLSS'})
         if have:
             request.add_header('Range', f'bytes={have}-')
         try:
@@ -330,16 +338,16 @@ def _download(part, progress):
                         out.write(block)
                         have += len(block)
                         if progress:
-                            progress(have, ZIP_SIZE)
+                            progress(have, size)
         except urllib.error.HTTPError as error:
             if error.code == 416:  # the part is longer than the file: drop it
                 part.unlink(missing_ok=True)
             elif attempt == 3:
-                raise HelixSRError(f'download failed: HTTP {error.code} from {ZIP_URL}')
+                raise HelixSRError(f'download failed: HTTP {error.code} from {url}')
         except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError) as error:
             if attempt == 3:
                 raise HelixSRError(f'download failed: {error}')
-        if part.exists() and part.stat().st_size == ZIP_SIZE:
+        if part.exists() and part.stat().st_size == size:
             return
     raise HelixSRError('download failed: the file stayed incomplete')
 
@@ -558,7 +566,7 @@ def process_paths(run=None):
 
 def _proc_path(path):
     """`path` spelled the Linux way: backslashes become slashes and a Windows extended-length prefix (\\?\\,
-    which a readlink under wine returns) comes off. Proton names a game by its Windows path (Z:\...), and this
+    which a readlink under wine returns) comes off. Proton names a game by its Windows path (Z:\\...), and this
     Linux check is itself tested on Windows, where every path arrives Windows-spelled."""
     path = str(path).replace('\\', '/')
     if path.startswith('//?/UNC/'):
@@ -706,7 +714,24 @@ class HelixSR:
         if reason:
             raise HelixSRError(f'AMDLSS will not change {game.name or "this game"}: {reason}')
 
-    def _act(self, build_command, game, extras, on_line):
+    def guard(self, game, extras):
+        """The checks every change to a game starts with, for changes AMDLSS makes itself too: the folder is safe,
+        the game is closed, and the game is still in HelixSR's fresh list. Keeps the game's logs, and returns the
+        game as listed now."""
+        self._need_safe(game)
+        self._need_closed(game)
+        return self._fresh(game, extras)
+
+    @staticmethod
+    def need_no_fsr4(game):
+        """FSR 4.1.1 (amdlss.fsr4) in a game's drop-in folders and HelixSR's installer must not meet: HelixSR would
+        take our DLL for the game's own and overwrite the real one's backup."""
+        for target in game.fsr_targets:
+            if (Path(target).parent / FSR4_MARKER).is_file():
+                raise HelixSRError(f'FSR 4.1.1 is installed in {game.name}: remove it first (pick HelixSR as the '
+                                   f'upscaler and press Update, or press Remove).')
+
+    def _fresh(self, game, extras):
         listed = self.list_games(extras)
         fresh = gamelist.match_game(listed, game)
         if fresh is None:
@@ -720,6 +745,10 @@ class HelixSR:
                 self.preserve(fresh)
             except Exception:   # noqa: BLE001 (a failed copy must not stop the install)
                 pass
+        return fresh
+
+    def _act(self, build_command, game, extras, on_line):
+        fresh = self._fresh(game, extras)
         code, tail = run_streaming(build_command(fresh.index, extras), self.folder, on_line)
         if code != 0:   # a locked file is said in plain words; the raw output stays in the game's install log
             raise HelixSRError(plain_failure('\n'.join(tail), game.name) or
@@ -735,6 +764,7 @@ class HelixSR:
         game's default route; 'optiscaler' (only for a game with can_opti) runs the install bridge."""
         self._need_safe(game)
         self._need_closed(game)
+        self.need_no_fsr4(game)
         if route == 'optiscaler' and game.can_opti and game.folder:
             def command(_index, extra_folders):
                 return self.optiscaler_command(game.folder, extra_folders)

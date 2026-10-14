@@ -14,15 +14,14 @@ This file is the whole feature apart from the window:
     remove_dropin); and the OptiScaler route switch, which points OptiScaler.ini at the FSR 4 DLL (use_in_optiscaler);
   - what is installed in a game (mark).
 """
-import hashlib
 import json
 import os
 import shutil
 from collections import namedtuple
 from pathlib import Path
 
+from . import VERSION, gpu, helixsr, pe
 from . import games as gamelist
-from . import gpu, helixsr, pe
 from .helixsr import HelixSRError
 
 DLL = 'amd_fidelityfx_upscaler_dx12.dll'
@@ -33,6 +32,14 @@ AMD_VERSION = '4.1.1.2740'
 AMD_SIZE = 28761864
 AMD_SHA256 = 'd0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46'
 NAME = 'FSR 4.1.1'
+MARKER = helixsr.FSR4_MARKER           # AMDLSS's record beside the game's DLL: what it moved and what it created
+OLD_DLL = 'amd_fidelityfx_dx12.dll'    # the FSR 3.1 loader-style DLL most games ship
+# AMD's FidelityFX SDK v2.3.0 loader: interface-compatible with OLD_DLL, it loads DLL from beside itself
+LOADER = 'amd_fidelityfx_loader_dx12.dll'
+LOADER_URL = ('https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.3.0/Kits/FidelityFX/'
+              'signedbin/' + LOADER)
+LOADER_SIZE = 26376
+LOADER_SHA256 = 'e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa'
 
 _VERIFIED = {}   # (path, size, mtime) -> whether the file matched the pin; AMD's DLL is 28 MB, hash it once
 
@@ -159,3 +166,149 @@ def availability(game, source):
         return Availability(False, (), 'The game has no FSR 3.1, DLSS or XeSS for FSR 4.1.1 to replace.',
                             _HIDDEN[gamelist.NO_UPSCALER][1])
     return Availability(True, routes, '', 'yes')
+
+
+# --- the drop-in: AMDLSS swaps the game's FSR DLL itself ----------------------------------------------------------
+# A game with an FSR 3.1 DLL loads either amd_fidelityfx_upscaler_dx12.dll (replaced by FSR 4's DLL as it is) or
+# amd_fidelityfx_dx12.dll (replaced by AMD's loader, with FSR 4's DLL beside it). The game's own file is renamed to
+# *.original.dll, as HelixSR does, and a record beside it (MARKER) lists every file moved and created with SHA-256s, so
+# Remove puts back exactly that and keeps a file the user replaced by hand.
+
+def _original(path):
+    return path.with_name(path.stem + '.original.dll')
+
+
+def _put(source, target):
+    """Copies `source` to `target` through a temporary name, so a half-written DLL never has the real name."""
+    temporary = target.with_name(target.name + '.amdlss')
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def loader_path(data_dir, progress=None):
+    """AMD's loader in the data folder, downloaded and checked against its pin the first time a game needs it."""
+    path = Path(data_dir) / USER_FOLDER / LOADER
+    if path.is_file() and path.stat().st_size == LOADER_SIZE and sha256_of(path) == LOADER_SHA256:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(LOADER + '.part')
+    helixsr.download(part, progress, LOADER_URL, LOADER_SIZE)
+    if part.stat().st_size != LOADER_SIZE or sha256_of(part) != LOADER_SHA256:
+        part.unlink(missing_ok=True)
+        raise HelixSRError("the downloaded AMD loader does not match the pinned SHA-256; it was deleted")
+    os.replace(part, path)
+    return path
+
+
+def _preflight(folder, targets):
+    if (folder / MARKER).exists():
+        raise HelixSRError(f'FSR 4.1.1 is already installed in {folder}: remove it first.')
+    if (folder / helixsr.MARKER_FILE).exists():
+        raise HelixSRError(f'HelixSR is installed in {folder}: remove HelixSR first.')
+    names = {target.name.lower(): target for target in targets}
+    if OLD_DLL in names and DLL not in names and (folder / DLL).exists():
+        names[DLL] = folder / DLL    # the file beside the old loader is kept as an original too
+    for target in names.values():
+        if _original(target).exists():
+            raise HelixSRError(f'{_original(target).name} already exists in {folder}: AMDLSS will not overwrite it.')
+
+
+def _install_folder(folder, targets, source, loader, license_file, record):
+    names = {target.name.lower(): target for target in targets}
+    moved, created = record['moved'], record['created']
+
+    def move(path):
+        target = _original(path)
+        sha = sha256_of(path)
+        os.replace(path, target)
+        moved.append({'name': path.name, 'to': target.name, 'sha256': sha})
+
+    def create(name, origin):
+        _put(origin, folder / name)
+        created.append({'name': name, 'sha256': sha256_of(folder / name)})
+
+    if DLL in names:
+        move(names[DLL])
+    elif (folder / DLL).exists():
+        move(folder / DLL)   # beside the old loader: kept as an original too
+    if OLD_DLL in names:
+        move(names[OLD_DLL])
+        create(names[OLD_DLL].name, loader)
+    create(names[DLL].name if DLL in names else DLL, source.path)
+    if (loader or not source.user) and not (folder / LICENSE).exists():
+        create(LICENSE, license_file)
+
+
+def _unwind(folder, record, force=False):
+    """Undoes a record: files AMDLSS created are deleted (one the user replaced is kept and noted, unless `force`),
+    then the files it moved come back. Returns the notes."""
+    notes, kept = [], set()
+    for item in reversed(record.get('created', [])):
+        path = folder / item['name']
+        if not path.is_file():
+            continue
+        if force or sha256_of(path) == item['sha256']:
+            path.unlink()
+        else:
+            kept.add(item['name'])
+            notes.append(f"kept {path}: it was changed after AMDLSS put it there")
+    for item in reversed(record.get('moved', [])):
+        original, path = folder / item['to'], folder / item['name']
+        if not original.exists():
+            notes.append(f"{item['to']} is missing in {folder}: {item['name']} could not be put back")
+        elif path.exists():
+            if item['name'] not in kept:
+                notes.append(f"kept {path}; the game's own file is still there as {item['to']}")
+        else:
+            os.replace(original, path)
+    return notes
+
+
+def dropin_folders(folders):
+    """The folders (of `folders`) that hold an FSR 4.1.1 record, in the order given."""
+    return [str(folder) for folder in folders if (Path(folder) / MARKER).is_file()]
+
+
+def install_dropin(targets, source, data_dir, license_file, progress=None):
+    """Swaps the DLL at each of `targets` for FSR 4.1.1 (see the section note) and writes a record in each folder.
+    Everything is checked before anything moves, and a failure halfway puts every file back. HelixSRError for a
+    refusal or a failure; nothing is left changed."""
+    folders = {}
+    for target in map(Path, targets):
+        folders.setdefault(target.parent, []).append(target)
+    for folder, here in folders.items():
+        _preflight(folder, here)
+    loader = loader_path(data_dir, progress) if any(t.name.lower() == OLD_DLL for t in map(Path, targets)) else None
+    records = {}
+    try:
+        for folder, here in folders.items():
+            records[folder] = {'amdlss': VERSION, 'upscaler': NAME, 'dll': source.label, 'moved': [], 'created': []}
+            _install_folder(folder, here, source, loader, license_file, records[folder])
+        for folder, record in records.items():
+            (folder / MARKER).write_text(json.dumps(record, indent=1), encoding='utf-8')
+    except (OSError, HelixSRError) as error:
+        for folder, record in records.items():
+            (folder / MARKER).unlink(missing_ok=True)
+            _unwind(folder, record, force=True)
+        raise HelixSRError(f'FSR 4.1.1 was not installed ({error}); the game\'s files are as they were.')
+
+
+def remove_dropin(folders):
+    """Puts back what install_dropin moved in each of `folders` and deletes what it created. Returns notes about
+    files it kept because the user changed them."""
+    notes = []
+    for folder in map(Path, folders):
+        try:
+            record = json.loads((folder / MARKER).read_text(encoding='utf-8'))
+            if not isinstance(record, dict):
+                raise ValueError('not an object')
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as error:
+            raise HelixSRError(f"AMDLSS's FSR 4.1.1 record in {folder} cannot be read ({error}); nothing was changed.")
+        notes += _unwind(folder, record)
+        (folder / MARKER).unlink(missing_ok=True)
+    return notes
