@@ -510,6 +510,49 @@ def mark(game):
     return game
 
 
+# --- what the window says ----------------------------------------------------------------------------------------
+
+LOADER_NOTE = ("For this game AMDLSS also downloads AMD's FSR loader (26 KB, FidelityFX SDK 2.3.0) once from "
+               "github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK and checks its SHA-256.")
+
+
+def plan_text(game, route, source, data_dir):
+    """What installing FSR 4.1.1 will do, before the user agrees."""
+    if route == 'direct':
+        files = ''.join(f'\n  {path}' for path in game.fsr_targets[:3])
+        text = (f"AMDLSS replaces the game's FSR 3.1 DLL with AMD's {NAME} ({source.label}) and keeps the game's own "
+                f"file next to it as *.original.dll:{files}")
+        if game.state == 'direct':
+            text += '\n\nHelixSR is removed first.'
+        if any(Path(target).name.lower() == OLD_DLL for target in game.fsr_targets) and \
+                not (Path(data_dir) / USER_FOLDER / LOADER).is_file():
+            text += '\n\n' + LOADER_NOTE
+    else:
+        where = game.exe_folder or "the game's .exe folder"
+        text = (f"HelixSR puts OptiScaler 0.9.4 next to the game's .exe ({where}), then AMDLSS points OptiScaler at "
+                f"{NAME} ({source.label}). Files HelixSR replaces go to the HelixSR{host.path_module().sep}backup "
+                'folder there.')
+    if not source.user:
+        text += "\n\nAMD's license notice (FidelityFX_v2_LICENSE.md) is copied next to AMD's DLL."
+    return f'{text}\n\n{gamelist.WARNINGS}\n\nInstall into {game.name}?'
+
+
+def after_text(game, route, source, frame_gen=False):
+    """What to do in the game once FSR 4.1.1 is installed."""
+    text = f"{NAME} is installed in {game.name} ({source.label}).\n\n"
+    if route == 'direct':
+        text += "In the game's graphics settings choose AMD FSR."
+    else:
+        text += ("In the game's graphics settings choose DLSS (or XeSS if that is all it offers); it runs "
+                 f"{NAME}. Press Insert in the game to open OptiScaler's menu, then Upscaling > Upscalers > FFX "
+                 f"Upscaler, and pick {NAME}: the menu header names the version in use. To see it on screen, turn on "
+                 "the FSR 4 watermark in that menu.")
+        if frame_gen:
+            text += '\n\n' + gamelist.FRAMEGEN_HINT
+    return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'
+                   '\n\nThe Remove button puts the original files back.')
+
+
 # --- install, switch and remove ----------------------------------------------------------------------------------
 # `helix` is an amdlss.helixsr.HelixSR. Whatever is installed is removed before the other upscaler goes in, except
 # on the OptiScaler route, where OptiScaler stays and only the library paths change.

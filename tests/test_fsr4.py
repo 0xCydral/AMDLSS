@@ -164,3 +164,30 @@ def test_a_game_installed_with_fsr4_says_so():
     opti = game(state='optiscaler', upscaler='fsr4')
     assert opti.state_text == 'FSR 4.1.1 (OptiScaler)' and opti.in_game() == 'DLSS'
     assert game(state='optiscaler').state_text == 'OptiScaler'
+
+
+# --- what the window says -----------------------------------------------------------------------------------------
+
+def test_the_plan_names_the_files_the_loader_download_and_the_license(tmp_path):
+    source = fsr4.Source(tmp_path / 'x.dll', "AMD's DLL 4.1.1.2740", '', '')
+    old = game(fsr_targets=['/g/amd_fidelityfx_dx12.dll'], route='direct', inputs=[])
+    text = fsr4.plan_text(old, 'direct', source, tmp_path / 'data')
+    assert 'amd_fidelityfx_dx12.dll' in text and '*.original.dll' in text and 'AMD\'s DLL 4.1.1.2740' in text
+    assert 'downloads AMD\'s FSR loader' in text and 'license' in text and 'Close the game first' in text
+    new = game(fsr_targets=['/g/amd_fidelityfx_upscaler_dx12.dll'], route='direct', inputs=[])
+    assert 'loader' not in fsr4.plan_text(new, 'direct', source, tmp_path / 'data')
+    (tmp_path / 'data' / fsr4.USER_FOLDER).mkdir(parents=True)
+    (tmp_path / 'data' / fsr4.USER_FOLDER / fsr4.LOADER).write_bytes(b'x')
+    assert 'loader' not in fsr4.plan_text(old, 'direct', source, tmp_path / 'data')   # already kept
+    assert 'HelixSR is removed first' in fsr4.plan_text(game(state='direct', fsr_targets=['/g/a.dll']), 'direct', source,
+                                                         tmp_path)
+    assert 'OptiScaler' in fsr4.plan_text(game(), 'optiscaler', source, tmp_path)
+
+
+def test_the_after_text_says_what_to_pick_in_the_game(tmp_path):
+    source = fsr4.Source(tmp_path / 'x.dll', 'your DLL 4.1.1.9', '', '')
+    drop = fsr4.after_text(game(name='Fable'), 'direct', source)
+    assert 'FSR 4.1.1 is installed in Fable' in drop and 'choose AMD FSR' in drop and 'your DLL 4.1.1.9' in drop
+    opti = fsr4.after_text(game(name='Fable'), 'optiscaler', source, frame_gen=True)
+    assert 'choose DLSS' in opti and 'FFX Upscaler' in opti and 'Insert' in opti and 'watermark' in opti
+    assert games.FRAMEGEN_HINT in opti and games.FRAMEGEN_HINT not in fsr4.after_text(game(), 'optiscaler', source)

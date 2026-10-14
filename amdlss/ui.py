@@ -379,8 +379,9 @@ class Bar:
 
 # what a card shows: kind 'ok' is a green pill (installed), 'update' an amber one (an older HelixSR), 'none' a grey
 # one; dim greys a game that is not offered;
-# cover is the path of its cover JPEG when it has one (the tint and stripes otherwise)
-Card = namedtuple('Card', 'name supports state kind dim cover', defaults=(None,))
+# cover is the path of its cover JPEG when it has one (the tint and stripes otherwise); fsr4 is the line "FSR 4.1.1: yes"
+# or "FSR 4.1.1: no, <why>" (fsr4_ok picks its colour), empty when the game was not judged
+Card = namedtuple('Card', 'name supports state kind dim cover fsr4 fsr4_ok', defaults=(None, '', False))
 
 
 class Gallery:
@@ -393,7 +394,7 @@ class Gallery:
     def __init__(self, tk, ttk, look, parent, choose, double, context):
         self.look, self.choose, self.double, self.context = look, choose, double, context
         px = look.px
-        self.card_h, self.gap = px(124), px(10)
+        self.card_h, self.gap = px(144), px(10)
         self.frame = tk.Frame(parent, bg=BG)
         self.canvas = tk.Canvas(self.frame, bg=BG, highlightthickness=0, bd=0, takefocus=True, width=px(800),
                                 height=2 * self.card_h + self.gap, yscrollincrement=px(24))
@@ -478,10 +479,13 @@ class Gallery:
                       fill=MUTED if card.dim else TEXT, tags=tag)
         # title, supports, state pill
         inner = w - px(24)
-        c.create_text(x + px(12), y + h - px(64), anchor='w', font=fonts['body_bold'], tags=tag,
+        c.create_text(x + px(12), y + h - px(82), anchor='w', font=fonts['body_bold'], tags=tag,
                       text=self.look.fit(fonts['body_bold'], card.name, inner), fill=MUTED if card.dim else TEXT)
-        c.create_text(x + px(12), y + h - px(43), anchor='w', font=fonts['small'], tags=tag,
+        c.create_text(x + px(12), y + h - px(62), anchor='w', font=fonts['small'], tags=tag,
                       text=self.look.fit(fonts['small'], card.supports, inner), fill=MUTED)
+        if card.fsr4:   # can the game use FSR 4.1.1: green when yes, amber with the reason when no
+            c.create_text(x + px(12), y + h - px(43), anchor='w', font=fonts['small'], tags=tag,
+                          text=self.look.fit(fonts['small'], card.fsr4, inner), fill=OK if card.fsr4_ok else CAUTION)
         text = self.look.fit(fonts['small'], card.state, inner - px(20))
         pill_w = self.look.measure(fonts['small'], text) + px(20)
         ink = {'ok': OK, 'update': CAUTION}.get(card.kind, MUTED)

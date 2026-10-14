@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from amdlss import covers, helixsr, settings
+from amdlss import covers, gpu, helixsr, settings
 from fake_helixsr import make
 
 tk = pytest.importorskip('tkinter')
@@ -42,6 +42,7 @@ def window(hidden_root, tmp_path, monkeypatch):
     monkeypatch.setenv('AMDLSS_DATA_DIR', str(tmp_path / 'data'))
     settings.save_covers(tmp_path / 'data', False)   # no test fetches covers from Steam unless it says so
     monkeypatch.setattr(helixsr, 'helixsr_python', lambda: sys.executable)
+    monkeypatch.setattr(gpu, 'detect', lambda *args, **kwargs: [])   # never read the real card
     from amdlss.app import App
     yield top, lambda: App(top, tk, ttk, filedialog, messagebox, font), tmp_path
     top.destroy()

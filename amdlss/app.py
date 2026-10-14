@@ -12,7 +12,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import VERSION, covers, framegen, games as gamelist, helixsr, host, logs, reports, settings, update
+from . import (VERSION, covers, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, reports, settings,
+               update)
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
 
@@ -31,12 +32,19 @@ def card_of(game, steam_covers=None, update=False):
     """What a game's card shows: the name, what it supports, and the state (or why it is not offered; 'update' when
     the game runs an older HelixSR), plus its cover when one is already on disk."""
     supports = game.supports.replace(', ', ' / ') if game.fsr31 or game.inputs else ''
+    line, fine = (game.fsr4.card_text, game.fsr4.ok) if game.fsr4 else ('', False)
     if game.reason:
-        return Card(game.name, supports, game.reason, 'none', True)
+        return Card(game.name, supports, game.reason, 'none', True, None, line, fine)
     cover = steam_covers.cached(game) if steam_covers else None
     if update:
-        return Card(game.name, supports, 'update', 'update', False, cover)
-    return Card(game.name, supports, game.state_text, 'ok' if game.installed else 'none', False, cover)
+        return Card(game.name, supports, 'update', 'update', False, cover, line, fine)
+    return Card(game.name, supports, game.state_text, 'ok' if game.installed else 'none', False, cover, line, fine)
+
+
+def user_dirs():
+    """Where a downloaded FSR 4 DLL is looked for: Downloads, the Desktop and Documents."""
+    home = Path.home()
+    return [home / 'Downloads', logs.desktop_dir(), home / 'Documents']
 
 
 def resource(name):
@@ -61,6 +69,8 @@ class App:
         self.option_key = None      # (folder, state) of the game the route and frame generation boxes show
         self.route_var = tk.StringVar(value='optiscaler')
         self.fg_var = tk.BooleanVar(value=False)
+        self.upscaler_var = tk.StringVar(value='helixsr')   # helixsr or fsr4: what Install puts in the selected game
+        self.gpu_class, self.source, self.dll_hint = None, None, ''   # the card, its FSR 4 DLL (fsr4.Source), a hint
         self.show_all = tk.BooleanVar(value=False)   # also list the games that are not offered, greyed out
         # a beta user keeps getting betas unless they say no
         self.beta_var = tk.BooleanVar(value=settings.load_beta(self.data_dir, update.is_prerelease(update.current_version())))
@@ -179,6 +189,15 @@ class App:
         self.route_buttons = segmented(tk, self.look, self.route_row, (('DLSS (OptiScaler)', 'optiscaler'),
                                                               ('AMD FSR (drop-in)', 'direct')),
                                        self.route_var, self.update_buttons)
+        self.upscaler_row = tk.Frame(options, bg=CARD)
+        self.label(self.upscaler_row, 'Upscaler', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
+        self.upscaler_buttons = segmented(tk, self.look, self.upscaler_row, (('HelixSR', 'helixsr'),
+                                                                              (fsr4.NAME, 'fsr4')),
+                                          self.upscaler_var, self.upscaler_changed)
+        self.dll_forget = FlatButton(tk, self.look, self.upscaler_row, 'Forget DLL', self.forget_fsr4_dll)
+        self.dll_button = FlatButton(tk, self.look, self.upscaler_row, 'Choose FSR 4 DLL…', self.choose_fsr4_dll)
+        self.fsr4_note = self.label(options, '', 'small', MUTED, CARD, anchor='w', justify='left')
+        self.fsr4_note.bind('<Configure>', lambda e: self.fsr4_note.configure(wraplength=max(e.width, 1)))
         self.fg_row = tk.Frame(options, bg=CARD)
         self.fg_box = tk.Checkbutton(self.fg_row, text=gamelist.FRAMEGEN_LABEL, variable=self.fg_var, bg=CARD, fg=TEXT,
                                      selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
@@ -334,14 +353,15 @@ class App:
 
     def update_buttons(self):
         game, idle = self.selected(), not self.busy
+        self.update_options(game, idle)   # first: it sets the upscaler and route the buttons below follow
         ready = idle and self.helixsr is not None
         self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale)
                                       else 'disabled')
         self.rescan_button.configure(state='normal' if idle else 'disabled')   # before HelixSR is installed too
         self.add_button.configure(state='normal' if idle else 'disabled')
         self.send_button.configure(state='normal' if idle and self.games else 'disabled')
-        self.game_install.configure(state='normal' if ready and game and game.can_install else 'disabled',
-                                    text='Update' if game and game.installed else 'Install')
+        self.game_install.configure(state='normal' if ready and game and game.can_install and self.upscaler_ok(game)
+                                    else 'disabled', text='Update' if game and game.installed else 'Install')
         self.game_remove.configure(state='normal' if ready and game and game.installed and not game.reason
                                    else 'disabled')
         self.game_folder.configure(state='normal' if game and game.folder and os.path.isdir(game.folder) else 'disabled')
@@ -349,7 +369,6 @@ class App:
                                  else 'disabled')
         self.game_forget.configure(state='normal' if idle and game and game.manual and not game.installed else 'disabled')
         self.update_detail(game)
-        self.update_options(game, idle)
 
     def update_detail(self, game):
         """The panel's heading: the game's name and state, and why to be careful (anti-cheat) or why it is not offered."""
@@ -362,23 +381,63 @@ class App:
         self.hint.configure(text=f'in the game choose {game.in_game(self.route_of(game))}.' if hint else '')
 
     def route_of(self, game):
-        """The route Install will use for `game`: the installed one, the box's pick, or HelixSR's default."""
+        """The route Install will use for `game`: the installed one, the box's pick, or the upscaler's default."""
+        if game.state == 'fsr4':
+            return 'direct'
         if game.installed:
             return game.state
+        if self.wants_fsr4(game):
+            return self.route_var.get() if game.route_choice and len(game.fsr4.routes) > 1 else game.fsr4.routes[0]
         return self.route_var.get() if game.route_choice else game.route
+
+    def wants_fsr4(self, game):
+        """True when FSR 4.1.1 is the upscaler picked for `game` and the game can use it."""
+        return self.upscaler_var.get() == 'fsr4' and bool(game.fsr4 and game.fsr4.ok)
+
+    def upscaler_ok(self, game):
+        """False when FSR 4.1.1 is picked for a game that cannot use it: Install waits for another pick."""
+        return self.upscaler_var.get() != 'fsr4' or self.wants_fsr4(game)
+
+    def upscaler_default(self, game):
+        """The upscaler to show first for `game`: the one installed, else the one picked last time (if it still works)."""
+        if game.upscaler == 'fsr4':
+            return 'fsr4'
+        saved = settings.load_upscaler(self.data_dir, game.folder) if game.folder and not game.installed else 'helixsr'
+        return saved if saved == 'helixsr' or (game.fsr4 and game.fsr4.ok) else 'helixsr'
+
+    def upscaler_changed(self):
+        game = self.selected()
+        if game and game.folder and not game.installed:
+            settings.save_upscaler(self.data_dir, game.folder, self.upscaler_var.get())
+        self.update_buttons()
+
+    def fsr4_line(self, game):
+        """(text, colour) under the upscaler control: why the game cannot use FSR 4.1.1, or which DLL it would use."""
+        if game.fsr4 is None:
+            return '', MUTED
+        if not game.fsr4.ok:
+            hint = f' {self.dll_hint}' if self.dll_hint and game.fsr4.short == 'needs your DLL' else ''
+            return game.fsr4.reason + hint, CAUTION
+        origin = fsr4.user_origin(self.data_dir) if self.source.user else ''
+        return f'FSR 4 DLL: {self.source.label}' + (f', found in {short_path(origin, 60)}' if origin else ''), MUTED
 
     def update_options(self, game, idle):
         """Shows the route choice (both routes work, not installed) and the frame generation box (OptiScaler route)."""
-        key = (game.folder, game.state) if game else None
+        key = (game.folder, game.state, game.upscaler) if game else None
         if key != self.option_key:  # another game or another state: start from its own default
             self.option_key = key
             if game:
+                self.upscaler_var.set(self.upscaler_default(game))
                 self.route_var.set(game.default_route if game.route_choice else game.route)
                 self.fg_var.set(game.installed and framegen.is_on(game.exe_folder) if game.exe_folder else False)
         self.route_row.pack_forget()
+        self.upscaler_row.pack_forget()
+        self.fsr4_note.pack_forget()
         self.fg_row.pack_forget()
         if game and game.route_choice:
             self.route_row.pack(side='right')
+        if game:
+            self.show_upscaler(game, idle)
         self.fg_note.pack_forget()
         offered = not game or game.streamline
         if game and game.exe_folder and self.route_of(game) == 'optiscaler':
@@ -391,6 +450,30 @@ class App:
         for widget in self.route_buttons:
             widget.configure(state='normal' if idle else 'disabled')
         self.fg_box.configure(state='normal' if idle and offered else 'disabled')
+
+    def show_upscaler(self, game, idle):
+        """The Upscaler row: HelixSR or FSR 4.1.1 (greyed with the reason when the game cannot use it), the line under
+        it, and the buttons for the FSR 4 DLL on the cards that can run one."""
+        px = self.look.px
+        self.upscaler_row.pack(fill='x')
+        text, colour = self.fsr4_line(game)
+        self.fsr4_note.configure(text=plain(text), fg=colour)
+        if text:
+            self.fsr4_note.pack(fill='x', pady=(px(4), 0))
+        usable = bool(game.fsr4 and game.fsr4.ok)
+        helix, mine = self.upscaler_buttons
+        helix.configure(state='normal' if idle else 'disabled')
+        mine.configure(state='normal' if idle and usable else 'disabled')
+        for button in (self.dll_button, self.dll_forget):
+            button.pack_forget()
+        if self.gpu_class in (gpu.RDNA2, gpu.RDNA3, gpu.RDNA4):
+            kept = fsr4.user_dll(self.data_dir)
+            self.dll_button.configure(text='Use another DLL…' if kept else 'Choose FSR 4 DLL…',
+                                      state='normal' if idle else 'disabled')
+            self.dll_button.pack(side='right')
+            if kept:
+                self.dll_forget.configure(state='normal' if idle else 'disabled')
+                self.dll_forget.pack(side='right', padx=(0, px(8)))
 
     def set_busy(self, busy, progress=None):
         self.busy = busy
@@ -498,9 +581,25 @@ class App:
                         and game.reason in ('', gamelist.UNSAFE_FOLDER):
                     game.anticheat = gamelist.scan_anticheat(game.folder)
                     game.streamline = gamelist.scan_streamline(game.folder)
+                fsr4.mark(game)
+            self.judge(found)
             return found
 
         self.work(scan, self.games_done)
+
+    def judge(self, found, discover=True):
+        """Which card this is, which FSR 4 DLL it can use, and whether each game can use FSR 4.1.1. An RX 6000 card with
+        no kept DLL looks for one each time (the games' folders, Downloads and the like) and keeps the best it finds."""
+        if self.gpu_class is None:
+            self.gpu_class = gpu.classify(gpu.detect())
+        if discover and self.gpu_class == gpu.RDNA2:
+            result = fsr4.auto_find(found, user_dirs(), self.data_dir)
+            self.dll_hint = result.hint
+            if result.found:
+                self.post(self.log_line, f'FSR 4 DLL {result.found.version} found and kept: {result.found.path}')
+        self.source = fsr4.find_source(self.gpu_class, self.helixsr_folder, self.data_dir)
+        for game in found:
+            game.fsr4 = fsr4.availability(game, self.source)
 
     def games_done(self, found):
         for extra in self.extras:
@@ -575,24 +674,31 @@ class App:
 
     def install_game(self):
         game = self.selected()
-        if not (self.helixsr and game and game.can_install and not self.busy):
+        if not (self.helixsr and game and game.can_install and self.upscaler_ok(game) and not self.busy):
             return
-        plan = gamelist.plan_text(game, self.route_of(game))
+        route, want = self.route_of(game), 'fsr4' if self.wants_fsr4(game) else 'helixsr'
+        plan = fsr4.plan_text(game, route, self.source, self.data_dir) if want == 'fsr4' \
+            else gamelist.plan_text(game, route)
         if not self.messagebox.askyesno(f'Install into {game.name}', plan, icon='warning', default='no'):
             return
         self.set_busy(True, None)
         self.progress.configure(text=plain(f'Installing into {game.name}…'))
-        self.set_status(f'• Installing HelixSR into {game.name}…')
-        extras = list(self.extras)
-        route = self.route_var.get() if game.route_choice else None
-        frame_gen = self.fg_var.get() if self.route_of(game) == 'optiscaler' and game.exe_folder else None
+        self.set_status(f'• Installing {fsr4.NAME if want == "fsr4" else "HelixSR"} into {game.name}…')
+        extras, source = list(self.extras), self.source
+        pick = self.route_var.get() if game.route_choice else None
+        frame_gen = self.fg_var.get() if route == 'optiscaler' and game.exe_folder else None
         if frame_gen is not None and not game.streamline:
             frame_gen = False   # nothing to replace: never on, and an update turns an earlier "on" off
-        record = self.game_log(game, f'{"update" if game.installed else "install"} ({self.route_of(game)})')
+        shown_route = f'{route}, {fsr4.NAME}' if want == 'fsr4' else route   # the report page reads this heading
+        record = self.game_log(game, f'{"update" if game.installed else "install"} ({shown_route})')
+        if game.folder:
+            settings.save_upscaler(self.data_dir, game.folder, want)
 
         def install():
             try:
-                after = self.helixsr.install(game, extras, record, route)
+                after = fsr4.install_game(self.helixsr, game, extras, want, pick, source,
+                                          fsr4.license_of(self.helixsr_folder), self.data_dir, record,
+                                          lambda done, total: self.post(self.download_progress_fsr4, done, total))
             except helixsr.HelixSRError as error:
                 record.fail(error)
                 raise
@@ -608,6 +714,9 @@ class App:
 
         self.work(install, lambda after: self.installed(after, bool(frame_gen)))
 
+    def download_progress_fsr4(self, done, total):
+        self.progress.configure(text=f"Downloading AMD's FSR loader: {done >> 10} of {total >> 10} KB")
+
     def game_log(self, game, action):
         """on_line for one action in `game`: the window's log, and the game's own log file for Collect logs."""
         record = logs.GameLog(self.data_dir, game.folder, self.on_line)
@@ -617,16 +726,22 @@ class App:
     def installed(self, game, frame_gen=False):
         self.set_busy(False)
         self.refresh_helixsr_status()
-        self.messagebox.showinfo('AMDLSS', gamelist.after_text(game, frame_gen))
+        if game.upscaler == 'fsr4':
+            text = fsr4.after_text(game, 'direct' if game.state == 'fsr4' else 'optiscaler', self.source, frame_gen)
+        else:
+            text = gamelist.after_text(game, frame_gen)
+        self.messagebox.showinfo('AMDLSS', text)
         self.refresh_games()
 
     def remove_game(self):
         game = self.selected()
         if not (self.helixsr and game and game.installed and not game.reason and not self.busy):
             return
+        who = 'AMDLSS' if game.state == 'fsr4' else 'HelixSR'
+        what = fsr4.NAME if game.upscaler == 'fsr4' else 'HelixSR'
         if not self.messagebox.askyesno(f'Remove from {game.name}',
-                                        f'Close {game.name} first.\n\nHelixSR puts the game\'s original files back. '
-                                        'Remove it?', icon='warning', default='no'):
+                                        f"Close {game.name} first.\n\n{who} puts the game's original files back. "
+                                        f'Remove {what}?', icon='warning', default='no'):
             return
         self.set_busy(True, None)
         self.progress.configure(text=plain(f'Removing from {game.name}…'))
@@ -635,21 +750,42 @@ class App:
 
         def remove():
             try:
-                after = self.helixsr.remove(game, extras, record)
+                return fsr4.remove_game(self.helixsr, game, extras, self.data_dir, record)
             except helixsr.HelixSRError as error:
                 record.fail(error)
                 raise
-            if game.exe_folder:
-                framegen.forget(game.exe_folder, self.data_dir)
-            return after
 
-        self.work(remove, self.removed)
+        self.work(remove, lambda after: self.removed(after, what))
 
-    def removed(self, game):
+    def removed(self, game, what='HelixSR'):
         self.set_busy(False)
         self.refresh_helixsr_status()
-        self.messagebox.showinfo('AMDLSS', f'HelixSR is removed from {game.name}. The original files are back.')
+        self.messagebox.showinfo('AMDLSS', f'{what} is removed from {game.name}. The original files are back.')
         self.refresh_games()
+
+    def choose_fsr4_dll(self):
+        """Fallback when nothing was found: the user points at an FSR 4 DLL; it is checked and kept."""
+        path = self.filedialog.askopenfilename(title='Pick the FSR 4 DLL (amd_fidelityfx_upscaler_dx12.dll)',
+                                               filetypes=[('DLL', '*.dll'), ('All files', '*.*')])
+        if not path:
+            return
+        try:
+            version = fsr4.choose_dll(path, self.data_dir)
+        except (helixsr.HelixSRError, OSError) as error:
+            self.messagebox.showerror('AMDLSS', str(error))
+            return
+        self.log_line(f'FSR 4 DLL {version} kept: {path}')
+        self.rejudge()
+
+    def forget_fsr4_dll(self):
+        fsr4.forget_dll(self.data_dir)
+        self.rejudge()
+
+    def rejudge(self):
+        """Judges the games again after the FSR 4 DLL changed (no rescan, no search)."""
+        self.judge(self.games, discover=False)
+        self.redraw_cards()
+        self.update_buttons()
 
     def collect_logs(self):
         game = self.selected()
