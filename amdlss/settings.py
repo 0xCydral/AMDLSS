@@ -56,3 +56,24 @@ def load_covers(folder):
 
 def save_covers(folder, value):
     _save(folder, 'show_covers', bool(value))
+
+
+UPSCALERS = ('helixsr', 'fsr4')
+
+
+def _game_key(folder):
+    return os.path.normcase(os.path.realpath(folder))
+
+
+def load_upscaler(folder, game_folder):
+    """The upscaler picked for a game (by its folder): 'fsr4' or, when none was picked, 'helixsr'."""
+    picked = _read(folder).get('upscalers')
+    value = picked.get(_game_key(game_folder)) if isinstance(picked, dict) else None
+    return value if value in UPSCALERS else 'helixsr'
+
+
+def save_upscaler(folder, game_folder, value):
+    picked = _read(folder).get('upscalers')
+    picked = dict(picked) if isinstance(picked, dict) else {}
+    picked[_game_key(game_folder)] = value
+    _save(folder, 'upscalers', picked)

@@ -16,9 +16,9 @@ from . import host
 SENTINEL = 'AMDLSS-GAMES '  # the bridge prints one line: this prefix and a JSON list
 
 STATE_TEXT = {'none': 'not installed', 'direct': 'FSR drop-in', 'optiscaler': 'OptiScaler',
-              'dlss': 'DLSS loader (experimental)', 'unknown': 'installed'}
+              'dlss': 'DLSS loader (experimental)', 'fsr4': 'FSR 4.1.1 drop-in', 'unknown': 'installed'}
 # What to pick in the game's menu, as HelixSR's setup reports it (helixsr_install.in_game).
-IN_GAME = {'direct': 'AMD FSR', 'optiscaler': 'DLSS', 'dlss': 'DLSS'}
+IN_GAME = {'direct': 'AMD FSR', 'optiscaler': 'DLSS', 'dlss': 'DLSS', 'fsr4': 'AMD FSR'}
 
 
 @dataclass
@@ -38,6 +38,8 @@ class Game:
     manual: bool = False        # the folder was added by hand with "Add game folder"
     helixsr: str = ''           # the HelixSR version installed in the game; '' when none or unknown
     streamline: bool = True     # the game ships Streamline DLSS-G; set by scan_streamline(), True while unscanned
+    upscaler: str = ''          # 'fsr4' when AMD's FSR 4.1.1 is what runs in the game (amdlss.fsr4.mark), else ''
+    fsr4: object = None         # amdlss.fsr4.Availability: can this game use FSR 4.1.1; None until judged
 
     @property
     def framegen_reason(self):
@@ -50,6 +52,8 @@ class Game:
 
     @property
     def state_text(self):
+        if self.upscaler == 'fsr4' and self.state == 'optiscaler':
+            return 'FSR 4.1.1 (OptiScaler)'
         return STATE_TEXT.get(self.state, self.state)
 
     @property
