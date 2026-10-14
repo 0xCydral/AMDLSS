@@ -41,20 +41,20 @@ Decisions:
 
 ## Tasks
 
-- [ ] T1 GPU class (`amdlss/gpu.py`, `tests/test_gpu.py`)
-- [ ] T2 PE reader: exports and file version (`amdlss/pe.py`, `tests/test_pe.py`)
-- [ ] T3 FSR 4 source, availability and the choice store (`amdlss/fsr4.py`, `settings.py`, `games.py`)
-- [ ] T3b Find the RX 6000 DLL automatically (`fsr4.discover`, `auto_find`): game exe folders, `HelixSR\my-fsr`, the
+- [x] T1 (4d31f97) GPU class (`amdlss/gpu.py`, `tests/test_gpu.py`)
+- [x] T2 (c86fe07) PE reader: exports and file version (`amdlss/pe.py`, `tests/test_pe.py`)
+- [x] T3 (3ef442b) FSR 4 source, availability and the choice store (`amdlss/fsr4.py`, `settings.py`, `games.py`)
+- [x] T3b (1b7f649) Find the RX 6000 DLL automatically (`fsr4.discover`, `auto_find`): game exe folders, `HelixSR\my-fsr`, the
   folders of the fsr_targets, Downloads, Desktop, Documents (4 levels, capped) and the AMDLSS data folder; only
   community builds count (AMD's pinned SHA-256 is skipped); the highest file version wins; a .7z or .zip named like an
   FSR 4 download gets the hint "Unpack <name> and AMDLSS will find the DLL."; archives are never unpacked. Rescan
   while nothing is found; the window shows where the DLL was found. "Choose FSR 4 DLL..." stays as the fallback.
   Authenticode signer check: not done (the pinned hash already tells AMD's build apart).
-- [ ] T4 Drop-in install and remove with the record and the loader download (`amdlss/fsr4.py`, `helixsr.py`)
-- [ ] T5 OptiScaler route switch (`amdlss/fsr4.py`, `framegen.py`)
-- [ ] T6 Window: card line, Upscaler control, DLL buttons, install and remove flows (`app.py`, `ui.py`)
-- [ ] T7 Reports: games.txt, files.txt, system.txt GPU class, report page (`logs.py`, `reports.py`, `tools/report_html.py`)
-- [ ] T8 README, selftest round trip, real HelixSR test, screenshots
+- [x] T4 (5853332) Drop-in install and remove with the record and the loader download (`amdlss/fsr4.py`, `helixsr.py`)
+- [x] T5 (14497c7) OptiScaler route switch (`amdlss/fsr4.py`, `framegen.py`)
+- [x] T6 (cf633fa, 3c62f94) Window: card line, Upscaler control, DLL buttons, install and remove flows (`app.py`, `ui.py`)
+- [x] T7 (e5a1c3e) Reports: games.txt, files.txt, system.txt GPU class, report page (`logs.py`, `reports.py`, `tools/report_html.py`)
+- [x] T8 (09ca3ea) README, selftest round trip, real HelixSR test, screenshots
 
 ## Checks
 
@@ -69,3 +69,18 @@ Decisions:
 ## Progress and evidence
 
 Route per task: delegated direct is not available inside this worker, so every task is inline.
+
+- RED was observed before each behaviour for T1 to T5, T7 (an import error or a failing assertion, then GREEN). T6's window
+  code was written before its smoke tests (`tests/test_app_fsr4.py`), so its tests were not seen failing first.
+- Linux: 457 passed, 7 skipped (the 7 are tests that need AMDLSS_TEST_HELIXSR or a real DLL). Wine: 450 passed, 14 skipped
+  (one earlier run failed only on a Windows line-ending slip in this work's own test, fixed in 3dd2665).
+- `AMDLSS_TEST_HELIXSR=~/.local/share/AMDLSS/HelixSR-1.9.0`: `tests/test_real_helixsr.py` 5 passed, including the new
+  OptiScaler route plus FSR 4 switch and back, and the drop-in with HelixSR switching, on the real installer. AMD's real DLL
+  matched the pinned SHA-256 and read as 4.1.1.2740.
+- Fixed on the way: `test_optiscaler_route_with_frame_generation_into_a_fake_game` already failed at HEAD (it did not know
+  the `Enabled` and `PreserveSwapChain` values frame generation sets since beta.16); `helixsr.py` had a SyntaxWarning in a
+  docstring (`Z:\...`).
+- Screenshots: /tmp/fsr4-shots/ (rdna3-* and other-*, three sizes, two games each).
+- Not verified: anything on a real Windows PC or a real Radeon. Which entry of AMD's DLL OptiScaler runs on RX 7000 and RX 6000
+  with `UpscalerIndex=auto`; that OptiScaler accepts two separate copies of the DLL in the two library roles; the loader shim
+  with a real game; Authenticode signers.
