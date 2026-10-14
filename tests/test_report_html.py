@@ -458,6 +458,14 @@ def test_a_crash_long_after_the_marker_or_a_hang_is_not_a_crash_while_closing():
                             page.parse_crashes(hang))['ended'] == 'clean'
 
 
+def test_a_windows_leak_report_is_not_a_crash():
+    leak = ('2026-10-13 23:07:45 | ACShadows.exe | faulting module: unknown | module version:  | exception:  | '
+            'offset:  | Event ID: 1001 | module path:  | event name: RADAR_PRE_LEAK_64\n')
+    run = page.timeline_of({'AC/exe-folder/OptiScaler.log': AC_RUN}, 'Latest run', '2026-10-13', page.parse_crashes(leak))
+    assert run['ended'] == 'clean' and run['crashed']['verdict'] == 'No'
+    assert 'memory-leak report' in page.crash_what(page.parse_crashes(leak)['entries'][0])
+
+
 DELTA_FILES = ('Game: Delta Force\n.exe folder: F:\\DF\\Game\\DeltaForce\\Binaries\\Win64\n\n'
                '== exe-folder: F:\\DF\\Game\\DeltaForce\\Binaries\\Win64\n'
                'DeltaForceClient-Win64-Shipping.exe                 517627888 2026-10-12 19:32:08  4.24.2.0\n'

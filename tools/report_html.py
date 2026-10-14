@@ -422,12 +422,19 @@ def mark_helpers(crashes, files_text):
     return crashes
 
 
+def is_leak(entry):
+    """WER's RADAR_PRE_LEAK reports note a process using a lot of memory; the process did not crash."""
+    return (entry.get('name') or '').lower().startswith('radar_pre_leak')
+
+
 def crash_what(entry):
     """What one record says happened. An Event 1001 from a hang names no module; an old AMDLSS wrote WER's
     unread "P5:" label where the module belongs, and that is said as it is, never as a module."""
     if entry.get('unreal'):
         return 'Unreal Engine recorded a crash (a folder in Saved/Crashes)'
     who = f"a helper program ({entry['exe']})" if entry.get('helper') else 'the game'
+    if is_leak(entry):
+        return f'Windows recorded a memory-leak report for {who} (not a crash)'
     if (entry.get('name') or '').lower().startswith('apphang'):
         return f'{who} stopped responding (hang)'
     if re.fullmatch(r'P\d+:?', entry['module'] or ''):
@@ -512,7 +519,7 @@ def timeline_of(files, label='Latest run', report_date='', crashes=None, drop_in
         ended = 'running'   # the game had not ended when the report was made: a log that stops is not a crash
     ended_evidence = opti['clean_line'] if opti['clean'] else last_session.get('destroy_line', '')
     entries = (crashes or {}).get('entries') or []
-    game_entries = [entry for entry in entries if not entry.get('helper')]
+    game_entries = [entry for entry in entries if not entry.get('helper') and not is_leak(entry)]
 
     def seconds(clock):
         try:
