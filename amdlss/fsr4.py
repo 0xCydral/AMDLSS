@@ -484,6 +484,10 @@ def restore_optiscaler(exe_folder, data_dir):
     folder = opti_folder(exe_folder)
     if folder.exists():
         shutil.rmtree(folder, ignore_errors=True)
+        try:
+            folder.parent.rmdir()   # only if HelixSR's folder holds nothing else
+        except OSError:
+            pass
         changed = True
     return changed
 
@@ -503,3 +507,76 @@ def mark(game):
         game.state, game.upscaler = 'fsr4', 'fsr4'
     elif game.state == 'optiscaler' and game.exe_folder and in_use(game.exe_folder):
         game.upscaler = 'fsr4'
+    return game
+
+
+# --- install, switch and remove ----------------------------------------------------------------------------------
+# `helix` is an amdlss.helixsr.HelixSR. Whatever is installed is removed before the other upscaler goes in, except
+# on the OptiScaler route, where OptiScaler stays and only the library paths change.
+
+def _say(on_line, notes):
+    for note in notes:
+        if on_line:
+            on_line(note, True)
+
+
+def _relisted(helix, game, extras):
+    after = gamelist.match_game(helix.list_games(extras), game)
+    if after is None:
+        raise HelixSRError(f'{game.name} disappeared from the list after the change: refresh the list')
+    return mark(after)
+
+
+def install_game(helix, game, extras, want, route, source, license_file, data_dir, on_line=None, progress=None):
+    """Installs or updates the upscaler `want` ('helixsr' or 'fsr4') in `game` and returns the game as listed
+    afterwards. `route` is the user's pick when both routes work and nothing is installed, else None. For 'fsr4',
+    `game.fsr4` (the Availability) says whether the game can use it and by which routes."""
+    if want == 'helixsr':
+        if game.state != 'fsr4' and game.upscaler != 'fsr4':
+            return mark(helix.install(game, extras, on_line, route))
+        fresh = mark(helix.guard(game, extras))
+        if fresh.state == 'fsr4':
+            _say(on_line, remove_dropin(target_folders(fresh)))
+        else:
+            restore_optiscaler(fresh.exe_folder, data_dir)
+        return mark(helix.install(game, extras, on_line, None))
+    if not (game.fsr4 and game.fsr4.ok):
+        raise HelixSRError(game.fsr4.reason if game.fsr4 else f'{NAME} has not been checked for {game.name}.')
+    fresh = mark(helix.guard(game, extras))
+    if fresh.state in ('fsr4', 'direct'):
+        way = 'direct'
+    elif fresh.state == 'optiscaler':
+        way = 'optiscaler'
+    else:
+        way = route or game.fsr4.routes[0]
+    if way not in game.fsr4.routes:
+        raise HelixSRError(f'{game.name} cannot use {NAME} by the {way} route.')
+    if fresh.state == 'fsr4':
+        _say(on_line, remove_dropin(target_folders(fresh)))
+    elif fresh.state == 'direct':
+        helix.remove(game, extras, on_line)
+    if way == 'direct':
+        install_dropin(_relisted(helix, game, extras).fsr_targets, source, data_dir, license_file, progress)
+    else:
+        after = helix.install(game, extras, on_line, 'optiscaler')
+        try:
+            use_in_optiscaler(after.exe_folder, source, license_file, data_dir)
+        except HelixSRError as error:
+            raise HelixSRError(f'OptiScaler is installed in {game.name}, but {NAME} could not be set up: {error}')
+    return _relisted(helix, game, extras)
+
+
+def remove_game(helix, game, extras, data_dir, on_line=None):
+    """Removes whichever upscaler is installed in `game`, putting every file back; returns the game as listed after."""
+    if game.state == 'fsr4':
+        fresh = mark(helix.guard(game, extras))
+        if fresh.state == 'fsr4':
+            _say(on_line, remove_dropin(target_folders(fresh)))
+            return _relisted(helix, game, extras)
+    if game.upscaler == 'fsr4':
+        helix.guard(game, extras)
+        restore_optiscaler(game.exe_folder, data_dir)
+    after = helix.remove(game, extras, on_line)
+    if game.exe_folder:
+        framegen.forget(game.exe_folder, data_dir)
+    return mark(after)

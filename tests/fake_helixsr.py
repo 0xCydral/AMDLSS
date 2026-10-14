@@ -13,7 +13,7 @@ from pathlib import Path
 
 DLL = 'amd_fidelityfx_dx12.dll'
 MARKER, FOLDER, OWN, CORE = 'helixsr-install.json', 'HelixSR', 'helixsr.dll', 'nvngx.dll'
-INI = ('[FrameGen]\\r\\n; comment\\r\\nFGInput=auto\\r\\nFGOutput=auto\\r\\n\\r\\n[Other]\\r\\nKey = 1\\r\\n\\r\\n[Log]\\r\\nLogToFile=auto\\r\\nLogLevel=auto\\r\\n')
+INI = ('[FrameGen]\\r\\n; comment\\r\\nFGInput=auto\\r\\nFGOutput=auto\\r\\n\\r\\n[Other]\\r\\nKey = 1\\r\\n\\r\\n[Log]\\r\\nLogToFile=auto\\r\\nLogLevel=auto\\r\\n\\r\\n[Libraries]\\r\\nFfxDx12Path=auto\\r\\nFfxDx12SRPath=auto\\r\\n')
 
 
 def original(t):
