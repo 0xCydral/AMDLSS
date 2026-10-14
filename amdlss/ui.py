@@ -394,7 +394,7 @@ class Gallery:
     def __init__(self, tk, ttk, look, parent, choose, double, context):
         self.look, self.choose, self.double, self.context = look, choose, double, context
         px = look.px
-        self.card_h, self.gap = px(144), px(10)
+        self.card_h, self.gap = px(136), px(10)
         self.frame = tk.Frame(parent, bg=BG)
         self.canvas = tk.Canvas(self.frame, bg=BG, highlightthickness=0, bd=0, takefocus=True, width=px(800),
                                 height=2 * self.card_h + self.gap, yscrollincrement=px(24))

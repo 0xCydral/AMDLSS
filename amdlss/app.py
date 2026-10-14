@@ -196,7 +196,7 @@ class App:
                                           self.upscaler_var, self.upscaler_changed)
         self.dll_forget = FlatButton(tk, self.look, self.upscaler_row, 'Forget DLL', self.forget_fsr4_dll)
         self.dll_button = FlatButton(tk, self.look, self.upscaler_row, 'Choose FSR 4 DLL…', self.choose_fsr4_dll)
-        self.fsr4_note = self.label(options, '', 'small', MUTED, CARD, anchor='w', justify='left')
+        self.fsr4_note = self.label(self.upscaler_row, '', 'small', MUTED, CARD, anchor='w', justify='left')
         self.fsr4_note.bind('<Configure>', lambda e: self.fsr4_note.configure(wraplength=max(e.width, 1)))
         self.fg_row = tk.Frame(options, bg=CARD)
         self.fg_box = tk.Checkbutton(self.fg_row, text=gamelist.FRAMEGEN_LABEL, variable=self.fg_var, bg=CARD, fg=TEXT,
@@ -432,7 +432,6 @@ class App:
                 self.fg_var.set(game.installed and framegen.is_on(game.exe_folder) if game.exe_folder else False)
         self.route_row.pack_forget()
         self.upscaler_row.pack_forget()
-        self.fsr4_note.pack_forget()
         self.fg_row.pack_forget()
         if game and game.route_choice:
             self.route_row.pack(side='right')
@@ -458,15 +457,13 @@ class App:
         self.upscaler_row.pack(fill='x')
         text, colour = self.fsr4_line(game)
         self.fsr4_note.configure(text=plain(text), fg=colour)
-        if text:
-            self.fsr4_note.pack(fill='x', pady=(px(4), 0))
         usable = bool(game.fsr4 and game.fsr4.ok)
         helix, mine = self.upscaler_buttons
         helix.configure(state='normal' if idle else 'disabled')
         mine.configure(state='normal' if idle and usable else 'disabled')
-        for button in (self.dll_button, self.dll_forget):
-            button.pack_forget()
-        if self.gpu_class in (gpu.RDNA2, gpu.RDNA3, gpu.RDNA4):
+        for widget in (self.dll_button, self.dll_forget, self.fsr4_note):
+            widget.pack_forget()
+        if self.gpu_class in (gpu.RDNA2, gpu.RDNA3, gpu.RDNA4):   # the buttons first: they keep their room
             kept = fsr4.user_dll(self.data_dir)
             self.dll_button.configure(text='Use another DLL…' if kept else 'Choose FSR 4 DLL…',
                                       state='normal' if idle else 'disabled')
@@ -474,6 +471,8 @@ class App:
             if kept:
                 self.dll_forget.configure(state='normal' if idle else 'disabled')
                 self.dll_forget.pack(side='right', padx=(0, px(8)))
+        if text:
+            self.fsr4_note.pack(side='left', fill='x', expand=True, padx=(px(14), px(10)))
 
     def set_busy(self, busy, progress=None):
         self.busy = busy
