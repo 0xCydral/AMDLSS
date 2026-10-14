@@ -4,7 +4,12 @@
 Frame generation (opt-in). Some games (Dragon's Dogma 2) offer only NVIDIA's DLSS Frame Generation, which cannot run on
 AMD. OptiScaler 0.9.4 can take the game's DLSS FG calls as its input and run AMD's FSR frame generation as the output:
 
-    [FrameGen]  FGInput=dlssg  FGOutput=fsrfg
+    [FrameGen]  FGInput=dlssg  FGOutput=fsrfg  PreserveSwapChain=false
+
+PreserveSwapChain is OptiScaler's "keep the frame generation swapchain when the game releases it" (auto means true).
+Tester logs of Assassin's Creed Shadows show that path, then a flood of repeated frame ids and a crash, and OptiScaler's
+own game list turns it off for DLSSG games such as Control Resonant. The line is optional: an ini without it is left
+as it is.
 
 Logging (on after every OptiScaler install, so "it looks unchanged in game" can be answered from OptiScaler.log):
 
@@ -25,11 +30,12 @@ from pathlib import Path
 
 from .helixsr import HelixSRError
 
-# One switch: the [section] and the values that mean "on"; `tag` keeps its record apart in framegen.json.
-Setting = namedtuple('Setting', 'section values tag')
+# One switch: the [section] and the values that mean "on"; `tag` keeps its record apart in framegen.json; `optional`
+# names the keys an ini may lack (they are skipped, not an error).
+Setting = namedtuple('Setting', 'section values tag optional', defaults=((),))
 ON = {'FGInput': 'dlssg', 'FGOutput': 'fsrfg'}
 SECTION = b'FrameGen'
-FRAMEGEN = Setting(SECTION, ON, '')
+FRAMEGEN = Setting(SECTION, {**ON, 'PreserveSwapChain': 'false'}, '', ('PreserveSwapChain',))
 LOGGING = Setting(b'Log', {'LogToFile': 'true', 'LogLevel': '2'}, '#log')
 RECORD = 'framegen.json'
 INI = 'OptiScaler.ini'
@@ -54,31 +60,40 @@ def _key(name):
 
 
 def read_values(data, setting=FRAMEGEN):
-    """{key: value} of the setting's keys in its section of the ini bytes."""
+    """{key: value} of the setting's keys in its section of the ini bytes (an optional key without a line is left out)."""
     span = _section(data, setting.section)
     values = {}
     for name in setting.values:
         match = _key(name).search(data, *span) if span else None
-        if not match:
+        if match:
+            values[name] = match.group('val').decode('utf-8', errors='replace')
+        elif name not in setting.optional:
             raise HelixSRError(f'{INI} has no {name} line in [{setting.section.decode()}]')
-        values[name] = match.group('val').decode('utf-8', errors='replace')
     return values
 
 
 def set_values(data, values, setting=FRAMEGEN):
     """The ini bytes with the setting's keys set to `values`; every other byte is unchanged."""
-    read_values(data, setting)  # raises when a line is missing
+    read_values(data, setting)  # raises when a required line is missing
     for name, value in values.items():
         start, end = _section(data, setting.section)
         match = _key(name).search(data, start, end)
-        data = data[:match.start('val')] + value.encode() + data[match.end('val'):]
+        if match:
+            data = data[:match.start('val')] + value.encode() + data[match.end('val'):]
     return data
 
 
+def _holds(current, setting, names):
+    """True when every one of `names` has the setting's "on" value in `current`."""
+    return all(current.get(name) == setting.values[name] for name in names)
+
+
 def is_on(exe_folder, setting=FRAMEGEN):
-    """True when the game's OptiScaler.ini already holds the setting's "on" values (False when unreadable)."""
+    """True when the game's OptiScaler.ini holds the setting's required "on" values (False when unreadable). An
+    optional key still at its old value does not count, so a game switched on before it existed shows as on."""
     try:
-        return read_values(ini_path(exe_folder).read_bytes(), setting) == setting.values
+        current = read_values(ini_path(exe_folder).read_bytes(), setting)
+        return _holds(current, setting, [name for name in setting.values if name not in setting.optional])
     except (OSError, HelixSRError):
         return False
 
@@ -114,8 +129,9 @@ def _write(path, data):
 
 def apply(exe_folder, on, data_dir, setting=FRAMEGEN):
     """Switches the setting on or off in the ini next to the game's .exe. On: remembers the values the file holds
-    (unless it already holds ours) and sets ours. Off: puts the remembered values back, only while the file still holds
-    ours. Returns True when the file changed."""
+    (unless it already holds ours) and sets ours; a key already ours keeps the value remembered earlier, so a game
+    switched on by an older AMDLSS gains a new key without losing what it first held. Off: puts the remembered values
+    back, only while the file still holds ours. Returns True when the file changed."""
     path = ini_path(exe_folder)
     try:
         data = path.read_bytes()
@@ -124,16 +140,17 @@ def apply(exe_folder, on, data_dir, setting=FRAMEGEN):
     current = read_values(data, setting)
     records, key = _load(data_dir), _record_key(exe_folder, setting)
     if on:
-        if current == setting.values:
+        if _holds(current, setting, current):
             return False
-        records[key] = current
+        old = records.get(key, {})
+        records[key] = {n: old[n] if n in old and v == setting.values[n] else v for n, v in current.items()}
         _write(path, set_values(data, setting.values, setting))
         _save(data_dir, records)
         return True
     before = records.pop(key, None)
     if before is not None:
         _save(data_dir, records)
-    if current != setting.values or before is None:
+    if before is None or not _holds(current, setting, before):
         return False
     _write(path, set_values(data, before, setting))
     return True

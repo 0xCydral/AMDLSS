@@ -100,7 +100,8 @@ def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     assert framegen.apply(game, True, tmp_path)
     on = (game / 'OptiScaler.ini').read_bytes()
     assert framegen.is_on(game)
-    assert on.replace(b'FGInput=dlssg', b'FGInput=auto').replace(b'FGOutput=fsrfg', b'FGOutput=auto') == ini
+    assert on.replace(b'FGInput=dlssg', b'FGInput=auto').replace(b'FGOutput=fsrfg', b'FGOutput=auto').replace(
+        b'PreserveSwapChain = false', b'PreserveSwapChain = auto') == ini
     assert b'FGInput=dlssg' in on and b'FGOutput=fsrfg' in on
     assert framegen.apply(game, False, tmp_path) and (game / 'OptiScaler.ini').read_bytes() == ini
 
