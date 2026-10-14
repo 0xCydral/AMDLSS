@@ -241,6 +241,33 @@ def test_a_hang_reaches_crashes_txt_and_the_query_asks_for_1002(tmp_path):
     assert 'Event ID 1000, 1001 and 1002' in text
 
 
+def test_a_drive_root_folder_never_sweeps_the_drive_for_crashes(tmp_path):
+    # 7B47A27X: folder E:\ matched every exe and process on the drive
+    win64 = tmp_path / 'xcaja' / 'Valor Mortis' / 'Content' / 'ValorMortis' / 'Binaries' / 'Win64'
+    win64.mkdir(parents=True)
+    (win64 / 'ValorMortisMSG-Win64-Shipping.exe').write_bytes(b'MZ')
+    (tmp_path / 'LeagueClient.exe').write_bytes(b'MZ')
+    root = 'E:\\' if os.name == 'nt' else '/'
+    wide = games.Game(name='', folder=root, exe_folder=str(win64))
+    assert crashes.game_exes(wide) == ['ValorMortisMSG-Win64-Shipping.exe']
+    strings = games.Game(name='', folder='E:\\',
+                         exe_folder=r'E:\xcaja\Valor Mortis\Content\ValorMortis\Binaries\Win64')
+    assert crashes.running_text(strings, True, processes=[r'E:\Riot Games\LeagueClient.exe']) == 'no'
+    assert crashes.running_text(
+        strings, True,
+        processes=[r'E:\xcaja\Valor Mortis\Content\ValorMortis\Binaries\Win64\ValorMortisMSG-Win64-Shipping.exe']
+    ) == 'yes'
+    # once classify has corrected the folder, the corrected tree is what gets walked
+    content = tmp_path / 'xcaja' / 'Valor Mortis' / 'Content'
+    (content / 'MicrosoftGame.config').write_text('<Game><ShellVisuals DefaultDisplayName="Valor Mortis"/></Game>')
+    row = games.Game(name='', folder=str(tmp_path), exe_folder=str(win64), inputs=['DLSS'], state='optiscaler')
+    other = games.Game(name='League', folder=str(tmp_path / 'Riot'), exe_folder=str(tmp_path / 'Riot'),
+                       inputs=['DLSS'])
+    (tmp_path / 'Riot').mkdir(exist_ok=True)
+    games.classify([row, other], [str(content)])
+    assert row.folder == str(content) and crashes.game_exes(row) == ['ValorMortisMSG-Win64-Shipping.exe']
+
+
 def test_running_when_collected_uses_the_install_check_but_not_unreal_crash_reporter(tmp_path):
     game = games.Game(name='One', folder=r'E:\Games\One', exe_folder=r'E:\Games\One\Binaries')
     asked = crashes.running_text

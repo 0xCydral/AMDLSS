@@ -348,3 +348,28 @@ def test_the_bridge_reports_the_helixsr_version_a_game_runs(fake):
     (one / 'helixsr-install.json').write_text('not json')
     assert client.list_games()[0].helixsr == '1.8.1'
     assert games.from_json([{'name': 'x'}])[0].helixsr == ''   # a bridge without the field: no hint
+
+
+def test_install_and_remove_refuse_a_folder_that_covers_other_games(tmp_path):
+    # 7B47A27X: HelixSR listed one game with the whole drive as its folder; its number must never run
+    one = game_folder(tmp_path, 'One')
+    folder = make(tmp_path, [{'name': '', 'folder': str(tmp_path), 'fsr': True, 'inputs': ['DLSS']},
+                             {'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}])
+    client = helixsr.HelixSR(folder, python=sys.executable)
+    wide = client.list_games()[0]
+    assert wide.folder == str(tmp_path)
+    for act in (client.install, client.remove):
+        with pytest.raises(helixsr.HelixSRError, match='folder covers other games'):
+            act(wide)
+    assert (one / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME ORIGINAL'  # nothing ran
+
+
+def test_a_drive_root_and_a_refused_row_never_reach_the_installer(fake):
+    client, _one, _two = fake
+    for game in (games.Game(name='Root', folder='E:\\'),
+                 games.Game(name='Wide', folder='E:\\xcaja', reason=games.UNSAFE_FOLDER, state='optiscaler')):
+        for act in (client.install, client.remove):
+            with pytest.raises(helixsr.HelixSRError, match='folder covers other games'):
+                act(game)
+    root = 'E:\\' if os.name == 'nt' else '/'
+    assert client.folder_flags([root, 'x']) == ['--folder', 'x'] and client.safe_extras([root]) == []

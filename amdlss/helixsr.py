@@ -610,8 +610,10 @@ def running_from(folder, windows=None, run=None, proc=None):
 
 
 def game_running(game, windows=None, run=None, proc=None):
-    """True when a process runs from inside `game`'s folder (see running_from)."""
-    return running_from(game.folder or game.exe_folder, windows, run, proc)
+    """True when a process runs from inside `game`'s folder (see running_from). A drive root listed as the
+    folder would match every process on the drive: only the .exe folder counts then."""
+    folder = game.exe_folder if gamelist.is_root_folder(game.folder) else (game.folder or game.exe_folder)
+    return running_from(folder, windows, run, proc)
 
 
 class HelixSR:
@@ -643,10 +645,15 @@ class HelixSR:
         raise HelixSRError(f"HelixSR's Python is missing ({self.python}): run Install HelixSR again")
 
     @staticmethod
-    def folder_flags(extras):
+    def safe_extras(extras):
+        """Folders added by hand that may reach HelixSR: a drive root never does (its scan widens to every game)."""
+        return [str(extra) for extra in extras if not gamelist.is_root_folder(extra)]
+
+    @classmethod
+    def folder_flags(cls, extras):
         flags = []
-        for extra in extras:
-            flags += ['--folder', str(extra)]
+        for extra in cls.safe_extras(extras):
+            flags += ['--folder', extra]
         return flags
 
     def list_command(self, extras=()):
@@ -662,12 +669,12 @@ class HelixSR:
         return [self.python, '-I', '-', self.folder, *[str(extra) for extra in extras]]
 
     def optiscaler_command(self, game_folder, extras=()):
-        return [self.python, '-I', '-c', BRIDGE_INSTALL, self.folder, game_folder, *[str(extra) for extra in extras]]
+        return [self.python, '-I', '-c', BRIDGE_INSTALL, self.folder, game_folder, *self.safe_extras(extras)]
 
     def list_games(self, extras=()):
         """The games HelixSR finds in the Steam libraries plus `extras` (folders added by hand)."""
         self._need_python()
-        extras = [str(extra) for extra in extras]
+        extras = self.safe_extras(extras)
         try:
             done = subprocess.run([str(part) for part in self.bridge_command(extras)], input=BRIDGE.encode(),
                                   capture_output=True, timeout=120, creationflags=NO_WINDOW, env=child_env())
@@ -691,10 +698,21 @@ class HelixSR:
         if self.running(game):
             raise HelixSRError(still_running_message(game.name))
 
+    @staticmethod
+    def _need_safe(game):
+        """A folder that covers other games is never changed: HelixSR acts by list number, and that number's
+        FSR DLLs are every game's on the drive. Checked again on the fresh list in _act."""
+        reason = game.reason or (gamelist.UNSAFE_FOLDER if gamelist.is_root_folder(game.folder) else '')
+        if reason:
+            raise HelixSRError(f'AMDLSS will not change {game.name or "this game"}: {reason}')
+
     def _act(self, build_command, game, extras, on_line):
-        fresh = gamelist.match_game(self.list_games(extras), game)
+        listed = self.list_games(extras)
+        fresh = gamelist.match_game(listed, game)
         if fresh is None:
             raise HelixSRError(f'{game.name} is no longer in HelixSR\'s list: refresh the list and try again')
+        if gamelist.unsafe_reason(fresh, listed, extras=extras):
+            raise HelixSRError(f'AMDLSS will not change {game.name or "this game"}: {gamelist.UNSAFE_FOLDER}')
         if not fresh.index:  # a game HelixSR does not list has no number to install or remove by
             raise HelixSRError(f'HelixSR does not list {game.name}, so it cannot be changed from here')
         if self.preserve:   # the run about to be replaced is evidence: keep its logs, never block on the copy
@@ -715,6 +733,7 @@ class HelixSR:
         """Installs into `game`; returns the game as listed afterwards. Raises HelixSRError when HelixSR fails or the
         game does not show the route installed. `route` None or 'direct' runs HelixSR's `install N`, which takes the
         game's default route; 'optiscaler' (only for a game with can_opti) runs the install bridge."""
+        self._need_safe(game)
         self._need_closed(game)
         if route == 'optiscaler' and game.can_opti and game.folder:
             def command(_index, extra_folders):
@@ -732,6 +751,7 @@ class HelixSR:
 
     def remove(self, game, extras=(), on_line=None):
         """Removes HelixSR from `game` (HelixSR's own uninstall: everything put back as it was)."""
+        self._need_safe(game)
         self._need_closed(game)
         _fresh, after = self._act(self.remove_command, game, extras, on_line)
         if after.installed:

@@ -69,6 +69,36 @@ def check_visibility():
         assert games.count_text(rows) == '2 games ready, 2 hidden' and not leftover.can_install
 
 
+def check_unsafe_folder():
+    import ntpath
+    assert games.is_root_folder('E:\\', ntpath) and games.is_root_folder('/') and not games.is_root_folder('E:\\Games', ntpath)
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        content = root / 'xcaja' / 'Valor Mortis' / 'Content'
+        win64 = content / 'ValorMortis' / 'Binaries' / 'Win64'
+        win64.mkdir(parents=True)
+        (win64 / 'ValorMortisMSG-Win64-Shipping.exe').write_bytes(b'MZ')
+        (content / 'MicrosoftGame.config').write_text(
+            '<Game><ShellVisuals DefaultDisplayName="Valor Mortis"/></Game>')
+        other = root / 'Other'
+        other.mkdir()
+        (other / 'Other.exe').write_bytes(b'MZ')
+        wide = games.Game(name='', folder=str(root), exe_folder=str(win64), inputs=['DLSS'], state='optiscaler')
+        rows = games.classify([wide, games.Game(name='O', folder=str(other), exe_folder=str(other),
+                                                 inputs=['DLSS'])], [str(content)])
+        assert wide.folder == str(content) and wide.name == 'Valor Mortis'
+        assert wide.reason == games.UNSAFE_FOLDER and not wide.can_install and games.visible(wide)
+        client = helixsr.HelixSR(root, python='py.exe', running=lambda g: False)
+        for act in (client.install, client.remove):
+            try:
+                act(wide)
+            except helixsr.HelixSRError as error:
+                assert 'folder covers other games' in str(error)
+            else:
+                raise AssertionError('a folder over other games was changed')
+        assert crashes.game_exes(wide) == ['ValorMortisMSG-Win64-Shipping.exe']
+
+
 def check_framegen():
     ini = b'[FrameGen]\r\n; c\r\nFGInput = nofg\r\nFGOutput=auto\r\n[Other]\r\nFGInput=keep\r\n'
     on = framegen.set_values(ini, framegen.ON)
@@ -302,7 +332,7 @@ def check_covers():
 
 
 def run():
-    for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_framegen, check_logging_switch,
+    for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_unsafe_folder, check_framegen, check_logging_switch,
                   check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
                   check_helixsr, check_running_game, check_zip_slip, check_update, check_identify, check_covers):
         check()

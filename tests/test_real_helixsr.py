@@ -117,3 +117,34 @@ def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     client.remove(listed, [game])
     framegen.forget(game, tmp_path)
     assert tree(game) == before  # every file back, byte for byte, OptiScaler.ini and the HelixSR folder gone
+
+
+def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
+    # 7B47A27X with HelixSR itself: its by-hand scan climbs from Content (no FSR DLL within its reach) to a
+    # folder over other games. AMDLSS shows the GDK game under its config name and Content folder, refused.
+    copy, _game = fake_game
+    drive = FAKE_ROOT / 'drive'
+    content = drive / 'xcaja' / 'Valor Mortis' / 'Content'
+    win64 = content / 'ValorMortis' / 'Binaries' / 'Win64'
+    win64.mkdir(parents=True)
+    (win64 / 'ValorMortisMSG-Win64-Shipping.exe').write_bytes(b'M' * 500000)
+    (win64 / 'GameChat2.dll').write_bytes(b'MZ')
+    (content / 'MicrosoftGame.config').write_text(
+        '<Game><Identity Name="ValorMortis"/><ShellVisuals DefaultDisplayName="Valor Mortis"/></Game>')
+    deep = content / 'a' / 'b' / 'c' / 'd' / 'e' / 'f' / 'g' / 'h'   # its own FSR, past the installer's reach
+    deep.mkdir(parents=True)
+    (deep / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'own fsr')
+    other = drive / 'OtherGame'
+    other.mkdir(parents=True)
+    (other / 'Other-Win64-Shipping.exe').write_bytes(b'M' * 1000)
+    shutil.copyfile(Path(SOURCE) / 'amd-fsr' / 'amd_fidelityfx_upscaler_dx12.dll',
+                    other / 'amd_fidelityfx_upscaler_dx12.dll')
+    before = tree(other)
+    client = helixsr.HelixSR(copy)
+    rows = games.classify(client.list_games([content, other]), [str(content), str(other)])
+    valor = next(g for g in rows if Path(g.exe_folder) == win64.resolve())
+    assert valor.folder == str(content.resolve()) and valor.name == 'Valor Mortis'
+    assert valor.reason == games.UNSAFE_FOLDER and not valor.can_install
+    with pytest.raises(helixsr.HelixSRError, match='folder covers other games'):
+        client.install(valor, [content, other])
+    assert tree(other) == before

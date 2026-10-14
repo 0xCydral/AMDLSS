@@ -148,17 +148,22 @@ def display_name(value):
 
 
 def xbox_title(folders):
-    """The name in MicrosoftGame.config (ShellVisuals DefaultDisplayName, else Title), else appxmanifest.xml's."""
+    """The name in MicrosoftGame.config (ShellVisuals DefaultDisplayName or DisplayName, else the Title, else
+    the Identity's Name), else appxmanifest.xml's DisplayName or Identity Name. Resource references
+    (ms-resource:...) are not names and never count."""
     for folder in folders:
         root = read_xml(Path(folder) / 'MicrosoftGame.config')
         if root is not None:
-            names = [display_name(e.get('DefaultDisplayName')) for e in root.iter('ShellVisuals')]
+            names = [display_name(e.get(key)) for e in root.iter('ShellVisuals')
+                     for key in ('DefaultDisplayName', 'DisplayName')]
             names += [display_name(e.text) for e in root.iter('Title')]
+            names += [display_name(e.get('Name')) for e in root.iter('Identity')]
             if any(names):
                 return next(n for n in names if n)
         root = read_xml(Path(folder) / 'appxmanifest.xml')
         if root is not None:
             names = [display_name(e.text) for e in root.iter('DisplayName')]
+            names += [display_name(e.get('Name')) for e in root.iter('Identity')]
             if any(names):
                 return next(n for n in names if n)
     return ''

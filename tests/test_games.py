@@ -229,3 +229,92 @@ def test_the_status_line_counts_ready_and_hidden(tmp_path):
 def test_bridge_json_keeps_an_empty_route_for_a_game_helixsr_does_not_list():
     row = {'index': 0, 'name': 'Nope', 'folder': 'C:\\g', 'route': '', 'inputs': [], 'state': 'none'}
     assert games.from_json([row])[0].route == '' and games.from_json([{'name': 'x'}])[0].route == 'optiscaler'
+
+
+# --- a folder widened over other games (tester report 7B47A27X: an Xbox GDK game listed as E:\\ with no name) ----
+
+def test_a_drive_root_is_never_a_game_folder():
+    for root in ('E:\\', 'E:', 'e:/', '/', '\\\\server\\share\\'):
+        assert games.is_root_folder(root, ntpath), root
+    assert games.is_root_folder('/', posixpath) and not games.is_root_folder('/games', posixpath)
+    assert not games.is_root_folder('E:\\Games', ntpath) and not games.is_root_folder('')
+    wide = games.Game(name='', folder='E:\\')
+    assert games.unsafe_reason(wide, [wide], ntpath) == games.UNSAFE_FOLDER == 'folder covers other games'
+    assert games.contains('E:\\xcaja', 'E:\\xcaja\\Valor Mortis', ntpath)
+    assert not games.contains('E:\\xcaja', 'E:\\xcaja2\\Valor Mortis', ntpath)
+
+
+def gdk_tree(tmp_path, config='<Game><Identity Name="ValorMortis"/>'
+                           '<ShellVisuals DefaultDisplayName="Valor Mortis"/></Game>'):
+    """tmp_path as drive E: an Xbox GDK game in xcaja, one Steam-style game beside it."""
+    content = tmp_path / 'xcaja' / 'Valor Mortis' / 'Content'
+    win64 = content / 'ValorMortis' / 'Binaries' / 'Win64'
+    win64.mkdir(parents=True)
+    (win64 / 'ValorMortisMSG-Win64-Shipping.exe').write_bytes(b'MZ')
+    (win64 / 'GameChat2.dll').write_bytes(b'MZ')
+    (win64 / 'PartyXboxLive.dll').write_bytes(b'MZ')
+    (win64 / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'valor fsr')
+    (win64 / 'nvngx_dlss.dll').write_bytes(b'MZ')
+    (content / 'MicrosoftGame.config').write_text(config)
+    other = tmp_path / 'SteamLibrary' / 'steamapps' / 'common' / 'Other'
+    other.mkdir(parents=True)
+    (other / 'Other.exe').write_bytes(b'MZ')
+    (other / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'other fsr')
+    return content, win64, other
+
+
+def wide_row(tmp_path, win64, other, **fields):
+    """The row HelixSR's bridge sent for 7B47A27X: no name, the drive as folder, another game's FSR DLL."""
+    fields.setdefault('state', 'optiscaler')
+    return games.Game(name='', folder=str(tmp_path), exe_folder=str(win64), inputs=['DLSS', 'XeSS'], fsr31=True,
+                      fsr_targets=[str(other / 'amd_fidelityfx_upscaler_dx12.dll')], route='direct', index=9, **fields)
+
+
+def test_an_xbox_gdk_game_listed_as_the_drive_is_put_right_and_refused(tmp_path):
+    content, win64, other = gdk_tree(tmp_path)
+    bad, good = wide_row(tmp_path, win64, other), installed_game(tmp_path / 'SteamLibrary' / 'steamapps' / 'common',
+                                                                 'Other')
+    rows = games.classify([bad, good], [str(content)])
+    assert rows[0] is bad and bad.folder == str(content) and bad.name == 'Valor Mortis'
+    assert bad.reason == games.UNSAFE_FOLDER and not bad.can_install and bad.installed  # Remove refuses it too
+    assert games.visible(bad) and bad.manual  # shown with its reason, via the folder added by hand
+    assert bad.fsr_targets == [str(win64 / 'amd_fidelityfx_upscaler_dx12.dll')] and bad.inputs == ['DLSS']
+    assert good.reason == '' and games.count_text(rows) == '1 games ready, 0 hidden'
+
+
+def test_the_gdk_name_falls_back_to_identity_then_the_folder(tmp_path):
+    content, win64, other = gdk_tree(tmp_path, '<Game><Identity Name="ValorMortis"/>'
+                                               '<ShellVisuals DefaultDisplayName="ms-resource:AppName"/></Game>')
+    bad = wide_row(tmp_path, win64, other)
+    games.classify([bad, games.Game(name='O', folder=str(other), exe_folder=str(other), inputs=['DLSS'])],
+                   [str(content)])
+    assert bad.name == 'ValorMortis'  # ms-resource: is not a name; the Identity's Name is
+    (content / 'MicrosoftGame.config').write_text('<Game><ShellVisuals DefaultDisplayName="ms-resource:X"/></Game>')
+    again = wide_row(tmp_path, win64, other)
+    games.classify([again, games.Game(name='O', folder=str(other), exe_folder=str(other), inputs=['DLSS'])],
+                   [str(content)])
+    assert again.name == 'Valor Mortis' and again.folder == str(content)  # the Content folder's parent names it
+
+
+def test_a_blank_name_takes_the_folder_name_and_content_takes_its_config_name(tmp_path):
+    content, win64, _other = gdk_tree(tmp_path)
+    blank = games.Game(name='', folder=str(tmp_path / 'Blanky'), exe_folder=str(tmp_path / 'Blanky'),
+                       inputs=['DLSS'])
+    (tmp_path / 'Blanky').mkdir(exist_ok=True)
+    (tmp_path / 'Blanky' / 'Blanky.exe').write_bytes(b'MZ')
+    named_content = games.Game(name='Content', folder=str(content), exe_folder=str(win64), inputs=['DLSS'])
+    games.classify([blank, named_content])
+    assert blank.name == 'Blanky' and blank.reason == ''
+    assert named_content.name == 'Valor Mortis' and named_content.reason == '' and named_content.can_install
+
+
+def test_a_folder_over_another_listed_game_is_refused_even_when_no_root_can_be_found(tmp_path):
+    inner = installed_game(tmp_path, 'Inner')
+    exe = tmp_path / 'bin'
+    exe.mkdir()
+    (exe / 'Wide.exe').write_bytes(b'MZ')
+    wide = games.Game(name='Wide', folder=str(tmp_path), exe_folder=str(exe), inputs=['DLSS'], state='direct',
+                      fsr_targets=[str(tmp_path / 'Inner' / 'amd_fidelityfx_upscaler_dx12.dll')])
+    games.classify([wide, inner])
+    assert wide.reason == games.UNSAFE_FOLDER and not wide.can_install and games.visible(wide)
+    assert wide.fsr_targets == [] and not wide.fsr31  # the inner game's DLL is not this game's target

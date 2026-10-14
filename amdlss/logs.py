@@ -31,7 +31,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from . import VERSION, crashes, framegen, helixsr, host
+from . import VERSION, crashes, framegen, games as gamelist, helixsr, host
 
 MAX_BYTES = 16 << 20        # a larger file goes in as its last 16 MiB, with a note on top
 HISTORY_MAX_FILE_BYTES = 2 << 20   # one kept log: its last 2 MiB are enough to read a run back
@@ -99,13 +99,24 @@ def redact_bytes(data, redact):
 
 # --- where the files are -----------------------------------------------------------------------------------------
 
+def _within(child, parent):
+    """True when folder `child` is `parent` or inside it, compared the way the host's paths compare."""
+    child, parent = (os.path.normcase(os.path.normpath(p)) for p in (child, parent))
+    return child == parent or child.startswith(parent if parent.endswith(os.sep) else parent + os.sep)
+
+
 def places(game):
     """[(label, folder)] of the folders HelixSR and OptiScaler write to for `game`, each once: the .exe folder, its
-    HelixSR folder and the folder of each FSR 3.1 DLL (where the FSR drop-in writes its log)."""
+    HelixSR folder and the folder of each FSR 3.1 DLL (where the FSR drop-in writes its log). An FSR folder outside
+    the game's own folder is another game's and is never listed or collected; a drive root listed as the folder
+    scopes everything to the .exe folder, so a bad folder cannot sweep a whole drive into a report."""
     exe = Path(game.exe_folder or game.folder)
     found = [('exe-folder', exe), ('exe-folder/HelixSR', exe / 'HelixSR')]
+    scope = game.folder if game.folder and not gamelist.is_root_folder(game.folder) else str(exe)
     for number, target in enumerate(game.fsr_targets, 1):
-        found.append(('fsr-dll-folder' + (f'-{number}' if len(game.fsr_targets) > 1 else ''), Path(target).parent))
+        folder = Path(target).parent
+        if _within(str(folder), scope):
+            found.append(('fsr-dll-folder' + (f'-{number}' if len(game.fsr_targets) > 1 else ''), folder))
     seen, out = set(), []
     for label, folder in found:
         key = os.path.normcase(os.path.normpath(folder))

@@ -141,6 +141,123 @@ def parse_list_output(text):
 NOT_INSTALLED = 'not installed'
 NO_UPSCALER = 'no DLSS, FSR 3.1 or XeSS found'
 NO_FOLDER = 'folder not found'
+UNSAFE_FOLDER = 'folder covers other games'
+MS_CONFIG = 'MicrosoftGame.config'   # an Xbox (GDK) game keeps it in its Content folder
+_INPUT_DLLS = {'nvngx_dlss.dll': 'DLSS', 'libxess.dll': 'XeSS', 'ffx_fsr2_api_x64.dll': 'FSR 2',
+               'ffx_fsr2_api_dx12_x64.dll': 'FSR 2'}
+_FSR_DLLS = ('amd_fidelityfx_upscaler_dx12.dll', 'amd_fidelityfx_dx12.dll')
+
+
+def is_root_folder(folder, pathmod=None):
+    """True for a drive or filesystem root ('E:\\\\', 'E:', '/', a UNC share root): never one game's folder.
+    A Windows drive root counts in either system's spelling, so the check also holds for Windows paths
+    read on Linux (tests, reports)."""
+    if not folder:
+        return False
+    if re.fullmatch(r'[A-Za-z]:[\\/]*|\\\\[^\\/:]+\\[^\\/:]+[\\/]*', str(folder).strip()):
+        return True
+    path = pathmod or host.path_module()
+    norm = path.normpath(str(folder))
+    drive, rest = path.splitdrive(norm)
+    return not rest.strip('\\/') and bool(drive or norm[:1] in '\\/')
+
+
+def contains(outer, inner, pathmod=None):
+    """True when folder `inner` is strictly inside folder `outer` (whole folders, as in overlaps())."""
+    path = pathmod or host.path_module()
+    outer, inner = (path.normcase(path.normpath(str(p))) for p in (outer, inner))
+    return inner.startswith(outer if outer.endswith(path.sep) else outer + path.sep)
+
+
+def unsafe_reason(game, others=(), pathmod=None, extras=()):
+    """UNSAFE_FOLDER when HelixSR's folder for `game` is a drive root or holds another listed game: changing
+    it by HelixSR's list number would rewrite that game's FSR DLLs too, so it is never offered. A folder
+    added by hand inside it but away from this game's .exe counts as that other game: HelixSR's widened
+    entry swallows its row, so the list alone may not show it. '' otherwise."""
+    if not game.folder:
+        return ''
+    if is_root_folder(game.folder, pathmod):
+        return UNSAFE_FOLDER
+    if any(other is not game and other.folder and contains(game.folder, other.folder, pathmod)
+           for other in others):
+        return UNSAFE_FOLDER
+    if game.exe_folder and any(contains(game.folder, str(extra), pathmod)
+                               and not overlaps(str(extra), game.exe_folder, pathmod) for extra in extras):
+        return UNSAFE_FOLDER
+    return ''
+
+
+def _folder_name(folder):
+    """A folder's own name as a game name; a GDK Content folder takes its parent's name ('Valor Mortis')."""
+    path = host.path_module()
+    name = path.basename(path.normpath(str(folder or '')))
+    if name.casefold() == 'content':
+        name = path.basename(path.dirname(path.normpath(str(folder)))) or name
+    return name
+
+
+def _gdk_root(game):
+    """The folder holding MicrosoftGame.config above the game's .exe (or folder), or '': the GDK game's root."""
+    for start in (game.exe_folder, game.folder):
+        here = str(start or '')
+        while here:
+            if os.path.isfile(os.path.join(here, MS_CONFIG)):
+                return here
+            parent = os.path.dirname(here.rstrip('\\/') or here)
+            if parent in (here, ''):
+                break
+            here = parent
+    return ''
+
+
+def _rescan(folder):
+    """(fsr targets, inputs) really inside `folder`, HelixSR's own rule (seven folders deep, its folder skipped)."""
+    found, inputs, todo = [], set(), [(str(folder), 0)]
+    while todo:
+        here, level = todo.pop()
+        try:
+            entries = list(os.scandir(here))
+        except OSError:
+            continue
+        for entry in entries:
+            low = entry.name.lower()
+            if entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                if low in _FSR_DLLS:
+                    found.append(entry.path)
+                if low in _INPUT_DLLS:
+                    inputs.add(_INPUT_DLLS[low])
+            elif level < 7 and entry.name != 'HelixSR' and entry.is_dir(follow_symlinks=False):
+                todo.append((entry.path, level + 1))
+    targets = [p for p in found if p.lower().endswith(_FSR_DLLS[0])] or found
+    return targets, [name for name in ('DLSS', 'XeSS', 'FSR 2') if name in inputs]
+
+
+def _correct(game, rows, extras, unsafe):
+    """Puts a wrong folder or name right for showing and collecting. A GDK game's root is its MicrosoftGame.config
+    folder, else a folder added by hand around its .exe; the name is the config's, else the folder's. The entry
+    keeps its unsafe reason: HelixSR's own list still holds the wide folder, so its number stays unusable."""
+    root = _gdk_root(game)
+    if unsafe:
+        inside = [str(extra) for extra in extras
+                  if not is_root_folder(extra) and game.exe_folder
+                  and (same_folder(extra, game.exe_folder) or contains(extra, game.exe_folder))
+                  and not any(other is not game and other.folder and contains(extra, other.folder)
+                              for other in rows)]
+        candidate = root or (inside[0] if inside else '')
+        if candidate and not same_folder(candidate, game.folder):
+            game.folder = candidate
+            game.fsr_targets, game.inputs = _rescan(candidate)
+            game.fsr31 = bool(game.fsr_targets)
+        elif game.exe_folder:   # no root to correct to: another game's DLLs are not this game's targets
+            game.fsr_targets = [t for t in game.fsr_targets if contains(game.exe_folder, t)]
+            game.fsr31 = bool(game.fsr_targets)
+    # a widened entry carries the wide folder's name ('E:' has none): a GDK game takes its config's name
+    if not (game.name or '').strip() or game.name.casefold() == 'content' or (unsafe and root):
+        name = ''
+        if root:
+            from . import identify   # lazy: identify imports this module for overlaps()
+            name = identify.xbox_title([root])
+        game.name = name or _folder_name(game.folder) or _folder_name(game.exe_folder) or game.name
 
 
 def hidden_reason(game):
@@ -159,29 +276,36 @@ def hidden_reason(game):
 
 def classify(found, extras=()):
     """Sets `reason` on every game of HelixSR's list and returns the list plus a row for each folder added by hand
-    that HelixSR did not list at all, so a bad folder is shown with its reason instead of vanishing."""
+    that HelixSR did not list at all, so a bad folder is shown with its reason instead of vanishing. A folder
+    HelixSR widened to a drive root (or over other games) is first put right for showing and collecting
+    (_correct) and then refused with UNSAFE_FOLDER, installed or not."""
     rows = list(found)
+    unsafe = {id(game): unsafe_reason(game, rows, extras=extras) for game in rows}   # on HelixSR's folders, before any fix
     for game in rows:
-        game.reason = hidden_reason(game)
+        if unsafe[id(game)] or not (game.name or '').strip() or game.name.casefold() == 'content':
+            _correct(game, rows, extras, unsafe[id(game)])
+        game.reason = unsafe[id(game)] or hidden_reason(game)
     for extra in extras:
         mine = [g for g in rows if g.folder and same_folder(g.folder, extra)]
         for game in mine:
             game.manual = True
         if not any(g.folder and overlaps(g.folder, extra) for g in rows):
-            name = os.path.basename(os.path.normpath(extra)) or str(extra)
+            name = _folder_name(extra) or str(extra)
             rows.append(Game(name=name, folder=str(extra), manual=True, route='',
                              reason=NO_UPSCALER if os.path.isdir(extra) else NO_FOLDER))
     return rows
 
 
 def visible(game, show_all=False):
-    """Ready games, folders added by hand (with their reason) and, with `show_all`, every hidden game."""
-    return show_all or not game.reason or game.manual
+    """Ready games, folders added by hand and unsafe folders (each with its reason) and, with `show_all`,
+    every hidden game. An unsafe folder stays on show: the user must see why AMDLSS will not change it."""
+    return show_all or not game.reason or game.manual or game.reason == UNSAFE_FOLDER
 
 
 def count_text(rows):
     ready = sum(1 for g in rows if not g.reason)
-    return f'{ready} games ready, {sum(1 for g in rows if g.reason and not g.manual)} hidden'
+    hidden = sum(1 for g in rows if g.reason and g.reason != UNSAFE_FOLDER and not g.manual)
+    return f'{ready} games ready, {hidden} hidden'
 
 
 def same_folder(a, b, pathmod=None):

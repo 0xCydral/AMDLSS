@@ -342,7 +342,8 @@ class App:
         self.send_button.configure(state='normal' if idle and self.games else 'disabled')
         self.game_install.configure(state='normal' if ready and game and game.can_install else 'disabled',
                                     text='Update' if game and game.installed else 'Install')
-        self.game_remove.configure(state='normal' if ready and game and game.installed else 'disabled')
+        self.game_remove.configure(state='normal' if ready and game and game.installed and not game.reason
+                                   else 'disabled')
         self.game_folder.configure(state='normal' if game and game.folder and os.path.isdir(game.folder) else 'disabled')
         self.game_logs.configure(state='normal' if idle and game and game.folder and os.path.isdir(game.folder)
                                  else 'disabled')
@@ -492,7 +493,9 @@ class App:
         def scan():
             found = gamelist.classify(self.helixsr.list_games(asked), extras)
             for game in found:
-                if game.folder and not game.reason:
+                # an unsafe entry is scanned in its corrected folder only; a root is never walked
+                if game.folder and os.path.isdir(game.folder) and not gamelist.is_root_folder(game.folder) \
+                        and game.reason in ('', gamelist.UNSAFE_FOLDER):
                     game.anticheat = gamelist.scan_anticheat(game.folder)
                     game.streamline = gamelist.scan_streamline(game.folder)
             return found
@@ -539,6 +542,9 @@ class App:
         if not folder:
             return
         folder = os.path.normpath(folder)
+        if gamelist.is_root_folder(folder):   # a whole drive is not a game folder (HelixSR would scan every game)
+            self.messagebox.showerror('AMDLSS', 'Pick the game folder itself, not the whole drive.')
+            return
         if folder not in self.extras:
             self.extras.append(folder)
             settings.save_folders(self.data_dir, self.extras)
@@ -616,7 +622,7 @@ class App:
 
     def remove_game(self):
         game = self.selected()
-        if not (self.helixsr and game and game.installed and not self.busy):
+        if not (self.helixsr and game and game.installed and not game.reason and not self.busy):
             return
         if not self.messagebox.askyesno(f'Remove from {game.name}',
                                         f'Close {game.name} first.\n\nHelixSR puts the game\'s original files back. '

@@ -101,3 +101,13 @@ Route: delegated direct (multi-file feature).
   `Saved\Logs\*.log` as `unreal-latest.log`. The receiver needs no change (names are inside its rules; a name
   case was added to its test). The reader answers "Did the game crash?" Yes for a hang or a crash folder inside the
   run's window, and No "still running when the report was made" for a game that had not ended. Not deployed.
+- [x] T10 a folder widened over other games can no longer sweep a drive or be changed (2026-10-13, report
+  7B47A27X): HelixSR 1.9.0's by-hand scan climbs from a GDK `Content` folder with no FSR DLL in reach to the
+  drive root, so Valor Mortis listed as `E:\` with no name and seven other games' FSR folders, crash exes and
+  a running state. classify() corrects the folder to the `MicrosoftGame.config` root and the name to the
+  config's (ShellVisuals, else Identity, else folder) for showing and collecting, and refuses the entry
+  (`folder covers other games`); Install, Update and Remove refuse it again at the HelixSR seam, a drive root
+  never reaches HelixSR as a handed folder, and the collector (places, game exes, running check, anti-cheat
+  and Streamline scans) never walks outside the corrected folder. Upstream draft:
+  ~/amdlss-reports/helixsr-issue-draft.md. Linux 344 passed and 4 skipped; wine 337 passed and 11 skipped;
+  `--selftest` exit 0; the env-gated real-HelixSR regression passes against HelixSR 1.9.0. Not released.

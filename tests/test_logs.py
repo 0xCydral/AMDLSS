@@ -299,3 +299,25 @@ def test_system_info_reads_powershells_base64_json_and_survives_a_failure(monkey
         raise subprocess.TimeoutExpired('powershell', 40)
     monkeypatch.setattr(subprocess, 'run', timeout)
     assert logs.system_info(windows=True) == {}
+
+
+def test_another_games_fsr_folder_is_never_collected(tmp_path):
+    # 7B47A27X: folder E:\ listed the FSR folders of seven other games in files.txt
+    win64 = tmp_path / 'Valor' / 'Binaries' / 'Win64'
+    (win64 / 'HelixSR').mkdir(parents=True)
+    (win64 / 'Valor-Win64-Shipping.exe').write_bytes(b'MZ')
+    (win64 / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'valor')
+    (win64 / 'HelixSR' / 'helixsr.log').write_bytes(b'valor log\n')
+    other = tmp_path / 'OtherGame' / 'Binaries'
+    other.mkdir(parents=True)
+    (other / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'other')
+    (other / 'OptiScaler.log').write_bytes(b'other log\n')
+    root = 'E:\\' if os.name == 'nt' else '/'
+    for folder in (root, str(tmp_path / 'Valor')):   # a drive root, and a normal folder with a foreign target
+        game = games.Game(name='Valor', folder=folder, exe_folder=str(win64), fsr31=True,
+                          fsr_targets=[str(win64 / 'amd_fidelityfx_upscaler_dx12.dll'),
+                                       str(other / 'amd_fidelityfx_upscaler_dx12.dll')])
+        # the game's own FSR folder is its exe folder (listed once); the other game's never appears
+        assert [label for label, _ in logs.places(game)] == ['exe-folder', 'exe-folder/HelixSR']
+        assert [name for name, _ in logs.gather(game)] == ['exe-folder/HelixSR/helixsr.log']
+        assert 'OtherGame' not in logs.files_text(game)

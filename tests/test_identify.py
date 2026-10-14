@@ -124,6 +124,24 @@ def test_xbox_microsoftgame_config_then_appxmanifest(tmp_path):
     assert identify.xbox_title([str(content)]) == ''
 
 
+def test_xbox_identity_name_and_displayname_attribute(tmp_path):
+    content = tmp_path / 'Valor Mortis' / 'Content'
+    content.mkdir(parents=True)
+    (content / 'MicrosoftGame.config').write_text(
+        '<Game><Identity Name="ValorMortis"/>'
+        '<ShellVisuals DefaultDisplayName="ms-resource:AppName"/></Game>')
+    assert identify.xbox_title([str(content)]) == 'ValorMortis'   # no Title: the Identity's Name names it
+    (content / 'MicrosoftGame.config').write_text(
+        '<Game><Identity Name="PackageName"/>'
+        '<ShellVisuals DisplayName="Valor Mortis"/></Game>')
+    assert identify.xbox_title([str(content)]) == 'Valor Mortis'   # ShellVisuals wins over the Identity
+    (content / 'MicrosoftGame.config').unlink()
+    (content / 'appxmanifest.xml').write_text(
+        '<Package><Identity Name="ValorMortis"/><Properties>'
+        '<DisplayName>ms-resource:AppName</DisplayName></Properties></Package>')
+    assert identify.xbox_title([str(content)]) == 'ValorMortis'
+
+
 def test_ea_installerdata(tmp_path):
     root = tmp_path / 'EA Games' / 'FIFA'
     game = game_in(root)

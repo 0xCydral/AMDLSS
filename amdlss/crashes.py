@@ -25,7 +25,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import helixsr, host, identify
+from . import games as gamelist, helixsr, host, identify
 
 CRASH_DAYS = 14
 EVENT_IDS = (1000, 1001, 1002)
@@ -68,9 +68,11 @@ def _stamp(moment):
 
 def game_exes(game, depth=4, limit=MAX_EXES):
     """The .exe file names in the game's folder tree (each once, first spelling kept), the names a crash record
-    is matched against. At most `depth` folders deep and `limit` names; links are not followed."""
+    is matched against. At most `depth` folders deep and `limit` names; links are not followed. A drive root
+    listed as the folder is never walked: only the .exe folder's tree counts, so no report names every
+    executable on a drive."""
     found, seen = [], set()
-    roots = [root for root in (game.folder, game.exe_folder) if root]
+    roots = [root for root in (game.folder, game.exe_folder) if root and not gamelist.is_root_folder(root)]
     todo = [(root, 0) for root in dict.fromkeys(os.path.normcase(os.path.normpath(root)) for root in roots)]
     while todo and len(found) < limit:
         folder, level = todo.pop()
@@ -302,8 +304,9 @@ def steam_appid(game):
 def running_text(game, windows=None, run=None, processes=None, proc=None):
     """'yes', 'no' or 'unknown': whether a process of the game was running when this was collected. It is the
     check Install uses (helixsr.running_from), except that Unreal's crash reporter, which stays open after a crash,
-    does not count. `processes` is helixsr.process_paths() already asked (one query for a whole report)."""
-    folder = game.folder or game.exe_folder
+    does not count. `processes` is helixsr.process_paths() already asked (one query for a whole report).
+    A drive root listed as the folder would match every process on the drive: only the .exe folder counts."""
+    folder = game.exe_folder if gamelist.is_root_folder(game.folder) else (game.folder or game.exe_folder)
     if not folder:
         return 'unknown'
     try:
