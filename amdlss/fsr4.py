@@ -138,8 +138,9 @@ def find_source(gpu_class, helixsr_folder, data_dir):
     if mine:
         return Source(mine, f'your DLL {pe.inspect(mine).version}', '', '', True)
     if gpu_class == gpu.RDNA2:
-        return Source(None, '', 'AMD has no FSR 4 DLL for RX 6000 cards. Press Choose FSR 4 DLL and pick one you have.',
-                      'needs your DLL')
+        return Source(None, '', "AMD has no FSR 4 DLL for RX 6000 cards, and AMDLSS found no community one (FSR 4.1.1b "
+                      "or 4.0.2c INT8) in your games, Downloads, Desktop or Documents. Put it in one of those and "
+                      "press Rescan, or press Choose FSR 4 DLL.", 'needs your DLL')
     if not helixsr_folder:
         return Source(None, '', "HelixSR is not installed, so AMD's FSR 4 DLL is missing.", 'no DLL')
     path = Path(helixsr_folder) / FOLDER / DLL
