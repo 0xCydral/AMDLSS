@@ -28,6 +28,7 @@ DLL = 'amd_fidelityfx_upscaler_dx12.dll'
 LICENSE = 'FidelityFX_v2_LICENSE.md'
 FOLDER = 'amd-fsr'                     # in the HelixSR folder: AMD's DLL and its license
 USER_FOLDER = 'fsr4'                   # in the AMDLSS data folder: the DLL the user picked
+ORIGIN = 'origin.txt'                  # beside it: the path it came from
 AMD_VERSION = '4.1.1.2740'
 AMD_SIZE = 28761864
 AMD_SHA256 = 'd0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46'
@@ -94,11 +95,21 @@ def choose_dll(path, data_dir):
     temporary = folder / (DLL + '.tmp')
     shutil.copyfile(path, temporary)
     os.replace(temporary, folder / DLL)
+    (folder / ORIGIN).write_text(str(path), encoding='utf-8')
     return version
 
 
 def forget_dll(data_dir):
-    (Path(data_dir) / USER_FOLDER / DLL).unlink(missing_ok=True)
+    for name in (DLL, ORIGIN):
+        (Path(data_dir) / USER_FOLDER / name).unlink(missing_ok=True)
+
+
+def user_origin(data_dir):
+    """Where the kept DLL came from (the path it was found or picked at), '' when unknown."""
+    try:
+        return (Path(data_dir) / USER_FOLDER / ORIGIN).read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
 
 
 def sha256_of(path):
@@ -140,6 +151,101 @@ def find_source(gpu_class, helixsr_folder, data_dir):
         return Source(None, '', "AMD's FSR 4 DLL in the HelixSR folder has changed (its SHA-256 differs from the one "
                                 'AMDLSS expects), so AMDLSS will not use it.', 'DLL changed')
     return Source(path, f"AMD's DLL {AMD_VERSION}", '', '')
+
+
+# --- finding the community DLL for RX 6000 -----------------------------------------------------------------------
+# AMD's DLL has no RDNA 2 path, so an RX 6000 owner needs a community build (unsigned, no license, not downloaded by
+# AMDLSS). Testers keep it where HelixSR's README sends them (a my-fsr folder) or just download it, so AMDLSS looks in
+# those places instead of asking. AMD's own build is never a candidate: it is what rdna3 and rdna4 use anyway.
+
+DEPTH = 4                 # folders below a searched root
+MAX_VISITED = 20000       # files and folders looked at per root, so a huge tree is not walked for minutes
+SKIP_DIRS = frozenset(('node_modules', '.git', 'steamapps', 'appdata', 'windows', 'program files',
+                       'program files (x86)', 'history', 'covers', 'logs'))
+ARCHIVES = ('.7z', '.zip')
+Found = namedtuple('Found', 'path version')
+Discovery = namedtuple('Discovery', 'found hint')
+
+
+def _walk(root):
+    """Every file under `root` within DEPTH folders, sorted by name, at most MAX_VISITED entries looked at."""
+    todo, seen = [(Path(root), 0)], 0
+    while todo:
+        folder, level = todo.pop()
+        try:
+            entries = sorted(os.scandir(folder), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            seen += 1
+            if seen > MAX_VISITED:
+                return
+            if entry.is_file(follow_symlinks=False):
+                yield Path(entry.path)
+            elif level < DEPTH and entry.name.lower() not in SKIP_DIRS and entry.is_dir(follow_symlinks=False):
+                todo.append((Path(entry.path), level + 1))
+
+
+def _is_candidate(path):
+    name = path.name.lower()
+    return name == DLL or (name.endswith('.dll') and path.parent.name.lower() == 'my-fsr')
+
+
+def _community(path):
+    """Found for an FSR 4 DLL that is not AMD's official one, else None."""
+    try:
+        if os.stat(path).st_size == AMD_SIZE and sha256_of(path) == AMD_SHA256:
+            return None
+        return Found(path, validate(path))
+    except (OSError, HelixSRError):
+        return None
+
+
+def _game_files(game):
+    exe = Path(game.exe_folder) if game.exe_folder else None
+    if exe:
+        yield exe / DLL
+        yield from sorted((exe / 'HelixSR' / 'my-fsr').glob('*.dll'))
+    for target in game.fsr_targets:
+        yield Path(target).parent / DLL
+
+
+def discover(games, user_dirs, data_dir):
+    """The best community FSR 4 DLL under the games' folders, `user_dirs` (Downloads, Desktop, Documents) and the AMDLSS
+    data folder: the highest file version, the first found on a tie. With none, a hint when a .7z or .zip that looks
+    like an FSR 4 download sits in `user_dirs`: AMDLSS never unpacks archives."""
+    paths = [path for game in games for path in _game_files(game)]
+    paths += [path for root in (*user_dirs, data_dir) for path in _walk(root) if _is_candidate(path)]
+    unique = {}
+    for path in paths:
+        unique.setdefault(os.path.normcase(os.path.realpath(path)), path)
+    found = [one for one in map(_community, unique.values()) if one]
+    best = max(found, key=lambda one: helixsr.version_key(one.version) or (), default=None)
+    return Discovery(best, '' if best else _archive_hint(user_dirs))
+
+
+def _archive_hint(user_dirs):
+    for root in user_dirs:
+        try:
+            names = sorted(entry.name for entry in os.scandir(root) if entry.is_file())
+        except OSError:
+            continue
+        for name in names:
+            low = name.lower()
+            if low.endswith(ARCHIVES) and 'fsr' in low and '4' in low:
+                return f'Unpack {name} and AMDLSS will find the DLL.'
+    return ''
+
+
+def auto_find(games, user_dirs, data_dir):
+    """Keeps the best DLL discover() finds, unless a DLL is already kept (a saved choice is never swapped behind the
+    user's back). Returns the Discovery; its `found` is None when nothing was kept."""
+    if user_dll(data_dir):
+        return Discovery(None, '')
+    result = discover(games, user_dirs, data_dir)
+    if result.found:
+        choose_dll(result.found.path, data_dir)
+    return result
 
 
 # --- which games --------------------------------------------------------------------------------------------------

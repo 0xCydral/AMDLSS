@@ -24,11 +24,19 @@ Decisions:
   it has DLSS, XeSS or FSR 2 inputs.
 - Drop-in route is done by AMDLSS, not HelixSR, and recorded in `amdlss-fsr4.json` beside the target. Remove
   restores from that record. HelixSR's drop-in and ours refuse each other.
-- OptiScaler route: HelixSR installs OptiScaler as today, then `OptiScaler.ini` gets `[Libraries] FfxDx12Path`,
-  `FfxDx12SRPath` and `[FSR] UpscalerIndex=0` through the `framegen` Setting mechanism (tags `#fsr4lib`, `#fsr4idx`).
+- OptiScaler route: HelixSR installs OptiScaler as today, then `OptiScaler.ini` gets `[Libraries] FfxDx12Path` and
+  `FfxDx12SRPath` through the `framegen` Setting mechanism (tag `#fsr4lib`). `[FSR] UpscalerIndex` is left alone
+  (coordinator note, field evidence from an RX 6600: index 0 is not proven to be FSR 4 on every card, and OptiScaler's
+  own comment says `auto` picks FSR 4 on RDNA 4 and FSR 3 on the rest). The FSR 4 DLL is the only DLL OptiScaler is
+  pointed at, and the after-install text tells the user to pick "FSR 4.1.1" in OptiScaler's menu (Insert, Upscaling,
+  FFX Upscaler) and to read the menu header, which names the active version. Unproven without a real card: that the
+  DLL's first entry is FSR 4 on RX 7000 and RX 6000 with `auto`.
   Deviation from the plan: the two paths point at two different copies of the DLL in `<exe>\HelixSR\fsr4\`, because
   HelixSR's installer documents (helixsr_install.py, OWN_SR) that one file in both roles hangs the game when the
   upscaler starts.
+- A picked DLL is accepted when it is a 64-bit PE exporting `ffxCreateContext` with a file version that starts with 4,
+  signed or not. A tester's RX 6600 ran the community build named "FSR 4.1.1b" from HelixSR's my-fsr folder, so
+  4.1.x community builds are accepted, not only 4.0.2.
 - The choice per game is kept in `settings.json` (`upscalers`, keyed by game folder).
 
 ## Tasks
@@ -36,6 +44,12 @@ Decisions:
 - [ ] T1 GPU class (`amdlss/gpu.py`, `tests/test_gpu.py`)
 - [ ] T2 PE reader: exports and file version (`amdlss/pe.py`, `tests/test_pe.py`)
 - [ ] T3 FSR 4 source, availability and the choice store (`amdlss/fsr4.py`, `settings.py`, `games.py`)
+- [ ] T3b Find the RX 6000 DLL automatically (`fsr4.discover`, `auto_find`): game exe folders, `HelixSR\my-fsr`, the
+  folders of the fsr_targets, Downloads, Desktop, Documents (4 levels, capped) and the AMDLSS data folder; only
+  community builds count (AMD's pinned SHA-256 is skipped); the highest file version wins; a .7z or .zip named like an
+  FSR 4 download gets the hint "Unpack <name> and AMDLSS will find the DLL."; archives are never unpacked. Rescan
+  while nothing is found; the window shows where the DLL was found. "Choose FSR 4 DLL..." stays as the fallback.
+  Authenticode signer check: not done (the pinned hash already tells AMD's build apart).
 - [ ] T4 Drop-in install and remove with the record and the loader download (`amdlss/fsr4.py`, `helixsr.py`)
 - [ ] T5 OptiScaler route switch (`amdlss/fsr4.py`, `framegen.py`)
 - [ ] T6 Window: card line, Upscaler control, DLL buttons, install and remove flows (`app.py`, `ui.py`)
