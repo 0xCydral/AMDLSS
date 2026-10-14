@@ -251,7 +251,7 @@ def auto_find(games, user_dirs, data_dir):
 # --- which games --------------------------------------------------------------------------------------------------
 
 _HIDDEN = {gamelist.UNSAFE_FOLDER: ('AMDLSS will not change this folder: it covers other games.', 'folder'),
-           gamelist.NO_UPSCALER: (f'The game has {gamelist.NO_UPSCALER}.', 'no FSR 3.1, DLSS or XeSS')}
+           gamelist.NO_UPSCALER: (f'The game has {gamelist.NO_UPSCALER}.', 'nothing to replace')}
 
 
 def availability(game, source):

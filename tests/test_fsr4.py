@@ -134,7 +134,7 @@ def test_a_card_that_cannot_run_it_says_so_before_the_game_is_judged(tmp_path):
 
 def test_a_game_with_nothing_to_replace_says_no(tmp_path):
     result = fsr4.availability(game(inputs=[]), ready(tmp_path))
-    assert not result.ok and result.short == 'no FSR 3.1, DLSS or XeSS'
+    assert not result.ok and result.short == 'nothing to replace'
     hidden = fsr4.availability(game(inputs=[], reason=games.NO_UPSCALER), ready(tmp_path))
     assert not hidden.ok and games.NO_UPSCALER in hidden.reason
 
