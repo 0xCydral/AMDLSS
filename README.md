@@ -44,6 +44,8 @@ HelixSR picks one of two ways for each game. AMDLSS shows the result after the i
 |---|---|
 | FSR drop-in (the game has an FSR 3.1 DLL) | choose AMD FSR |
 | OptiScaler (picked for a game that has an FSR 3.1 DLL, or the game has DLSS, XeSS or FSR 2 only) | choose DLSS. Press Insert in the game to open OptiScaler's menu |
+| FSR 4.1.1 drop-in | choose AMD FSR |
+| FSR 4.1.1 (OptiScaler) | choose DLSS, then pick FSR 4.1.1 in OptiScaler's menu (see FSR 4.1.1 below) |
 
 ### Frame generation (OptiScaler route only)
 
@@ -54,6 +56,22 @@ Some games, such as Dragon's Dogma 2, offer only NVIDIA's DLSS Frame Generation,
 - Update with the box off puts the two values back as they were (AMDLSS keeps them in `%LOCALAPPDATA%\AMDLSS\framegen.json`). **Remove** runs HelixSR's own uninstall, which restores or deletes `OptiScaler.ini`, so nothing stays behind.
 
 HelixSR also has an experimental route that loads its DLSS loader. AMDLSS does not offer it. A game that already uses it (from HelixSR's own setup) shows as "DLSS loader (experimental)" and can only be removed.
+
+## FSR 4.1.1
+
+Besides HelixSR, a game can use AMD's own FSR 4.1.1. Pick **Upscaler: HelixSR | FSR 4.1.1** in the panel under the game list before you press Install. AMDLSS remembers the pick per game. Every game card has a line "FSR 4.1.1: yes" or "FSR 4.1.1: no, <why>", and the panel spells the reason out, so you can see at a glance which games can use it.
+
+**Which cards.** HelixSR 1.9.0 carries AMD's official FidelityFX upscaler DLL 4.1.1.2740 (`amd-fsr\amd_fidelityfx_upscaler_dx12.dll`). It runs FSR 4 on RX 9000 cards and an INT8 version of FSR 4 on RX 7000 cards. On any other card AMD's DLL quietly falls back to FSR 3.1.5, so AMDLSS says no there (Radeon 780M and other integrated graphics included). RX 6000 cards are not covered by AMD's DLL. They need a community build of the FSR 4 DLL, which AMDLSS does not download. AMDLSS looks for it by itself: in each game's folder and its `HelixSR\my-fsr` folder, in your Downloads, Desktop and Documents (four folders deep) and in its own data folder, and keeps the highest version it finds. If you only have an archive (a .7z or .zip named like an FSR 4 download), AMDLSS tells you to unpack it; it never unpacks archives. If nothing is found, press **Choose FSR 4 DLL...** and pick the file yourself. It must be a 64-bit DLL that exports `ffxCreateContext` and has a file version starting with 4. On RX 7000 and RX 9000 you can pick your own DLL the same way, to use it instead of AMD's. The panel shows which DLL is used and where it was found.
+
+**Which games.**
+
+- A game with an FSR 3.1 DLL: AMDLSS swaps the game's `amd_fidelityfx_upscaler_dx12.dll` (or `amd_fidelityfx_dx12.dll`, which gets AMD's small loader beside the FSR 4 DLL; AMDLSS downloads that 26 KB file from AMD's FidelityFX SDK once and checks its SHA-256) and keeps the game's own file as `*.original.dll`. A record `amdlss-fsr4.json` beside it lists every file moved and created, and Remove puts back exactly that. A file you replaced by hand is kept and reported. In the game choose AMD FSR.
+- A game with DLSS, XeSS or FSR 2: HelixSR installs OptiScaler as usual (so fakenvapi and frame generation keep working) and AMDLSS points `OptiScaler.ini` (`[Libraries] FfxDx12Path` and `FfxDx12SRPath`) at two copies of the FSR 4 DLL in `HelixSR\fsr4` next to the game's .exe. In the game choose DLSS, press Insert, then Upscaling > Upscalers > FFX Upscaler and pick FSR 4.1.1; the menu header names the version in use. The FSR 4 watermark in that menu draws the version on screen. AMDLSS leaves `UpscalerIndex` alone, because which entry of the DLL is FSR 4 depends on the card and AMDLSS could not test every card.
+- Never in games with anti-cheat (the game is marked "no, anti-cheat"), and not in a folder that covers other games. Vulkan and DirectX 11 games are not covered.
+
+Switching the upscaler of an installed game removes the old one first. **Remove** undoes whichever is installed. HelixSR's drop-in and AMDLSS's FSR 4 drop-in refuse to share a game.
+
+AMD's DLL and loader are redistributed under AMD's license (`FidelityFX_v2_LICENSE.md`, copied beside every AMD DLL AMDLSS installs). FSR is a trademark of Advanced Micro Devices, Inc.
 
 ## Sending logs
 
@@ -113,7 +131,7 @@ Downloads run in the background, so offline the window opens and works as before
 
 - It runs HelixSR's own scripts without changing them. Listing games, installing and removing use HelixSR's `helixsr_install.py` with HelixSR's own embedded Python (`install N`, `uninstall N`, `--folder PATH`). A small read-only helper, run in that same Python, reads HelixSR's game scan and returns it as JSON. If the helper fails, AMDLSS parses the installer's printed `list` output instead. `install N` always takes HelixSR's default route, so for the OptiScaler route in a game that also has an FSR 3.1 DLL, a second small helper in the same Python does what the installer's `o` answer does (it sets `route` and `chosen`) and then calls the installer's own `install()`. HelixSR's files are only imported.
 - Before each install or remove, AMDLSS reads the list again and matches the game by folder, so a change in your library cannot send the action to another game.
-- It does not bundle, modify or redistribute HelixSR or any NVIDIA file. This repository holds only AMDLSS's own code.
+- It does not bundle, modify or redistribute HelixSR or any NVIDIA file. This repository holds only AMDLSS's own code. The AMD files for FSR 4.1.1 come from HelixSR's own folder (the DLL) and from AMD's FidelityFX SDK on GitHub (the loader, only when a game needs it).
 - Files: HelixSR is extracted to `%LOCALAPPDATA%\AMDLSS\HelixSR-1.9.0`, and the games you added by hand are saved in `%LOCALAPPDATA%\AMDLSS\settings.json`. HelixSR's own downloads go to `%LOCALAPPDATA%\HelixSR`. Delete these folders to remove everything. Remove HelixSR from your games first.
 
 ## Credits and licenses
@@ -121,6 +139,7 @@ Downloads run in the background, so offline the window opens and works as before
 - AMDLSS is free software under the GNU General Public License, version 2 or (at your option) any later version. See `LICENSE`. Parts are copied from the launcher and tools of the [Bloodborne PC port](https://github.com/0xCydral/bloodborne_pc) (GPL-2.0-or-later): the window's palette and button and progress-bar code, and the download, verify and extract code of `tools/fetch_helixsr.py`.
 - [HelixSR](https://github.com/lonewolf0622/HelixSR) is closed-source freeware by lonewolf0622 under the [HelixSR Freeware License](https://github.com/lonewolf0622/HelixSR/blob/HEAD/LICENSE). Its setup scripts are Apache-2.0 up to 1.8.1 and under the same Freeware License from 1.9.0, which allows running the setup and redistributing it only unmodified, complete and free. AMDLSS downloads the unmodified official release.
 - [OptiScaler](https://github.com/optiscaler/OptiScaler) (GPL-3.0) comes inside the HelixSR release and is installed by HelixSR's setup into games without an FSR 3.1 DLL.
+- AMD's FidelityFX upscaler DLL 4.1.1 (inside HelixSR's release) and AMD's FidelityFX SDK v2.3.0 loader are AMD's, under AMD's FidelityFX license (`FidelityFX_v2_LICENSE.md`, which AMDLSS copies beside them).
 - NVIDIA's DLSS 310.7.0 DLL is downloaded by HelixSR's setup under [NVIDIA's license](https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt).
 - Ideas, not code, from similar tools: per-game state lines and a library view (OptiScaler Client, GPL-3.0; DLSS5-Autopilot, MIT), file-name based anti-cheat detection with whole-word matching (DLSS5-Autopilot; the marker list here is our own), a copy-log button and an "Open folder" action (DLSS5-Swapper, MIT).
 

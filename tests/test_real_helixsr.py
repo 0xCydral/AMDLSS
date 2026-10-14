@@ -101,7 +101,7 @@ def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     on = (game / 'OptiScaler.ini').read_bytes()
     assert framegen.is_on(game)
     assert on.replace(b'FGInput=dlssg', b'FGInput=auto').replace(b'FGOutput=fsrfg', b'FGOutput=auto').replace(
-        b'PreserveSwapChain = false', b'PreserveSwapChain = auto') == ini
+        b'PreserveSwapChain=false', b'PreserveSwapChain=auto').replace(b'\r\nEnabled=true', b'\r\nEnabled=auto') == ini
     assert b'FGInput=dlssg' in on and b'FGOutput=fsrfg' in on
     assert framegen.apply(game, False, tmp_path) and (game / 'OptiScaler.ini').read_bytes() == ini
 
@@ -149,3 +149,82 @@ def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
     with pytest.raises(helixsr.HelixSRError, match='folder covers other games'):
         client.install(valor, [content, other])
     assert tree(other) == before
+
+
+def fsr4_world(fake_game, tmp_path):
+    """The real client, AMD's real DLL from this HelixSR folder, and the fake game as HelixSR lists it."""
+    from amdlss import fsr4, gpu
+    copy, game = fake_game
+    assert FAKE_ROOT in game.parents
+    client = helixsr.HelixSR(copy)
+    source = fsr4.find_source(gpu.RDNA4, copy, tmp_path / 'data')
+    assert source.path and source.label == "AMD's DLL 4.1.1.2740"   # the pinned SHA-256 matches the real file
+
+    def listed():
+        entry = [g for g in client.list_games([game]) if Path(g.folder) == game][0]
+        entry.fsr4 = fsr4.availability(entry, source)
+        return fsr4.mark(entry)
+
+    def go(want, route=None, entry=None):
+        entry = entry or listed()
+        entry.fsr4 = fsr4.availability(entry, source)
+        return fsr4.install_game(client, entry, [game], want, route, source, fsr4.license_of(copy), tmp_path / 'data')
+
+    return client, game, listed, go, source
+
+
+def test_fsr4_on_the_optiscaler_route_and_back_with_the_real_helixsr(fake_game, tmp_path):
+    from amdlss import fsr4
+    client, game, listed, go, source = fsr4_world(fake_game, tmp_path)
+    before = tree(game)
+    assert listed().fsr4.ok and listed().fsr4.routes == ('direct', 'optiscaler')
+
+    after = go('helixsr', 'optiscaler')
+    helix_ini = (game / 'OptiScaler.ini').read_bytes()
+    assert after.state == 'optiscaler' and after.upscaler == ''
+    after = go('fsr4', entry=after)
+    assert after.state == 'optiscaler' and after.upscaler == 'fsr4' and after.state_text == 'FSR 4.1.1 (OptiScaler)'
+    ini = (game / 'OptiScaler.ini').read_bytes()
+    assert fsr4.in_use(game) and ini != helix_ini
+    assert re.search(rb'(?m)^UpscalerIndex\s*=\s*auto', ini)   # left alone
+    for name in fsr4.OPTI_COPIES:
+        assert sha(game / 'HelixSR' / 'fsr4' / name) == hashlib.sha256(source.path.read_bytes()).hexdigest()
+    assert (game / 'HelixSR' / 'fsr4' / fsr4.LICENSE).is_file()
+    assert framegen.read_values(ini, fsr4.libraries(game)) == fsr4.libraries(game).values
+    assert listed().upscaler == 'fsr4'                                  # a fresh scan sees it
+
+    after = go('helixsr', entry=after)                                  # switching back restores HelixSR's values
+    assert after.upscaler == '' and not (game / 'HelixSR' / 'fsr4').exists()
+    assert (game / 'OptiScaler.ini').read_bytes() == helix_ini
+
+    after = go('fsr4', entry=after)
+    fsr4.remove_game(client, after, [game], tmp_path / 'data')
+    assert tree(game) == before                                         # every file back, the fsr4 folder gone too
+    assert not (tmp_path / 'data' / framegen.RECORD).exists()
+
+
+def test_fsr4_drop_in_and_switching_with_the_real_helixsr(fake_game, tmp_path):
+    from amdlss import fsr4
+    client, game, listed, go, source = fsr4_world(fake_game, tmp_path)
+    dll = game / fsr4.DLL
+    dll.write_bytes(b'THE GAMES OWN FSR 3.1 DLL')
+    before = tree(game)
+    original = game / 'amd_fidelityfx_upscaler_dx12.original.dll'
+
+    after = go('fsr4', 'direct')
+    assert after.state == 'fsr4' and after.in_game() == 'AMD FSR' and listed().state == 'fsr4'
+    assert dll.read_bytes() == source.path.read_bytes() and original.read_bytes() == b'THE GAMES OWN FSR 3.1 DLL'
+    assert (game / fsr4.MARKER).is_file() and (game / fsr4.LICENSE).is_file()
+    with pytest.raises(helixsr.HelixSRError, match='FSR 4.1.1'):
+        client.install(listed(), [game])                                # HelixSR refuses to install over ours
+
+    after = go('helixsr', entry=after)                                  # ours is removed, then HelixSR goes in
+    assert after.state == 'direct' and re.search(rb'HelixSR \d+\.\d+\.\d+', dll.read_bytes()[:4 << 20])
+    assert not (game / fsr4.MARKER).exists() and original.read_bytes() == b'THE GAMES OWN FSR 3.1 DLL'
+
+    after = go('fsr4', entry=after)                                     # HelixSR is removed, then ours goes in
+    assert after.state == 'fsr4' and dll.read_bytes() == source.path.read_bytes()
+    assert not (game / 'helixsr-install.json').exists()
+
+    fsr4.remove_game(client, after, [game], tmp_path / 'data')
+    assert tree(game) == before

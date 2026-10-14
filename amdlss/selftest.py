@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import covers, crashes, framegen, games, helixsr, identify, logs, reports, update
+from . import covers, crashes, framegen, fsr4, games, gpu, helixsr, identify, logs, reports, update
 
 
 def check_parsing():
@@ -331,10 +331,34 @@ def check_covers():
         assert client.get(games.Game(name='The Witcher 3')) is None
 
 
+def check_fsr4():
+    assert gpu.classify([gpu.Gpu('', '1002', '744c'), gpu.Gpu('', '10de', '2684')]) == gpu.RDNA3
+    assert gpu.classify([gpu.Gpu('AMD Radeon 780M Graphics', '1002', '15bf')]) == gpu.OTHER
+    ready = fsr4.Source(Path('x.dll'), "AMD's DLL", '', '')
+    both = games.Game(name='x', fsr_targets=['a.dll'], inputs=['DLSS'], can_opti=True, route='direct')
+    assert fsr4.availability(both, ready).routes == ('direct', 'optiscaler')
+    assert fsr4.availability(games.Game(name='x', anticheat=['BattlEye']), ready).card_text == \
+        'FSR 4.1.1: no, anti-cheat'
+    with tempfile.TemporaryDirectory() as folder:   # the drop-in round trip on a fake game
+        root = Path(folder)
+        (root / 'Game').mkdir()
+        (root / 'amd').mkdir()
+        dll = root / 'Game' / fsr4.DLL
+        dll.write_bytes(b'GAME')
+        (root / 'amd' / fsr4.DLL).write_bytes(b'FSR4')
+        (root / 'amd' / fsr4.LICENSE).write_text('AMD license')
+        source = fsr4.Source(root / 'amd' / fsr4.DLL, "AMD's DLL", '', '')
+        fsr4.install_dropin([str(dll)], source, root / 'data', root / 'amd' / fsr4.LICENSE)
+        assert dll.read_bytes() == b'FSR4' and (root / 'Game' / 'amd_fidelityfx_upscaler_dx12.original.dll').read_bytes() == b'GAME'
+        assert fsr4.dropin_folders([root / 'Game']) == [str(root / 'Game')]
+        assert fsr4.remove_dropin([root / 'Game']) == []
+        assert [p.name for p in (root / 'Game').iterdir()] == [fsr4.DLL] and dll.read_bytes() == b'GAME'
+
+
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_unsafe_folder, check_framegen, check_logging_switch,
                   check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
-                  check_helixsr, check_running_game, check_zip_slip, check_update, check_identify, check_covers):
+                  check_helixsr, check_running_game, check_zip_slip, check_update, check_identify, check_covers, check_fsr4):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')
