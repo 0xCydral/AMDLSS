@@ -162,12 +162,16 @@ def apply(exe_folder, on, data_dir, setting=FRAMEGEN):
 
 
 def forget(exe_folder, data_dir):
-    """Drops the records of a game HelixSR was just removed from. When our logging switch was on there, the
-    OptiScaler.log it made is deleted too (HelixSR deletes the log only for an OptiScaler.ini it created itself)."""
+    """Drops every record of a game HelixSR was just removed from (this module's and amdlss.fsr4's). When our logging
+    switch was on there, the OptiScaler.log it made is deleted too (HelixSR deletes the log only for an OptiScaler.ini
+    it created itself)."""
     records = _load(data_dir)
-    changed = records.pop(_record_key(exe_folder), None) is not None
-    logged = records.pop(_record_key(exe_folder, LOGGING), None) is not None
-    if changed or logged:
+    base = _record_key(exe_folder)
+    logged = _record_key(exe_folder, LOGGING) in records
+    gone = [key for key in records if key.startswith(base)]
+    for key in gone:
+        del records[key]
+    if gone:
         _save(data_dir, records)
     if logged:
         (Path(exe_folder) / LOG).unlink(missing_ok=True)

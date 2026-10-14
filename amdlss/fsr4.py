@@ -20,7 +20,7 @@ import shutil
 from collections import namedtuple
 from pathlib import Path
 
-from . import VERSION, gpu, helixsr, pe
+from . import VERSION, framegen, gpu, helixsr, host, pe
 from . import games as gamelist
 from .helixsr import HelixSRError
 
@@ -418,3 +418,88 @@ def remove_dropin(folders):
         notes += _unwind(folder, record)
         (folder / MARKER).unlink(missing_ok=True)
     return notes
+
+
+# --- the OptiScaler route: point OptiScaler.ini at the FSR 4 DLL --------------------------------------------------
+# HelixSR installs OptiScaler and sets [Libraries] FfxDx12Path and FfxDx12SRPath to its own two copies of one DLL (its
+# installer notes that one file in both roles hangs the game when the upscaler starts). The same goes here: the FSR 4
+# DLL is copied twice into <game .exe folder>\HelixSR\fsr4\ and each path points at one copy. [FSR] UpscalerIndex is left
+# alone: which entry of AMD's DLL is FSR 4 on each card is not proven without that card, so the user picks it in
+# OptiScaler's menu. framegen keeps the values HelixSR wrote, so switching back restores them.
+
+OPTI_FOLDER = 'fsr4'
+OPTI_COPIES = ('fsr4.dll', 'fsr4_upscaler.dll')   # FfxDx12Path, FfxDx12SRPath
+
+
+def ini_path(path):
+    """A path the way OptiScaler.ini holds it: a Windows path (under Proton the Linux root is Z:), as HelixSR writes."""
+    resolved = str(Path(path).resolve())
+    return resolved if host.WINDOWS else 'Z:' + resolved.replace('/', '\\')
+
+
+def opti_folder(exe_folder):
+    return Path(exe_folder) / 'HelixSR' / OPTI_FOLDER
+
+
+def libraries(exe_folder):
+    """The framegen Setting for the two library paths, as they read when FSR 4 is in use in this game."""
+    folder = opti_folder(exe_folder)
+    return framegen.Setting(b'Libraries', {'FfxDx12Path': ini_path(folder / OPTI_COPIES[0]),
+                                           'FfxDx12SRPath': ini_path(folder / OPTI_COPIES[1])}, '#fsr4')
+
+
+def in_use(exe_folder):
+    """True when the game's OptiScaler.ini points at the FSR 4 copies."""
+    return framegen.is_on(exe_folder, libraries(exe_folder))
+
+
+def use_in_optiscaler(exe_folder, source, license_file, data_dir):
+    """Copies the FSR 4 DLL twice next to HelixSR's files in the game and points OptiScaler.ini at the copies. Returns
+    True when anything changed. A failure leaves no copies that were made for it."""
+    folder = opti_folder(exe_folder)
+    fresh = not folder.exists()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        wanted = [(source.path, folder / name) for name in OPTI_COPIES]
+        if not source.user:
+            wanted.append((license_file, folder / LICENSE))
+        changed = False
+        for origin, target in wanted:
+            if not (target.is_file() and target.stat().st_size == Path(origin).stat().st_size
+                    and sha256_of(target) == sha256_of(origin)):
+                _put(origin, target)
+                changed = True
+        return framegen.apply(exe_folder, True, data_dir, libraries(exe_folder)) or changed
+    except (OSError, HelixSRError) as error:
+        if fresh:
+            shutil.rmtree(folder, ignore_errors=True)
+        if isinstance(error, HelixSRError):
+            raise
+        raise HelixSRError(f'FSR 4.1.1 was not set up: {error}')
+
+
+def restore_optiscaler(exe_folder, data_dir):
+    """Puts the library paths HelixSR wrote back and deletes the FSR 4 copies. Returns True when anything changed."""
+    changed = framegen.apply(exe_folder, False, data_dir, libraries(exe_folder))
+    folder = opti_folder(exe_folder)
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
+        changed = True
+    return changed
+
+
+# --- what is installed in a game ---------------------------------------------------------------------------------
+
+def target_folders(game):
+    """The folders of the game's FSR 3.1 DLLs, once each: where a drop-in is recorded."""
+    return list(dict.fromkeys(str(Path(target).parent) for target in game.fsr_targets))
+
+
+def mark(game):
+    """Sets `game.upscaler`, and `game.state` for a drop-in, from the files on disk: HelixSR does not know about a
+    drop-in AMDLSS made, and sees an OptiScaler install the same whichever DLL it is pointed at."""
+    game.upscaler = ''
+    if game.state == 'none' and dropin_folders(target_folders(game)):
+        game.state, game.upscaler = 'fsr4', 'fsr4'
+    elif game.state == 'optiscaler' and game.exe_folder and in_use(game.exe_folder):
+        game.upscaler = 'fsr4'
