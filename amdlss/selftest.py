@@ -202,6 +202,13 @@ def check_streamline():
         win64.mkdir(parents=True)
         (win64 / 'nvngx_dlssg.dll').write_bytes(b'MZ')
         assert games.scan_streamline(Path(folder))
+    with tempfile.TemporaryDirectory() as folder:
+        # Unreal's own plugin folder, eight levels down (Engine\Plugins\Runtime\Nvidia\DLSS\Binaries\ThirdParty\Win64)
+        deep = Path(folder) / 'Engine' / 'Plugins' / 'Runtime' / 'Nvidia' / 'DLSS' / 'Binaries' / 'ThirdParty' / 'Win64'
+        deep.mkdir(parents=True)
+        (deep / 'sl.interposer.dll').write_bytes(b'MZ')
+        (deep / 'sl.dlss_g.dll').write_bytes(b'MZ')
+        assert games.scan_streamline(Path(folder))
 
 
 def check_hang_and_unreal():

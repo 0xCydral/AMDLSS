@@ -149,6 +149,16 @@ def test_ngx_frame_generation_counts_without_streamline(tmp_path):
     assert games.scan_streamline(tmp_path, depth=3) and not games.scan_streamline(tmp_path, depth=2)
 
 
+def test_frame_generation_is_found_in_unreals_engine_plugin_folder(tmp_path):
+    """Wukong's own DLSS files sit eight levels down (OptiScaler.log: Engine\\Plugins\\Runtime\\Nvidia\\DLSS\\
+    Binaries\\ThirdParty\\Win64); the earlier depth of seven stopped one level short and the game looked like it had
+    no DLSS Frame Generation."""
+    win64 = tmp_path / 'Engine' / 'Plugins' / 'Runtime' / 'Nvidia' / 'DLSS' / 'Binaries' / 'ThirdParty' / 'Win64'
+    streamline_files(win64, 'sl.interposer.dll', 'sl.dlss_g.dll')
+    assert games.scan_streamline(tmp_path)
+    assert not games.scan_streamline(tmp_path, depth=7)   # the depth that missed it
+
+
 def test_the_mods_own_ngx_dll_is_not_the_games(tmp_path):
     """The files AMDLSS's own installs bring must not make a game look like it offers frame generation: HelixSR's
     helixsr-fg copy and OptiScaler's own copy of the NGX plugin are the mod's, not the game's."""

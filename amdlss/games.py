@@ -394,11 +394,12 @@ NGX_DLSSG_DLL = 'nvngx_dlssg.dll'
 MOD_FOLDERS = frozenset(('optiscaler', 'helixsr', 'amdlss-scaler-backup'))
 
 
-def scan_streamline(folder, depth=7):
+def scan_streamline(folder, depth=9):
     """True when the game itself offers DLSS Frame Generation: Streamline's pair (sl.interposer.dll and sl.dlss_g.dll,
     in any two places up to `depth` levels down) or the NGX plugin nvngx_dlssg.dll alone (games that integrate frame
     generation without Streamline, such as Black Myth: Wukong). Links are not followed, and the folders AMDLSS's own
-    installs bring (see MOD_FOLDERS) are not searched."""
+    installs bring (see MOD_FOLDERS) are not searched. The depth covers Unreal's plugin layout
+    (Engine\\Plugins\\Runtime\\Nvidia\\DLSS\\Binaries\\ThirdParty\\Win64 is eight levels down)."""
     found, todo = set(), [(folder, 0)]
     while todo and found != STREAMLINE_DLLS:
         path, level = todo.pop()
