@@ -108,7 +108,7 @@ def test_the_scaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     assert scaler.installed(game) and scaler.mark(listed(client, game)).state == 'optiscaler'
     assert (game / 'dxgi.dll').read_bytes() == (Path(SCALER_SOURCE) / 'OptiScaler.dll').read_bytes()
     assert (game / 'OptiScaler' / 'streamline' / 'sl.dlss_g.dll').is_file()
-    assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (copy / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes()
+    assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (copy / 'amd_fidelityfx_dx12.dll').read_bytes()
     assert (game / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == Path(amd_dll()).read_bytes()  # not touched
     assert not (game / 'setup_linux.sh').exists()   # the download's own files are not copied
     ini = (game / 'OptiScaler.ini').read_bytes()
@@ -126,13 +126,41 @@ def test_the_scaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     (game / 'OptiScaler.log').write_text('[Info] a log the switch made')
     with zipfile.ZipFile(logs.collect(after, copy, tmp_path / 'data', tmp_path / 'out', {}, windows=False)) as archive:
         names = set(archive.namelist())
-    assert {'exe-folder/OptiScaler.log', 'exe-folder/OptiScaler.ini', 'exe-folder/HelixSR/helixsr.dll',
+    assert {'exe-folder/OptiScaler.log', 'exe-folder/OptiScaler.ini', 'exe-folder/HelixSR/amdlss-scaler.json',
             'files.txt', 'system.txt'} <= names, names
 
     fsr4.remove_game(client, scaler.mark(listed(client, game)), [game], tmp_path / 'data')
     framegen.forget(game, tmp_path / 'data')
     assert tree(game) == before  # every file back, byte for byte, OptiScaler.ini and the HelixSR folder gone
     assert not (tmp_path / 'data' / framegen.RECORD).exists()
+
+
+def test_dlss4_frame_generation_on_the_real_scaler_ini(fake_game, tmp_path, monkeypatch):
+    # AMDLSS's DLSS 4 switch over the real OptiScaler.ini HelixSR Scaler ships, with the real build's FG files:
+    # [HelixSR] FrameGeneration=on, [FrameGen] FGInput=nvngxfg and FGNvngxReplacement=HelixSR, and every value
+    # back as it was
+    copy, game = fake_game
+    monkeypatch.setenv('AMDLSS_SCALER', SCALER_SOURCE)
+    assert helixsr.fg_reason(copy) == ''   # helixsr-fg (nvexec64, nvngx_dlssg, _nvngx) and helixsr_fg_setup.json
+    client = helixsr.HelixSR(copy)
+    scaler.install_game(client, listed(client, game), [game], tmp_path / 'data')
+    ini = (game / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=auto' in ini and framegen.generator_of(game) == ''
+
+    assert framegen.apply_generator(game, framegen.DLSS4, tmp_path / 'data')
+    data = (game / 'OptiScaler.ini').read_bytes()
+    assert framegen.generator_of(game) == framegen.DLSS4
+    assert b'FrameGeneration=on' in data and b'FGInput=nvngxfg' in data and b'FGNvngxReplacement=HelixSR' in data
+
+    assert framegen.apply_generator(game, framegen.AMD, tmp_path / 'data')
+    amd = (game / 'OptiScaler.ini').read_bytes()
+    assert b'FGInput=dlssg' in amd and b'FGOutput=fsrfg' in amd and b'FrameGeneration=auto' in amd
+    assert b'FGNvngxReplacement=auto' in amd
+    assert framegen.generator_of(game) == framegen.AMD
+
+    assert framegen.apply_generator(game, framegen.DLSS4, tmp_path / 'data')
+    assert framegen.apply_generator(game, '', tmp_path / 'data')
+    assert (game / 'OptiScaler.ini').read_bytes() == ini and framegen.generator_of(game) == ''
 
 
 def test_an_earlier_versions_install_is_recognised_and_removed(fake_game):
@@ -157,9 +185,10 @@ def test_an_earlier_versions_install_is_recognised_and_removed(fake_game):
     assert tree(game) == before
 
 
-def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
-    # 7B47A27X with HelixSR itself: its by-hand scan climbs from Content (no FSR DLL within its reach) to a
-    # folder over other games. AMDLSS shows the GDK game under its config name and Content folder, refused.
+def test_an_xbox_gdk_folder_is_found_under_its_content_folder(fake_game):
+    # HelixSR 1.9.0 scans 16 folders deep (Unreal Engine plugins sit 8 to 10 deep), so a GDK game's own files,
+    # deep inside Content, are found: the game is listed under its Content folder and its config name, and no
+    # widened-over-other-games entry is made any more.
     copy, _game = fake_game
     drive = FAKE_ROOT / 'drive'
     content = drive / 'xcaja' / 'Valor Mortis' / 'Content'
@@ -169,7 +198,7 @@ def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
     (win64 / 'GameChat2.dll').write_bytes(b'MZ')
     (content / 'MicrosoftGame.config').write_text(
         '<Game><Identity Name="ValorMortis"/><ShellVisuals DefaultDisplayName="Valor Mortis"/></Game>')
-    deep = content / 'a' / 'b' / 'c' / 'd' / 'e' / 'f' / 'g' / 'h'   # its own FSR, past the installer's reach
+    deep = content / 'a' / 'b' / 'c' / 'd' / 'e' / 'f' / 'g' / 'h'
     deep.mkdir(parents=True)
     (deep / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'own fsr')
     other = drive / 'OtherGame'
@@ -181,9 +210,8 @@ def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
     rows = games.classify(client.list_games([content, other]), [str(content), str(other)])
     valor = next(g for g in rows if Path(g.exe_folder) == win64.resolve())
     assert valor.folder == str(content.resolve()) and valor.name == 'Valor Mortis'
-    assert valor.reason == games.UNSAFE_FOLDER and not valor.can_install
-    with pytest.raises(helixsr.HelixSRError, match='folder covers other games'):
-        client.install(valor, [content, other])
+    assert valor.reason == '' and valor.can_install and valor.fsr31        # the deep FSR 3.1 DLL is found now
+    assert [str(t) for t in valor.fsr_targets] == [str(deep / 'amd_fidelityfx_upscaler_dx12.dll')]
     assert tree(other) == before
 
 

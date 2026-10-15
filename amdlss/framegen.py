@@ -42,6 +42,13 @@ SECTION = b'FrameGen'
 FRAMEGEN = Setting(SECTION, {'Enabled': 'true', **ON, 'PreserveSwapChain': 'false'}, '',
                    ('Enabled', 'PreserveSwapChain'))
 LOGGING = Setting(b'Log', {'LogToFile': 'true', 'LogLevel': '2'}, '#log')
+# The frame generation generator: AMD FSR's (OptiScaler turns the game's DLSS Frame Generation into FSR frames) or
+# HelixSR's own experimental DLSS 4 mode (the game's DLSS Frame Generation runs HelixSR's network on any GPU, from
+# the helixsr-fg files; FGInput=nvngxfg makes OptiScaler leave FGOutput alone, dllmain.cpp).
+AMD, DLSS4 = 'amd', 'dlss4'
+HELIX_FG = Setting(b'HelixSR', {'FrameGeneration': 'on'}, '#helixsrfg')
+DLSS4_FG = Setting(b'FrameGen', {'FGInput': 'nvngxfg', 'FGNvngxReplacement': 'HelixSR'}, '#dlss4')
+NAMES = {AMD: 'AMD FSR', DLSS4: 'DLSS 4 (HelixSR)'}   # for reports, the window and the game's log
 RECORD = 'framegen.json'
 INI = 'OptiScaler.ini'
 LOG = 'OptiScaler.log'
@@ -103,6 +110,38 @@ def is_on(exe_folder, setting=FRAMEGEN):
         return False
 
 
+def name_of(generator):
+    """The generator's name for reports, the window and the game's log; 'off' for none."""
+    return NAMES.get(generator, 'off')
+
+
+def generator_of(exe_folder):
+    """Which frame generation the game's OptiScaler.ini runs: 'dlss4' (HelixSR's own, through the game's DLSS
+    Frame Generation), 'amd' (AMD FSR's), or '' when neither is switched on."""
+    if is_on(exe_folder, HELIX_FG) and is_on(exe_folder, DLSS4_FG):
+        return DLSS4
+    return AMD if is_on(exe_folder, FRAMEGEN) else ''
+
+
+def apply_generator(exe_folder, generator, data_dir):
+    """Puts exactly one frame generation generator on — or both off for '' — in the game's OptiScaler.ini. The
+    other generator's values go back first and the wanted one goes on last, so a switch never leaves a mix; every
+    value the file held is kept in this module's records and comes back when it is switched again or turned off.
+    Returns True when the file changed."""
+    changed = False
+    if generator != AMD:
+        changed = apply(exe_folder, False, data_dir, FRAMEGEN) or changed
+    if generator != DLSS4:
+        changed = apply(exe_folder, False, data_dir, HELIX_FG) or changed
+        changed = apply(exe_folder, False, data_dir, DLSS4_FG) or changed
+    if generator == AMD:
+        changed = apply(exe_folder, True, data_dir, FRAMEGEN) or changed
+    elif generator == DLSS4:
+        changed = apply(exe_folder, True, data_dir, HELIX_FG) or changed
+        changed = apply(exe_folder, True, data_dir, DLSS4_FG) or changed
+    return changed
+
+
 # --- the record of what the file held before ---------------------------------------------------------------------
 
 def _record_key(exe_folder, setting=FRAMEGEN):
@@ -142,7 +181,13 @@ def apply(exe_folder, on, data_dir, setting=FRAMEGEN):
         data = path.read_bytes()
     except OSError as error:
         raise HelixSRError(f'cannot read {path}: {error}')
-    current = read_values(data, setting)
+    if not on:
+        try:
+            current = read_values(data, setting)
+        except HelixSRError:
+            return False   # off only puts our own values back: a file without the section cannot hold them
+    else:
+        current = read_values(data, setting)
     records, key = _load(data_dir), _record_key(exe_folder, setting)
     if on:
         if _holds(current, setting, current):

@@ -252,7 +252,7 @@ def games_text(games, folders):
         if game.upscaler == 'fsr4':
             fields.append(f'upscaler: {fsr4.NAME} ({fsr4.describe(game)})')
         if game.exe_folder and framegen.ini_path(game.exe_folder).is_file():
-            fields.append(f'frame generation: {"on" if framegen.is_on(game.exe_folder) else "off"}')
+            fields.append(f'frame generation: {framegen.name_of(framegen.generator_of(game.exe_folder))}')
         lines.append(ANY_CONTROL.sub(' ', ' | '.join(fields)))
     return '\n'.join(lines) + '\n'
 

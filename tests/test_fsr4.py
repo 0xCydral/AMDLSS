@@ -206,6 +206,7 @@ def test_the_after_text_says_what_to_pick_in_the_game(tmp_path):
     source = fsr4.Source(tmp_path / 'x.dll', 'your DLL 4.1.1.9', '', '')
     drop = fsr4.after_text(game(name='Fable'), 'direct', source)
     assert 'FSR 4.1.1 is installed in Fable' in drop and 'choose AMD FSR' in drop and 'your DLL 4.1.1.9' in drop
-    opti = fsr4.after_text(game(name='Fable'), 'optiscaler', source, frame_gen=True)
+    opti = fsr4.after_text(game(name='Fable'), 'optiscaler', source, generator='amd')
     assert 'choose DLSS' in opti and 'FFX Upscaler' in opti and 'Insert' in opti and 'watermark' in opti
     assert games.FRAMEGEN_HINT in opti and games.FRAMEGEN_HINT not in fsr4.after_text(game(), 'optiscaler', source)
+    assert games.FRAMEGEN_DLSS4_HINT in fsr4.after_text(game(), 'optiscaler', source, generator='dlss4')

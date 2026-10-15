@@ -40,6 +40,9 @@ OWN = 'helixsr.dll'
 RECORD = 'amdlss-scaler.json'
 BACKUP = 'amdlss-scaler-backup'            # inside FOLDER: the game's files an install had to replace
 INI = 'OptiScaler.ini'
+# The download's own files: they stay in the download, never go into a game (Scaler's own installers exclude the
+# same list from HelixSR-Scaler-package.txt, which names them too).
+NOT_COPIED = ('setup_linux.sh', 'setup_windows.bat', 'README.txt', 'README-Linux.txt', LIST)
 LOG_FILES = ('OptiScaler.log', f'{FOLDER}/helixsr.log', f'{FOLDER}/helixsr.ini',
              f'{FOLDER}/helixsr_upscaler.dll', f'{FOLDER}/helixsr-fg/nvexec.log')
 FG_OFF = f'{FOLDER}/helixsr-fg.off'        # frame generation switched off: Scaler parks the folder here
@@ -86,9 +89,11 @@ def fetch(target, progress=None):
 
 
 def files(package):
-    """The files the package installs, as its own HelixSR-Scaler-package.txt names them."""
+    """The files the package installs, as its own HelixSR-Scaler-package.txt names them minus the download's own
+    files (see NOT_COPIED)."""
     text = (Path(package) / LIST).read_text(encoding='utf-8', errors='replace')
-    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('#')]
+    return [line.strip() for line in text.splitlines()
+            if line.strip() and not line.strip().startswith('#') and line.strip() not in NOT_COPIED]
 
 
 # --- the record in the game ---------------------------------------------------------------------------------------

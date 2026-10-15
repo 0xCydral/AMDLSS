@@ -433,19 +433,23 @@ def plan_text(game, route=None):
     return text + f'\n\nInstall into {game.name}?'
 
 
-FRAMEGEN_LABEL = ("Frame generation: use the game's DLSS Frame Generation option "
-                  "(runs AMD FSR frame generation)")
 FRAMEGEN_HINT = ("Turn on DLSS Frame Generation in the game; it runs AMD's frame generation. "
                  "Never pick the game's own FSR frame generation as well: two frame generators at once cause "
                  "ghosting and stutter. Keep NVIDIA Reflex off.")
+FRAMEGEN_DLSS4_HINT = ("Turn on DLSS Frame Generation in the game; it runs HelixSR's own frame generation "
+                       '(experimental: it makes one generated frame). Keep NVIDIA Reflex off.')
 
 
-def after_text(game, frame_gen=False):
-    """What to choose in the game's menu once HelixSR is installed, as HelixSR's setup reports it."""
+def after_text(game, frame_gen=''):
+    """What to choose in the game's menu once HelixSR is installed, as HelixSR's setup reports it. `frame_gen` is
+    the frame generation AMDLSS switched on (amdlss.framegen's AMD or DLSS4), or '' for none."""
+    from . import framegen   # lazy: framegen imports helixsr, which imports this module
     text = f"HelixSR is installed in {game.name}.\n\nIn the game's graphics settings choose {game.in_game()}."
     if game.active_route == 'optiscaler':
         text += " Press Insert in the game to open OptiScaler's menu."
-        if frame_gen:
+        if frame_gen == framegen.AMD:
             text += '\n\n' + FRAMEGEN_HINT
+        elif frame_gen == framegen.DLSS4:
+            text += '\n\n' + FRAMEGEN_DLSS4_HINT
     return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'
                    '\n\nThe Remove button puts the original files back.')

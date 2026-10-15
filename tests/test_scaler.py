@@ -108,8 +108,9 @@ def test_fetch_rejects_a_package_that_is_not_one(tmp_path, monkeypatch):
 def test_files_reads_the_packages_own_list(tmp_path):
     package = tmp_path / 'package'
     package.mkdir()
-    (package / LIST).write_text('# a comment\n\nOptiScaler.dll\nOptiScaler/streamline/sl.dlss_g.dll\n')
-    assert scaler.files(package) == ['OptiScaler.dll', 'OptiScaler/streamline/sl.dlss_g.dll']
+    (package / LIST).write_text('# a comment\n\nOptiScaler.dll\nsetup_linux.sh\n'
+                                'OptiScaler/streamline/sl.dlss_g.dll\n')
+    assert scaler.files(package) == ['OptiScaler.dll', 'OptiScaler/streamline/sl.dlss_g.dll']  # own files skipped
 
 
 def test_locate_finds_the_override_then_the_data_folder(tmp_path):
@@ -139,7 +140,7 @@ def test_install_places_the_listed_files_and_keeps_what_it_replaces(tmp_path, ga
     assert (game / 'Licenses' / 'OptiScaler_LICENSE.txt').is_file()
     assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (helix / helixsr.DLL).read_bytes()
     assert (game / 'HelixSR' / 'helixsr-fg' / 'nvngx_dlssg.dll').is_file()
-    for name in UNLISTED:   # never in the package list: never copied
+    for name in UNLISTED:   # the download's own files: named by the list, never copied into the game
         assert not (game / name).exists()
     moved = record_data['moved']
     assert [item['name'] for item in moved] == ['OptiScaler.ini']

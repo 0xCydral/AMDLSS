@@ -601,8 +601,9 @@ def plan_text(game, route, source, data_dir):
     return f'{text}\n\n{gamelist.WARNINGS}\n\nInstall into {game.name}?'
 
 
-def after_text(game, route, source, frame_gen=False):
-    """What to do in the game once FSR 4.1.1 is installed."""
+def after_text(game, route, source, generator=''):
+    """What to do in the game once FSR 4.1.1 is installed. `generator` is the frame generation AMDLSS switched on
+    (amdlss.framegen's AMD or DLSS4), or '' for none."""
     text = f"{NAME} is installed in {game.name} ({source.label}).\n\n"
     if route == 'direct':
         text += "In the game's graphics settings choose AMD FSR."
@@ -611,8 +612,10 @@ def after_text(game, route, source, frame_gen=False):
                  f"{NAME}. Press Insert in the game to open OptiScaler's menu, then Upscaling > Upscalers > FFX "
                  f"Upscaler, and pick {NAME}: the menu header names the version in use. To see it on screen, turn on "
                  "the FSR 4 watermark in that menu.")
-        if frame_gen:
+        if generator == framegen.AMD:
             text += '\n\n' + gamelist.FRAMEGEN_HINT
+        elif generator == framegen.DLSS4:
+            text += '\n\n' + gamelist.FRAMEGEN_DLSS4_HINT
     return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'
                    '\n\nThe Remove button puts the original files back.')
 

@@ -24,11 +24,12 @@ UNLISTED = ('README.txt', 'setup_windows.bat', 'setup_linux.sh')
 
 
 def make(root, listed=LISTED, unlisted=UNLISTED, ini=INI):
-    """The unpacked package under `root` (root/HelixSR-Scaler-1.0.3). Returns its folder."""
+    """The unpacked package under `root` (root/HelixSR-Scaler-1.0.3). Its list names the not-installed files too,
+    like the real HelixSR-Scaler-package.txt; scaler.files() leaves those out. Returns its folder."""
     folder = Path(root) / TOP
     for rel in listed + unlisted:
         path = folder / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(ini if rel == 'OptiScaler.ini' else f'STAND-IN {rel}'.encode())
-    (folder / LIST).write_text('\n'.join(listed) + '\n', encoding='utf-8')
+    (folder / LIST).write_text('\n'.join(listed + unlisted) + '\n', encoding='utf-8')
     return folder

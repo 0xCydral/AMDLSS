@@ -26,6 +26,8 @@ FOOTER = ('AMDLSS is unofficial and is not affiliated with HelixSR, NVIDIA or AM
           '(GPL-2.0-or-later); HelixSR is freeware under its own license.')
 MAX_LOG_LINES = 3000
 COVER_WORKERS = 4
+DLSS4_NOTE = ("HelixSR's own frame generation, experimental: it makes one generated frame. Turn on DLSS Frame "
+              'Generation in the game.')
 
 
 def card_of(game, steam_covers=None, update=False):
@@ -68,7 +70,7 @@ class App:
         self.busy = False
         self.option_key = None      # (folder, state) of the game the route and frame generation boxes show
         self.route_var = tk.StringVar(value='optiscaler')
-        self.fg_var = tk.BooleanVar(value=False)
+        self.fg_var = tk.StringVar(value='')   # the frame generation generator: '', 'amd' or 'dlss4'
         self.upscaler_var = tk.StringVar(value='helixsr')   # helixsr or fsr4: what Install puts in the selected game
         self.gpu_class, self.source, self.dll_hint = None, None, ''   # the card, its FSR 4 DLL (fsr4.Source), a hint
         self.show_all = tk.BooleanVar(value=False)   # also list the games that are not offered, greyed out
@@ -199,11 +201,11 @@ class App:
         self.fsr4_note = self.label(self.upscaler_row, '', 'small', MUTED, CARD, anchor='w', justify='left')
         self.fsr4_note.bind('<Configure>', lambda e: self.fsr4_note.configure(wraplength=max(e.width, 1)))
         self.fg_row = tk.Frame(options, bg=CARD)
-        self.fg_box = tk.Checkbutton(self.fg_row, text=gamelist.FRAMEGEN_LABEL, variable=self.fg_var, bg=CARD, fg=TEXT,
-                                     selectcolor=FIELD, activebackground=CARD, activeforeground=TEXT,
-                                     disabledforeground=DIM, font=self.look.fonts['small'], anchor='w', bd=0,
-                                     highlightthickness=0, command=self.update_buttons)
-        self.fg_box.pack(side='top', anchor='w')
+        self.label(self.fg_row, 'Frame generation', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
+        self.fg_buttons = segmented(tk, self.look, self.fg_row,
+                                    (('Off', ''), ('AMD FSR frame generation', framegen.AMD),
+                                     ('DLSS 4 frame generation (HelixSR), experimental', framegen.DLSS4)),
+                                    self.fg_var, self.update_buttons)
         self.fg_note = self.label(self.fg_row, '', 'small', CAUTION, CARD)
         actions = tk.Frame(detail, bg=CARD)
         actions.pack(fill='x', pady=(px(10), 0))
@@ -429,7 +431,8 @@ class App:
             if game:
                 self.upscaler_var.set(self.upscaler_default(game))
                 self.route_var.set(game.default_route if game.route_choice else game.route)
-                self.fg_var.set(game.installed and framegen.is_on(game.exe_folder) if game.exe_folder else False)
+                self.fg_var.set(framegen.generator_of(game.exe_folder)
+                                if game.installed and game.exe_folder else '')
         self.route_row.pack_forget()
         self.upscaler_row.pack_forget()
         self.fg_row.pack_forget()
@@ -439,16 +442,31 @@ class App:
             self.show_upscaler(game, idle)
         self.fg_note.pack_forget()
         offered = not game or game.streamline
+        dlss4_off = (helixsr.fg_reason(self.helixsr_folder) if self.helixsr_folder
+                     else 'DLSS 4 frame generation needs HelixSR built first.')
         if game and game.exe_folder and self.route_of(game) == 'optiscaler':
             self.fg_row.pack(fill='x', pady=(self.look.px(6), 0))
+            note = ''
             if not offered:   # nothing to replace: shown off and greyed, with why
-                turns_off = ' Update turns it off.' if game.installed and framegen.is_on(game.exe_folder) else ''
-                self.fg_var.set(False)
-                self.fg_note.configure(text=plain(game.framegen_reason + turns_off))
+                turns_off = (' Update turns it off.' if game.installed and framegen.generator_of(game.exe_folder)
+                             else '')
+                self.fg_var.set('')
+                note = game.framegen_reason + turns_off
+            elif dlss4_off and self.fg_var.get() == framegen.DLSS4:
+                self.fg_var.set(framegen.AMD)   # e.g. the built folder changed under us: fall back, never on
+                note = dlss4_off
+            elif dlss4_off:
+                note = dlss4_off                # the DLSS 4 choice is greyed: say why
+            elif self.fg_var.get() == framegen.DLSS4:
+                note = DLSS4_NOTE
+            if note:
+                self.fg_note.configure(text=plain(note))
                 self.fg_note.pack(side='top', anchor='w', padx=(self.look.px(24), 0))
         for widget in self.route_buttons:
             widget.configure(state='normal' if idle else 'disabled')
-        self.fg_box.configure(state='normal' if idle and offered else 'disabled')
+        for widget in self.fg_buttons:
+            widget.configure(state='normal' if idle and offered
+                             and (widget.value != framegen.DLSS4 or not dlss4_off) else 'disabled')
 
     def show_upscaler(self, game, idle):
         """The Upscaler row: HelixSR or FSR 4.1.1 (greyed with the reason when the game cannot use it), the line under
@@ -686,8 +704,9 @@ class App:
         extras, source = list(self.extras), self.source
         pick = self.route_var.get() if game.route_choice else None
         frame_gen = self.fg_var.get() if route == 'optiscaler' and game.exe_folder else None
-        if frame_gen is not None and not game.streamline:
-            frame_gen = False   # nothing to replace: never on, and an update turns an earlier "on" off
+        if frame_gen is not None and (not game.streamline or
+                                      (frame_gen == framegen.DLSS4 and helixsr.fg_reason(self.helixsr_folder))):
+            frame_gen = ''   # nothing to replace, or the built files are gone: never on; an update turns it off
         shown_route = f'{route}, {fsr4.NAME}' if want == 'fsr4' else route   # the report page reads this heading
         record = self.game_log(game, f'{"update" if game.installed else "install"} ({shown_route})')
         if game.folder:
@@ -702,8 +721,8 @@ class App:
                 record.fail(error)
                 raise
             if after.state == 'optiscaler' and after.exe_folder:
-                if frame_gen is not None and framegen.apply(after.exe_folder, frame_gen, self.data_dir):
-                    record(f'frame generation {"on" if frame_gen else "off"}: {framegen.ini_path(after.exe_folder)}')
+                if frame_gen is not None and framegen.apply_generator(after.exe_folder, frame_gen, self.data_dir):
+                    record(f'frame generation {framegen.name_of(frame_gen)}: {framegen.ini_path(after.exe_folder)}')
                 try:   # so a game that "looks unchanged" leaves OptiScaler.log behind; never a reason to fail
                     if framegen.apply(after.exe_folder, True, self.data_dir, framegen.LOGGING):
                         record(f'OptiScaler logging on: {framegen.ini_path(after.exe_folder)}')
@@ -711,7 +730,7 @@ class App:
                     record(f'OptiScaler logging was not turned on: {error}')
             return after
 
-        self.work(install, lambda after: self.installed(after, bool(frame_gen)))
+        self.work(install, lambda after: self.installed(after, frame_gen or ''))
 
     def download_progress_fsr4(self, done, total):
         """The downloads this path can make: AMD's FSR loader (26 KB) and the HelixSR Scaler package (about 127 MB)."""
@@ -726,7 +745,7 @@ class App:
         record.start(f'{action} {game.name}')
         return record
 
-    def installed(self, game, frame_gen=False):
+    def installed(self, game, frame_gen=''):
         self.set_busy(False)
         self.refresh_helixsr_status()
         if game.upscaler == 'fsr4':

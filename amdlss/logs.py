@@ -43,7 +43,7 @@ CRASHES = 'crashes.txt'
 PROTON_LOG = 'proton.log'
 # What is collected from every place HelixSR or OptiScaler may write to (matched on the lower-cased name).
 PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'optiscaler*.ini', 'fakenvapi*.ini',
-            'helixsr-install*.json', 'helixsr.ini', 'amdlss-fsr4*.json')
+            'helixsr-install*.json', 'helixsr.ini', 'amdlss-fsr4*.json', 'amdlss-scaler*.json')
 # DLLs whose owner is worth saying: the upscalers and the files OptiScaler and HelixSR take their names.
 UPSCALER_PREFIXES = ('amd_fidelityfx', 'helixsr', 'nvngx', 'libxess', 'ffx_', 'fakenvapi', 'optiscaler')
 OPTI_NAMES = ('dxgi.dll', 'winmm.dll', 'version.dll', 'dbghelp.dll', 'd3d12.dll', 'wininet.dll', 'winhttp.dll')
@@ -339,7 +339,7 @@ def files_text(game):
     if game.fsr4:
         lines.append(game.fsr4.card_text + ('' if game.fsr4.ok else f' ({game.fsr4.reason})'))
     if game.exe_folder:
-        lines.append(f'Frame generation on: {framegen.is_on(game.exe_folder)}; '
+        lines.append(f'Frame generation: {framegen.name_of(framegen.generator_of(game.exe_folder))}; '
                      f'OptiScaler logging on: {framegen.is_on(game.exe_folder, framegen.LOGGING)}')
     folders = places(game)
     backup = Path(game.exe_folder or game.folder) / 'HelixSR' / 'backup'

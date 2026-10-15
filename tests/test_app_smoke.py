@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The window builds and fills its list. The root window is withdrawn before anything is drawn, so nothing shows."""
 import json
+import os
 import shutil
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from amdlss import covers, gpu, helixsr, settings
+from amdlss import covers, framegen, gpu, helixsr, settings
 from fake_helixsr import make
 
 tk = pytest.importorskip('tkinter')
@@ -210,27 +212,63 @@ def test_the_route_choice_and_frame_generation_boxes_follow_the_game(window, mon
     app.tree.selection_set('0')  # One: both routes work, DLSS listed -> OptiScaler is offered first
     top.update()
     assert shown(app.route_row) and shown(app.fg_row) and app.route_var.get() == 'optiscaler'
-    assert not app.fg_var.get()  # default off
+    assert app.fg_var.get() == ''  # default: off
     app.route_var.set('direct')
     app.update_buttons()
     assert shown(app.route_row) and not shown(app.fg_row)  # the FSR drop-in has no frame generation box
-    app.tree.selection_set('1')  # Three: OptiScaler is its only route, so no choice but the box
+    app.tree.selection_set('1')  # Three: OptiScaler is its only route, so no choice but the control
     top.update()
     assert not shown(app.route_row) and shown(app.fg_row)
 
 
-def test_frame_generation_is_disabled_with_a_reason_where_the_game_has_no_streamline(window, monkeypatch):
+def test_the_frame_generation_control_follows_the_streamline_dlls_and_the_built_files(window, monkeypatch):
     top, app, _one = two_game_app(window, monkeypatch)
-    app.tree.selection_set('0')   # One ships Streamline DLSS-G in a subfolder
+    app.tree.selection_set('0')   # One ships Streamline DLSS-G in a subfolder; the stand-in build has no FG files
     top.update()
-    assert str(app.fg_box.cget('state')) == 'normal' and not shown(app.fg_note)
-    app.tree.selection_set('1')   # Three has none: the box is greyed, unchecked, with the reason beside it
+    assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal', 'disabled']   # DLSS 4 greyed, with why
+    assert shown(app.fg_note) and 'frame generation is not built' in app.fg_note.cget('text')
+    app.tree.selection_set('1')   # Three has none: the whole control is greyed, off, with the reason beside it
     top.update()
-    assert shown(app.fg_row) and str(app.fg_box.cget('state')) == 'disabled' and not app.fg_var.get()
+    assert shown(app.fg_row) and app.fg_var.get() == ''
+    assert [str(w.state) for w in app.fg_buttons] == ['disabled', 'disabled', 'disabled']
     assert shown(app.fg_note) and 'no DLSS Frame Generation for AMDLSS to replace' in app.fg_note.cget('text')
     app.tree.selection_set('0')
     top.update()
-    assert str(app.fg_box.cget('state')) == 'normal' and not shown(app.fg_note)
+    assert str(app.fg_buttons[0].state) == 'normal' and str(app.fg_buttons[2].state) == 'disabled'
+
+
+def test_dlss4_is_offered_when_the_build_has_the_fg_files_and_written_into_the_ini(window, monkeypatch):
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    helix = Path(os.environ['AMDLSS_HELIXSR'])
+    fg = helix / 'helixsr-fg'
+    fg.mkdir()
+    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
+        (fg / name).write_bytes(b'MZ')
+    (helix / 'helixsr_fg_setup.json').write_text('{}')
+    app.tree.selection_set('0')
+    top.update()
+    assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal', 'normal']   # all three offered now
+    app.fg_buttons[2].choose()   # DLSS 4 frame generation (HelixSR), experimental
+    top.update()
+    assert app.fg_var.get() == 'dlss4' and 'experimental' in app.fg_note.cget('text')
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert "HelixSR's own frame generation" in answers.told[0]
+    ini = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=on' in ini and b'FGInput=nvngxfg' in ini and b'FGNvngxReplacement=HelixSR' in ini
+    assert b'FGInput=dlssg' not in ini and b'FGOutput=fsrfg' not in ini   # nothing of AMD FSR's switch stays
+    assert 'FGNvngxReplacement' in (window[2] / 'data' / 'framegen.json').read_text()   # the record keeps the old values
+    app.tree.selection_set('0')
+    top.update()
+    assert app.fg_var.get() == 'dlss4'   # the file says so
+    app.fg_buttons[1].choose()           # back to AMD FSR frame generation
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    back = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FGInput=dlssg' in back and b'FGOutput=fsrfg' in back
+    assert b'FrameGeneration=auto' in back and b'FGNvngxReplacement=auto' in back   # HelixSR's own values back
+    assert "it runs AMD's frame generation" in answers.told[1]
 
 
 def test_install_never_writes_frame_generation_on_without_streamline(window, monkeypatch):
@@ -239,7 +277,7 @@ def test_install_never_writes_frame_generation_on_without_streamline(window, mon
     three = window[2] / 'Three'
     app.tree.selection_set('1')
     top.update()
-    app.fg_var.set(True)   # as if the box had been ticked on another game
+    app.fg_var.set(framegen.AMD)   # as if another game's generator had been picked
     app.install_game()
     wait(top, app, lambda: answers.told and not app.busy)
     ini = (three / 'OptiScaler.ini').read_bytes()
@@ -252,7 +290,7 @@ def test_update_turns_frame_generation_off_when_the_game_has_no_streamline(windo
     top, app, one = two_game_app(window, monkeypatch, answers)
     app.tree.selection_set('0')
     top.update()
-    app.fg_var.set(True)
+    app.fg_buttons[1].choose()   # AMD FSR frame generation
     app.install_game()
     wait(top, app, lambda: answers.told and not app.busy)
     assert b'FGInput=dlssg\r\n' in (one / 'OptiScaler.ini').read_bytes()
@@ -261,7 +299,7 @@ def test_update_turns_frame_generation_off_when_the_game_has_no_streamline(windo
     wait(top, app, lambda: not app.busy and not app.games[0].streamline)
     app.tree.selection_set('0')
     top.update()
-    assert not app.fg_var.get() and 'Update turns it off' in app.fg_note.cget('text')
+    assert app.fg_var.get() == '' and 'Update turns it off' in app.fg_note.cget('text')
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
     assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
@@ -280,9 +318,9 @@ def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch
     top, app, one = two_game_app(window, monkeypatch, answers)
     app.tree.selection_set('0')
     top.update()
-    app.fg_var.set(True)
+    app.fg_buttons[1].choose()   # AMD FSR frame generation
     app.install_game()
-    assert 'OptiScaler' in answers.asked[0][1]
+    assert 'HelixSR Scaler' in answers.asked[0][1]
     wait(top, app, lambda: answers.told and not app.busy)
     assert 'choose DLSS' in answers.told[0] and 'Turn on DLSS Frame Generation in the game' in answers.told[0]
     assert (one / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME'  # not the drop-in
@@ -293,21 +331,22 @@ def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch
     assert app.tree.item('0', 'values')[2] == 'OptiScaler'
     app.tree.selection_set('0')
     top.update()
-    assert not shown(app.route_row) and shown(app.fg_row) and app.fg_var.get()  # installed: shows what the file says
-    app.fg_var.set(False)  # Update with the box off puts the old values back
+    assert not shown(app.route_row) and shown(app.fg_row)
+    assert app.fg_var.get() == framegen.AMD   # installed: shows what the file says
+    app.fg_buttons[0].choose()                # Update with frame generation off puts the old values back
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
     assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
     app.tree.selection_set('0')
     top.update()
-    app.fg_var.set(True)
+    app.fg_buttons[1].choose()
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 3 and not app.busy)
     app.tree.selection_set('0')
     top.update()
     app.remove_game()
     wait(top, app, lambda: len(answers.told) == 4)
-    assert not (one / 'OptiScaler.ini').exists() and not (one / 'opti.marker').exists()
+    assert not (one / 'OptiScaler.ini').exists() and not (one / 'HelixSR').exists()
     assert not (window[2] / 'data' / 'framegen.json').exists()
 
 

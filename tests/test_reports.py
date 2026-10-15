@@ -168,7 +168,8 @@ def test_games_txt_has_one_line_per_game(fake):  # noqa: F811
     assert fields[0][:2] == ['Fake-Game/', 'Fake: Game?'] and 'install: OptiScaler as dxgi.dll' in fields[0]
     assert 'HelixSR: unknown' in fields[0] and 'frame generation: off' in fields[0]   # the fixture's ini has no FG values
     assert fields[1][:2] == ['Opti-Game/', 'Opti Game'] and fields[1][2].endswith('Opti Game')
-    assert fields[1][3:] == ['install: OptiScaler as dxgi.dll', 'HelixSR: 1.8.1', 'frame generation: on']
+    assert fields[1][3:] == ['install: OptiScaler as dxgi.dll', 'HelixSR: 1.8.1',
+                             'frame generation: AMD FSR']
     assert fields[2][3:] == ['install: none', 'HelixSR: unknown']   # no OptiScaler.ini: nothing said about frame generation
     assert USER not in '\n'.join(lines) and '<user>' in lines[1]
     assert reports.install_mode(add_game(fake, 'D', state='direct')) == 'drop-in DLL'

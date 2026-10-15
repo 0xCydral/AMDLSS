@@ -115,6 +115,18 @@ def check_framegen():
         (Path(folder) / 'OptiScaler.ini').write_bytes(ini)
         assert framegen.apply(folder, True, folder) and framegen.is_on(folder)
         assert framegen.apply(folder, False, folder) and (Path(folder) / 'OptiScaler.ini').read_bytes() == ini
+    sc = (b'[HelixSR]\r\nFrameGeneration=auto\r\n[FrameGen]\r\nFGInput=auto\r\nFGNvngxReplacement=auto\r\n'
+          b'FGOutput=auto\r\n')   # the sections HelixSR Scaler's ini has; the DLSS 4 switch needs them
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / 'OptiScaler.ini'
+        path.write_bytes(sc)
+        assert framegen.generator_of(folder) == ''
+        assert framegen.apply_generator(folder, framegen.DLSS4, folder)
+        assert framegen.generator_of(folder) == framegen.DLSS4 and b'FGNvngxReplacement=HelixSR' in path.read_bytes()
+        assert framegen.apply_generator(folder, framegen.AMD, folder)
+        assert framegen.generator_of(folder) == framegen.AMD and b'FGInput=dlssg' in path.read_bytes()
+        assert framegen.apply_generator(folder, '', folder) and path.read_bytes() == sc
+    assert framegen.name_of(framegen.DLSS4) == 'DLSS 4 (HelixSR)' and framegen.name_of('') == 'off'
 
 
 def check_logging_switch():
