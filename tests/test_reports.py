@@ -182,6 +182,8 @@ def test_games_txt_has_one_line_per_game(fake):  # noqa: F811
     assert fields[2][3:] == ['install: none', 'HelixSR: unknown']   # no OptiScaler.ini: nothing said about frame generation
     assert USER not in '\n'.join(lines) and '<user>' in lines[1]
     assert reports.install_mode(add_game(fake, 'D', state='direct')) == 'drop-in DLL'
+    assert reports.install_mode(add_game(fake, 'E', state='inject')) == \
+        'DLSS injected with Luma UE (OptiScaler as dxgi.dll)'
 
 
 def test_a_game_with_nothing_to_report_is_skipped(fake):  # noqa: F811

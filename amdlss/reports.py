@@ -239,6 +239,7 @@ def install_mode(game):
         dll = next((n for n in logs.OPTI_NAMES if (exe / n).is_file() and logs.owner_of(exe / n) == 'OptiScaler'), '')
         return f'OptiScaler as {dll}' if dll else 'OptiScaler'
     return {'direct': 'drop-in DLL', 'fsr4': 'drop-in DLL', 'dlss': 'DLSS loader (experimental)',
+            'inject': 'DLSS injected with Luma UE (OptiScaler as dxgi.dll)',
             'none': 'none'}.get(game.state, 'unknown')
 
 

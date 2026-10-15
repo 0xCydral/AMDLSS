@@ -207,6 +207,13 @@ def test_mark_inject_offers_the_route_and_refuses_anti_cheat(tmp_path, game):
     assert games.mark_inject(elsewhere).reason == games.NO_UPSCALER     # not an Unreal shipping build
 
 
+def test_an_injection_already_there_stays_offered_with_anti_cheat(tmp_path, game):
+    """The refusal is about installing. An install that is in the game must stay offered, so Remove stays reachable."""
+    guarded = games.Game(name='One', folder=str(game), exe_folder=str(game), reason=games.NO_UPSCALER,
+                         anticheat=['BattlEye'])
+    assert games.mark_inject(guarded, placed=True).reason == '' and guarded.route == games.INJECT
+
+
 # --- install_game and remove_game ----------------------------------------------------------------------------------
 
 def world(tmp_path, anticheat=None):

@@ -465,9 +465,11 @@ def inject_layout(game):
         return False
 
 
-def mark_inject(game):
+def mark_inject(game, placed=False):
     """An Unreal x64 shipping game that ships no upscaler of its own takes AMDLSS's DLSS injection: it is offered (no
-    reason) with the route 'inject'. Anti-cheat files refuse it, with a reason of its own, and everything else keeps
+    reason) with the route 'inject'. Anti-cheat files refuse it, with a reason of its own - but only while AMDLSS has
+    not injected into it yet (`placed` says it has, from amdlss.luma's record): an install that is there must stay
+    offered, so Remove stays reachable, the way a game HelixSR already runs in always passes. Everything else keeps
     the plain "no DLSS, FSR 3.1 or XeSS found" and stays hidden. Called once the anti-cheat scan has run
     (app.refresh_games): classify() cannot know its files yet."""
     if game.reason not in ('', NO_UPSCALER) or not (game.folder and game.exe_folder):
@@ -476,8 +478,8 @@ def mark_inject(game):
         return game                       # it has an upscaler of its own: the other routes are the ones for it
     if not inject_layout(game):
         return game
-    if game.anticheat:
-        if game.reason:                   # an install already in the game keeps its state, and its Remove
+    if game.anticheat and not placed:
+        if game.reason:
             game.reason = INJECT_ANTICHEAT
         return game
     game.reason, game.route = '', INJECT

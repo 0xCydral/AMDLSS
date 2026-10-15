@@ -633,8 +633,8 @@ class App:
                         game.anticheat = gamelist.scan_anticheat(game.folder)
                     if offered:
                         game.streamline = gamelist.scan_streamline(game.folder)
-                gamelist.mark_inject(game)   # the injection's offer; the anti-cheat scan above is what it needs
-                fsr4.mark(game)   # the state of whatever is installed, Scaler, FSR 4 and the injection included
+                gamelist.mark_inject(game, luma.installed(game.exe_folder))   # the injection's offer; the anti-cheat
+                fsr4.mark(game)   # scan above is what it needs. State of whatever is installed: Scaler, FSR 4, inject
                 luma.mark(game)
             self.judge(found)
             return found
