@@ -164,9 +164,9 @@ def find_source(gpu_class, helixsr_folder, data_dir):
         return Source(None, '', "HelixSR is not installed, so AMD's FSR 4 DLL is missing.", 'no DLL')
     path, _license = amd_dll(helixsr_folder, data_dir)
     if path is None:
-        return Source(None, '', "AMD's FSR 4 DLL is missing: the HelixSR folder has no amd-fsr (HelixSR 1.9.0 does "
-                                'not build one) and the HelixSR Scaler package, which carries it, is not '
-                                'downloaded yet: it comes with the OptiScaler route.', 'no DLL')
+        return Source(None, '', "AMD's FSR 4 DLL is missing: the HelixSR Scaler package that carries it (HelixSR "
+                                '1.9.0 does not build amd-fsr) is not downloaded: the download failed, or it '
+                                'never ran. Press Install HelixSR to get it.', 'no DLL')
     try:
         good = _amd_dll_ok(path)
     except OSError:

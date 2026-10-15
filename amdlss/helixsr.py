@@ -313,8 +313,10 @@ def consent_text(windows=None):
                  if host.is_windows(windows) else
                  "uses Python 3 with numpy (your system's when it has them; otherwise it downloads a portable "
                  "Python, about 70 MB, into ~/.local/share/HelixSR) and runs the shader compiler through Proton.")
-    return (f"AMDLSS downloads HelixSR {VERSION} (about 4 MB) from github.com/lonewolf0622/HelixSR, checks its "
-            f"SHA-256, and runs HelixSR's own setup.\n\n"
+    from . import scaler   # lazy: scaler imports this module
+    return (f"AMDLSS downloads HelixSR {VERSION} (about 4 MB) and HelixSR Scaler {scaler.VERSION} (about "
+            f"{scaler.ZIP_SIZE >> 20} MB, the package with OptiScaler and AMD's FSR 4 DLL) from "
+            f"github.com/lonewolf0622/HelixSR, checks their SHA-256, and runs HelixSR's own setup.\n\n"
             f"The setup downloads NVIDIA's DLSS 310.7.0 DLL from NVIDIA's GitHub. That DLL is NVIDIA's, under "
             f"NVIDIA's license:\n{NVIDIA_LICENSE_URL}\n\n"
             f"The setup builds HelixSR's network on this PC from it (about a minute) and deletes the DLL. It also "
@@ -536,13 +538,24 @@ def build(folder, on_line=None, windows=None, data_dir=None):
 
 def install_helixsr(data_dir, consented, progress=None, on_line=None, force=False):
     """Fetch (unless already extracted and `force` is off), then build. Runs nothing at all unless `consented`
-    (the user answered yes to consent_text()). Returns the HelixSR folder, or None when declined."""
+    (the user answered yes to consent_text()). Returns the HelixSR folder, or None when declined. The pinned
+    HelixSR Scaler package is fetched too (it is where AMD's FSR 4 DLL lives since 1.9.0), so FSR 4.1.1 works
+    right after this, without an OptiScaler install; a failed Scaler download does not undo the HelixSR install
+    (the FSR 4.1.1 message then says the download failed)."""
     if not consented:
         return None
     if force or not extracted(data_dir):
         fetch(data_dir, progress)
     folder = install_folder(data_dir)
     build(folder, on_line, data_dir=data_dir)
+    from . import scaler   # lazy: scaler imports this module
+    try:
+        if scaler.locate(data_dir) is None:
+            scaler.fetch(data_dir, progress)
+    except (HelixSRError, OSError) as error:
+        if on_line:
+            on_line(f'HelixSR Scaler was not downloaded ({error}): FSR 4.1.1 will not be available until it is',
+                    True)
     return folder
 
 

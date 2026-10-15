@@ -253,6 +253,28 @@ def test_install_game_fetches_when_the_package_is_missing(tmp_path, monkeypatch)
     assert seen == [str(data)]
 
 
+def test_install_helixsr_fetches_the_scaler_package_too(tmp_path, monkeypatch):
+    """AMD's FSR 4 DLL now lives in the Scaler package, so Install HelixSR fetches it as well and FSR 4.1.1 works
+    right after it, without an OptiScaler install. A failed Scaler download must not undo the HelixSR install."""
+    monkeypatch.setattr(helixsr, 'fetch', lambda target, progress=None: None)
+    monkeypatch.setattr(helixsr, 'build', lambda folder, on_line=None, data_dir=None: None)
+    monkeypatch.setattr(helixsr, 'install_folder', lambda target: tmp_path / 'HelixSR-1.9.0')
+    serve(monkeypatch, package_bytes())
+    data = tmp_path / 'data'
+    assert helixsr.install_helixsr(data, consented=True) == tmp_path / 'HelixSR-1.9.0'
+    assert scaler.extracted(data)   # the package is there: AMD's FSR 4 DLL has somewhere to come from
+
+    def no_network(target, progress=None):
+        raise helixsr.HelixSRError('no network')
+
+    monkeypatch.setattr(scaler, 'fetch', no_network)
+    lines = []
+    folder = helixsr.install_helixsr(tmp_path / 'other', consented=True,
+                                     on_line=lambda text, final=False: lines.append(text))
+    assert folder == tmp_path / 'HelixSR-1.9.0' and not scaler.extracted(tmp_path / 'other')
+    assert lines == ['HelixSR Scaler was not downloaded (no network): FSR 4.1.1 will not be available until it is']
+
+
 def test_a_failure_halfway_puts_every_file_back(tmp_path, monkeypatch):
     client, one, data = world(tmp_path)
     before = tree(one)
