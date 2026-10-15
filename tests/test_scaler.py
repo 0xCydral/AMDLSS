@@ -231,6 +231,20 @@ def test_install_game_then_update_then_remove(tmp_path):
     assert tree(one) == before and not scaler.installed(one)
 
 
+def test_a_finished_install_says_what_it_placed(tmp_path):
+    """A successful install must say so and name the files in the game log: the Black Myth: Wukong tester saw only
+    the frame generation lines and read the finished install as a failure."""
+    client, one, data = world(tmp_path)
+    lines = []
+    after = scaler.install_game(client, client.list_games()[0], [], data,
+                                on_line=lambda text, final=True: lines.append(text))
+    assert after.state == 'optiscaler'
+    assert lines[0] == f'HelixSR installed in One (OptiScaler, running as dxgi.dll) in {one}'
+    record = json.loads((one / scaler.FOLDER / scaler.RECORD).read_text(encoding='utf-8'))
+    assert lines[1].startswith(f"placed {len(record['created'])} files: ")
+    assert 'dxgi.dll' in lines[1] and 'HelixSR/helixsr.dll' in lines[1]   # what went next to the .exe
+
+
 def test_install_game_takes_an_amdlss_100_install_out_first(tmp_path):
     client, one, data = world(tmp_path)
     old_install(one)   # marker, dxgi.dll, OptiScaler.ini, HelixSR\helixsr.dll: AMDLSS 1.0.0's bridge

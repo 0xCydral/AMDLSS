@@ -232,6 +232,16 @@ def _say(on_line, notes):
             on_line(note, True)
 
 
+def install_notes(game, exe_folder, scaler_name, record):
+    """What a finished install says in the game log: the game, where its files went, and every file it placed there
+    (the record keeps them all; a long list is cut to the first ten). Without this the log of a successful install
+    says nothing, and a tester reads that as a failure."""
+    placed = [item['name'] for item in record.get('created', [])]
+    listed = ', '.join(placed[:10]) + (f' and {len(placed) - 10} more' if len(placed) > 10 else '')
+    return [f'HelixSR installed in {game.name} (OptiScaler, running as {scaler_name}) in {exe_folder}',
+            f'placed {len(placed)} files: {listed}']
+
+
 def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=None):
     """Installs (or updates) HelixSR Scaler in `game` (the OptiScaler route) and returns the game with its state
     set. The folder is safe, the game closed and still in HelixSR's list (helix.guard). AMDLSS 1.0.0's bridge
@@ -275,6 +285,7 @@ def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=N
                 if item['name'] == INI:
                     item['sha256'] = helixsr.sha256_of(ini)
     record_path(exe).write_text(json.dumps(record, indent=1), encoding='utf-8')
+    _say(on_line, install_notes(fresh, exe, name, record))
     fresh.state, fresh.route, fresh.upscaler = 'optiscaler', 'optiscaler', ''
     return fresh
 
