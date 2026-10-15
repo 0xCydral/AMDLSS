@@ -201,12 +201,15 @@ class App:
         self.fsr4_note = self.label(self.upscaler_row, '', 'small', MUTED, CARD, anchor='w', justify='left')
         self.fsr4_note.bind('<Configure>', lambda e: self.fsr4_note.configure(wraplength=max(e.width, 1)))
         self.fg_row = tk.Frame(options, bg=CARD)
-        self.label(self.fg_row, 'Frame generation', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
-        self.fg_buttons = segmented(tk, self.look, self.fg_row,
+        line = tk.Frame(self.fg_row, bg=CARD)
+        line.pack(fill='x')
+        self.label(line, 'Frame generation', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
+        self.fg_buttons = segmented(tk, self.look, line,
                                     (('Off', ''), ('AMD FSR frame generation', framegen.AMD),
                                      ('DLSS 4 frame generation (HelixSR), experimental', framegen.DLSS4)),
                                     self.fg_var, self.update_buttons)
-        self.fg_note = self.label(self.fg_row, '', 'small', CAUTION, CARD)
+        self.fg_note = self.label(self.fg_row, '', 'small', CAUTION, CARD, anchor='w', justify='left')
+        self.fg_note.bind('<Configure>', lambda e: self.fg_note.configure(wraplength=max(e.width, 1)))
         actions = tk.Frame(detail, bg=CARD)
         actions.pack(fill='x', pady=(px(10), 0))
         self.game_install = FlatButton(tk, self.look, actions, 'Install', self.install_game, 'primary', height=40,
@@ -461,7 +464,7 @@ class App:
                 note = DLSS4_NOTE
             if note:
                 self.fg_note.configure(text=plain(note))
-                self.fg_note.pack(side='top', anchor='w', padx=(self.look.px(24), 0))
+                self.fg_note.pack(fill='x', padx=(self.look.px(24), 0), pady=(self.look.px(4), 0))
         for widget in self.route_buttons:
             widget.configure(state='normal' if idle else 'disabled')
         for widget in self.fg_buttons:
