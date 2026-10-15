@@ -60,6 +60,20 @@ Decisions:
   reason. Without the FG files the shipped `FrameGeneration=auto` has nothing to run.
 - The window uses a three-way segmented control (Off | AMD FSR frame generation | DLSS 4 (HelixSR), experimental)
   in the existing style; reports and "Send logs" name the generator.
+- Follow-up fix 1 (observed after the T1/T2 commits): AMD's FSR 4 DLL now comes from the Scaler package, so
+  `install_helixsr` fetches that package too (fetched once; skipped when it is already there), and a failed Scaler
+  download logs "HelixSR Scaler was not downloaded (…): FSR 4.1.1 will not be available until it is" without
+  undoing the HelixSR install. Before this, FSR 4.1.1 on the drop-in route stayed unavailable until the user
+  happened to install into an OptiScaler-route game. `fsr4.find_source`'s missing-DLL reason and the consent text
+  say so.
+- Follow-up fix 2 (observed while re-reading the T2 code): DLSS 4 frame generation must never be left switched on
+  when the built FG files are gone. The app turns the choice off before installing when `helixsr.fg_reason` is
+  non-empty and either the picked generator is DLSS 4 or the ini itself still runs DLSS 4, and reports
+  "DLSS 4 frame generation is off: <why>" in the game log and the after-install text; the UI note adds
+  "Install or Update turns it off." After `apply_generator` (which restores the previous values through the
+  record), `framegen.clear_dlss4` puts any of AMDLSS's DLSS 4 values the file still holds with no record to
+  restore them through (a hand-edited ini, another tool) back to OptiScaler's own `auto`, so nothing is left
+  pointing at files that are not there. With a record, the byte-exact restore path is untouched.
 
 ## Tasks
 
@@ -99,6 +113,27 @@ Decisions:
 - Note for the record: an earlier `helixsr.install_helixsr` attempt over an existing 1.9.0.2 build deleted that
   folder's `helixsr_setup.json` before failing; the user's HelixSR folder was replaced with the freshly built
   1.9.0 from the real zip (same data dir), which is what Update HelixSR would have produced.
+- Follow-up fixes (this session, after the commits above): `fix(helixsr)` and `fix(framegen)` as under Decisions.
+  New tests: `tests/test_scaler.py::test_install_helixsr_fetches_the_scaler_package_too`,
+  `tests/test_framegen.py::test_dlss4_values_without_a_record_go_back_to_auto`,
+  `tests/test_app_smoke.py::test_dlss4_falls_back_and_restores_when_the_fg_files_are_gone` and
+  `::test_stale_dlss4_values_without_a_record_are_cleared_on_update`.
+- `pytest -q` (Xvfb :61, the whole suite): 484 passed, 9 skipped (the 9: 7 env-gated `test_real_helixsr.py` cases,
+  1 `test_pe.py`, 1 Windows-only `test_identify.py`). Earlier run in this session started with Xvfb killed by its
+  parent shell: the Tk tests skip, so 445/483-style counts without a display are not comparable; :61 is now started
+  with `setsid` and stayed up.
+- Real zips again after the fixes (`AMDLSS_TEST_HELIXSR=/tmp/helixsr-190-data/HelixSR-1.9.0`,
+  `AMDLSS_TEST_SCALER=/tmp/helixsr-scaler-pkg/HelixSR-Scaler-1.0.3`): `tests/test_real_helixsr.py tests/test_pe.py`
+  → 14 passed.
+- Build again after the fixes (`bash packaging/release.sh > /tmp/amdlss-rel/build.log 2>&1`): `pyinstaller-win
+  exit=0`, `build-linux exit=0`, `VERSION 1.1.0` + `modules True` from both binaries, `exe selftest exit=0`,
+  `linux selftest exit=0` (both report "selftest passed", 20 checks each). The Wine steps ran because
+  release.sh mounted `/media/cydral/Data`; the missing Proton `wine` binary did not bite this time.
+  - AMDLSS.exe `381aa2f5eea9b53d0ac457a4e4d37d5fd67a92afabef95584af6b17fe7af5194`
+  - AMDLSS-linux-x86_64 `4495bf6f5cb4fefd5e580f564ff8f68b350a9e23ad903b8af0d6f73fddf7f7af`
+- Screenshots re-taken after the fixes (Xvfb :75, three screens; `/tmp/amdlss-shot.py` builds the app over the
+  tests' fakes with the DLSS 4 build present and picks the DLSS 4 choice): `/tmp/amdlss-rel/shots/1366x768.png`,
+  `1920x1080.png`, `2560x1440.png` (12:40-12:41).
 
 
 ## Checks
