@@ -34,10 +34,10 @@ def test_setup_command_line_and_how_it_is_started(tmp_path, monkeypatch):
 
     monkeypatch.setattr(helixsr.subprocess, 'Popen', fake_popen)
     monkeypatch.setattr(helixsr, 'find_python', lambda windows=None: None)  # the probe would run the fake Popen
-    (tmp_path / helixsr.BUILT).write_text('{}')
-    (tmp_path / helixsr.DLL).write_bytes(b'x')
-    with pytest.raises(helixsr.HelixSRError):  # exit 0, but the stale BUILT file was deleted and not rewritten
+    (tmp_path / helixsr.BUILT).write_text('{}')  # a record of an earlier build, its DLL gone: it must not pass
+    with pytest.raises(helixsr.HelixSRError):    # exit 0, but the stale BUILT file was deleted and not rewritten
         helixsr.build(tmp_path)
+    assert not (tmp_path / helixsr.BUILT).exists()
     assert seen['stdin'] == helixsr.subprocess.DEVNULL
     assert seen['creationflags'] == helixsr.NO_WINDOW
     assert seen['cwd'] == str(tmp_path) and seen['command'] == helixsr.setup_command()  # the host's own setup
@@ -54,6 +54,54 @@ def test_a_failed_setup_reports_its_last_line(tmp_path, monkeypatch):
     monkeypatch.setattr(helixsr, 'run_streaming', lambda *a, **k: (1, ['one', 'checksum mismatch']))
     with pytest.raises(helixsr.HelixSRError, match='exit 1.*checksum mismatch'):
         helixsr.build(tmp_path)
+
+
+@pytest.mark.parametrize('windows', [True, False])
+def test_a_run_with_the_network_built_keeps_the_record_and_runs_helixsrs_own_setup(tmp_path, monkeypatch, windows):
+    """HelixSR's own setup builds only what a folder is missing: with the network built it builds frame generation
+    alone (-Yes/--yes are the whole command line; the script passes --fg-only on itself) and does not write
+    helixsr_setup.json again. build() must keep that record (deleting it would report a failure after a good FG
+    run), on Windows and Linux alike, and say in the log that frame generation is still missing."""
+    commands = []
+
+    def run(command, cwd, on_line=None, timeout=0, env=None):
+        commands.append([str(part) for part in command])
+        return 0, []
+
+    monkeypatch.setattr(helixsr, 'run_streaming', run)
+    (tmp_path / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+    (tmp_path / helixsr.BUILT).write_text('{}')   # the network was built here
+    lines = []
+    helixsr.build(tmp_path, on_line=lambda text, final=True: lines.append(text), windows=windows)
+    assert (tmp_path / helixsr.BUILT).is_file()   # the FG-only run does not rewrite it: it must survive
+    assert commands == [helixsr.setup_command(windows=windows)]
+    assert any('frame generation is not built' in line for line in lines)   # one clear line, with the reason
+
+
+@pytest.mark.parametrize('windows', [True, False])
+def test_install_with_the_network_built_does_not_fetch_again(tmp_path, monkeypatch, windows):
+    """A built folder whose frame generation is missing (the button's Update): the install runs the setup in place,
+    which builds only the FG, and never downloads the zip again. Windows and Linux alike."""
+    data = tmp_path / 'data'
+    folder = helixsr.install_folder(data)
+    (folder / 'setup').mkdir(parents=True)
+    (folder / helixsr.SETUP).write_bytes(b'')
+    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+    (folder / helixsr.BUILT).write_text('{}')
+    commands = []
+
+    def run(command, cwd, on_line=None, timeout=0, env=None):
+        commands.append([str(part) for part in command])
+        return 0, []
+
+    monkeypatch.setattr(helixsr, 'run_streaming', run)
+    monkeypatch.setattr(helixsr, 'fetch', lambda *a, **k: pytest.fail('a built folder must not be downloaded again'))
+    if windows:
+        monkeypatch.setattr(helixsr.host, 'is_windows', lambda *a, **k: True)
+    from amdlss import scaler
+    monkeypatch.setattr(scaler, 'fetch', lambda target, progress=None: None)
+    assert helixsr.install_helixsr(data, consented=True) == folder
+    assert commands == [helixsr.setup_command(windows=windows)]
 
 
 def test_built_detection(tmp_path):

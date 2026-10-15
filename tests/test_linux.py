@@ -178,7 +178,8 @@ def test_without_any_wine_the_failure_says_what_to_install(tmp_path, monkeypatch
     monkeypatch.setattr(helixsr, 'find_python', lambda windows=None: Path('python3'))
     with pytest.raises(helixsr.HelixSRError, match=r'exit 1.*no Proton or Wine found.*any Steam library'):
         helixsr.build(tmp_path, windows=False, data_dir=tmp_path / 'data')
-    assert not (tmp_path / 'data').exists()
+    # no wine shim was written; the data dir may hold the setup's own log (SETUP_LOG keeps the failure readable)
+    assert not (tmp_path / 'data' / 'bin').exists()
 
 
 # --- fonts and glyphs -------------------------------------------------------------------------------------------

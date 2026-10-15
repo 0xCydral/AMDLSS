@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from amdlss import games as gamelist, logs, reports
+from amdlss import games as gamelist, helixsr, logs, reports
 from amdlss.reports import ReportClient, ReportError
 from test_logs import INFO, USER, fake  # noqa: F401  (the fixture: a game folder with logs under a fake profile)
 
@@ -146,6 +146,15 @@ def test_the_report_holds_the_files_of_every_game_under_its_folder_and_the_syste
     assert 'GPU 1: AMD Radeon RX 7800 XT' in report['files']['system.txt']
     assert USER not in reports.body_of(report).decode()
     assert len(reports.body_of(report)) < reports.MAX_BODY
+
+
+def test_the_setup_output_rides_in_the_report_too(fake):  # noqa: F811
+    """The HelixSR setup's own output (what the build and the frame generation lines said) is in the data folder;
+    a report must carry it, so a frame generation failure is diagnosable without the window's log box."""
+    log = helixsr.SetupLog(fake[2])
+    log('[helixsr-fg] NGX core download failed (timeout)')
+    report = build(fake)
+    assert 'NGX core download failed' in report['files']['helixsr-setup.log']
 
 
 def test_one_game_names_the_report_after_itself(fake):  # noqa: F811

@@ -162,6 +162,21 @@ def test_the_install_log_of_the_game_is_included_and_listed(fake):
     assert 'progress' not in text
 
 
+def test_the_setup_output_is_kept_and_rides_in_the_zip_and_the_list(fake):
+    """What HelixSR's own setup printed (the build and frame generation lines) is kept in the data folder, so a
+    frame generation failure is readable after the window's log box is gone -- and it is collected."""
+    game, _setup, data, _out = fake
+    assert helixsr.SETUP_LOG not in logs.contents(game, data)
+    log = helixsr.SetupLog(data)
+    log.start("HelixSR's setup: helixsr-setup.sh --yes (in /tmp/HelixSR-1.9.0)")
+    log('[helixsr-setup] downloading dxc')
+    log('[helixsr-fg] 50% translate', final=False)   # a progress update is not kept
+    log("[helixsr-fg] failed: dxc not found")
+    assert helixsr.SETUP_LOG in logs.contents(game, data) and helixsr.SETUP_LOG in logs.confirm_text(game, data)
+    text = entries(collect(fake))[helixsr.SETUP_LOG]
+    assert 'helixsr-setup.sh --yes' in text and 'failed: dxc not found' in text and '50%' not in text
+
+
 def at(hour, minute=0):
     return time.struct_time((2026, 10, 13, hour, minute, 0, 0, 0, -1))
 

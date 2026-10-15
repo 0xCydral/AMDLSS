@@ -22,12 +22,14 @@ The pinned files are HelixSR 1.9.0. Nothing is bundled or redistributed: the zip
 """
 import hashlib
 import http.client
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -49,6 +51,8 @@ FG_FOLDER = 'helixsr-fg'            # frame generation's files (nvexec64, nvngx_
 FG_DLLS = ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll')  # what DLSS 4 frame generation needs
 MARKER_FILE = 'helixsr-install.json'   # HelixSR's install record beside a drop-in DLL
 FSR4_MARKER = 'amdlss-fsr4.json'       # AMDLSS's own record of an FSR 4.1.1 drop-in (amdlss.fsr4)
+PACKAGE = 'helixsr-package.json'       # beside the extracted folder: which pinned zip its files came from
+SETUP_LOG = 'helixsr-setup.log'        # the setup's output, kept for Collect logs and Send logs
 SETUP_PS1, SETUP_SH = 'helixsr-setup.ps1', 'helixsr-setup.sh'
 SETUP = SETUP_PS1 if host.WINDOWS else SETUP_SH
 INSTALLER = Path('setup') / 'helixsr_install.py'
@@ -238,12 +242,12 @@ def fg_reason(folder):
     folder = Path(folder)
     fg = fg_folder(folder)
     if not (folder / FG_SETUP).is_file() or fg is None:
-        return ("HelixSR's frame generation is not built: press Install HelixSR to update it (its setup gets the "
+        return ("HelixSR's frame generation is not built: press Update HelixSR to build it (its setup gets the "
                 "files from NVIDIA once, about 400 MB).")
     missing = [name for name in FG_DLLS if not (fg / name).is_file()]
     if missing:
-        return (f"HelixSR's frame generation is incomplete ({missing[0]} is missing): press Install HelixSR to "
-                f"update it.")
+        return (f"HelixSR's frame generation is incomplete ({missing[0]} is missing): press Update HelixSR to "
+                f"build it.")
     return ''
 
 
@@ -414,6 +418,34 @@ def extract(part, target):
         raise HelixSRError(f'the zip does not hold {TOP}/{SETUP} and {TOP}/{DLL}')
 
 
+def write_package_record(target, folder=None):
+    """Remembers which pinned zip was extracted into `target`: `package_current` trusts a folder only with this
+    record. Written the moment the verified zip is on disk, so an earlier AMDLSS's folder (or another zip's) never
+    passes for the current package."""
+    folder = Path(folder) if folder else install_folder(target)
+    (Path(target) / PACKAGE).write_text(json.dumps(
+        {'version': VERSION, 'zip_name': ZIP_NAME, 'zip_sha256': ZIP_SHA256, 'folder': folder.name},
+        indent=1) + '\n', encoding='utf-8')
+
+
+def package_current(data_dir):
+    """True when the pinned zip's files were extracted into this data dir (see write_package_record) and they went
+    to the pinned folder. A folder without that record, or one from another zip, counts as outdated."""
+    try:
+        record = json.loads((Path(data_dir) / PACKAGE).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and record.get('zip_sha256') == ZIP_SHA256 and record.get('folder') == TOP
+
+
+def forget_build(folder):
+    """Drops the build records of the files a fresh extraction just replaced (the network's and frame generation's),
+    so a failure of the coming build cannot let the replaced build pass for the new files. build() writes them
+    again; the extracted package carries neither."""
+    for name in (BUILT, FG_SETUP):
+        (Path(folder) / name).unlink(missing_ok=True)
+
+
 def fetch(target, progress=None):
     """Downloads, verifies and extracts the pinned release into `target`; returns the HelixSR folder.
     `progress(done, total)` is optional. Raises HelixSRError (OSError when a file cannot be written)."""
@@ -426,12 +458,15 @@ def fetch(target, progress=None):
         part.unlink(missing_ok=True)
         raise HelixSRError('the downloaded zip does not match the pinned SHA-256; it was deleted')
     extract(part, target)
+    folder = install_folder(target)
+    forget_build(folder)             # the replaced folder's build records must not pass for these files
+    write_package_record(target, folder)
     part.unlink(missing_ok=True)
     try:
         work.rmdir()
     except OSError:
         pass
-    return install_folder(target)
+    return folder
 
 
 # --- running HelixSR's own scripts --------------------------------------------------------------------------------
@@ -515,11 +550,45 @@ NO_WINE_HINT = ('AMDLSS found no Proton in any Steam library and no wine on PATH
                 'library) or wine, then try again.')
 
 
+class SetupLog:
+    """Appends HelixSR's setup output to <data dir>/SETUP_LOG and passes every line on to `sink(text, final)`
+    (the window). Call it like an on_line function. The build's output is otherwise lost with the window, which
+    is what makes a frame generation failure undiagnosable after the fact; Collect logs and Send logs pick the
+    file up. A log that cannot be written never stops a build."""
+
+    def __init__(self, data_dir, sink=None):
+        self.path = Path(data_dir) / SETUP_LOG if data_dir else None
+        self.sink = sink
+
+    def write(self, text):
+        if not self.path:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, 'a', encoding='utf-8') as stream:
+                stream.write(text + '\n')
+        except OSError:
+            pass
+
+    def start(self, heading):
+        self.write(f'=== {time.strftime("%Y-%m-%d %H:%M:%S")} {heading} ===')
+
+    def __call__(self, text, final=True):
+        if final:
+            self.write(text)
+        if self.sink:
+            self.sink(text, final)
+
+
 def build(folder, on_line=None, windows=None, data_dir=None):
     """Runs the setup in `folder`. Raises HelixSRError unless it ends with the network built. On Linux `data_dir`
-    is where a wine wrapper may be written (see with_wine)."""
+    is where a wine wrapper may be written (see with_wine); it also gets the setup's output as SETUP_LOG. The
+    setup itself builds only what `folder` is missing (HelixSR's own scripts do): with the network built and
+    frame generation missing, this run builds frame generation alone."""
     folder = Path(folder)
-    (folder / BUILT).unlink(missing_ok=True)  # a file of an earlier build must not pass for this one
+    log = SetupLog(data_dir, on_line)
+    if not built(folder):
+        (folder / BUILT).unlink(missing_ok=True)  # a file of an earlier build must not pass for this one
     env, wine = child_env(), True
     if not host.is_windows(windows):
         if find_python(False) is None:
@@ -528,12 +597,17 @@ def build(folder, on_line=None, windows=None, data_dir=None):
             env['HELIXSR_FORCE_PORTABLE'] = '1'
         if data_dir is not None:
             env, wine = with_wine(env, data_dir)
-    code, tail = run_streaming(setup_command(windows), folder, on_line, BUILD_TIMEOUT, env)
+    command = setup_command(windows)
+    log.start(f"HelixSR's setup: {' '.join(command)} (in {folder})")
+    code, tail = run_streaming(command, folder, log, BUILD_TIMEOUT, env)
     if code != 0:
         hint = f' {NO_WINE_HINT}' if not wine and any('Proton or Wine' in line for line in tail) else ''
         raise HelixSRError(f'HelixSR setup failed (exit {code}): {tail[-1] if tail else "no output"}{hint}')
     if not built(folder):
         raise HelixSRError(f'HelixSR setup finished but {BUILT} is missing in {folder}')
+    missing = fg_reason(folder)
+    if missing:
+        log(missing, True)   # the window and SETUP_LOG say that this run left frame generation missing
 
 
 def install_helixsr(data_dir, consented, progress=None, on_line=None, force=False):

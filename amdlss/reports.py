@@ -38,7 +38,7 @@ MAX_LIST = 1 << 20        # the report list: one short entry per stored report
 EXTENSIONS = ('log', 'ini', 'json', 'txt')
 KEYS = {'app', 'version', 'game', 'files'}
 # kept first when there are more files than MAX_FILES
-OWN_FILES = ('files.txt', logs.SESSION_LOG, logs.CRASHES, logs.crashes.UNREAL_LOG)
+OWN_FILES = ('files.txt', logs.SESSION_LOG, logs.CRASHES, logs.crashes.UNREAL_LOG, helixsr.SETUP_LOG)
 CODE = re.compile(r'[0-9A-HJKMNP-TV-Z]{8}')
 # A name part is letters, digits, "_", "." and "-", and it neither starts nor ends with ".".
 SEGMENT = re.compile(r'[A-Za-z0-9_-](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?')
@@ -266,7 +266,8 @@ def build_payload(games, helixsr_folder, data_dir, info=None, windows=None, cras
         raise ReportError('no game has anything to report yet')
     redact, folders = logs.redactor(), folder_names(games)
     held = [logs.system_evidence(helixsr_folder, redact, info),
-            ('games.txt', redact(games_text(games, folders)).encode('utf-8'))]
+            ('games.txt', redact(games_text(games, folders)).encode('utf-8'))] \
+        + logs.setup_log_evidence(data_dir, redact)
     on_windows = logs.host.is_windows(windows)
     shared = logs.crashes.query_events(crash_run) if on_windows else None
     processes = helixsr.process_paths(crash_run) if on_windows else None

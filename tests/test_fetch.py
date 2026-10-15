@@ -2,6 +2,7 @@
 """Download, verification, extraction and consent: nothing here touches the network or HelixSR."""
 import hashlib
 import io
+import json
 import zipfile
 
 import pytest
@@ -32,6 +33,41 @@ def test_good_zip_is_extracted(tmp_path, monkeypatch):
     folder = helixsr.fetch(tmp_path)
     assert folder == tmp_path / helixsr.TOP and helixsr.extracted(tmp_path)
     assert not (tmp_path / '.download').exists()
+
+
+def test_fetch_records_which_pinned_zip_the_folder_came_from(tmp_path, monkeypatch):
+    """A folder without that record (an older AMDLSS built it, or another zip) must count as outdated: the app
+    then offers Update instead of trusting the files."""
+    assert not helixsr.package_current(tmp_path)
+    serve(monkeypatch, GOOD)
+    helixsr.fetch(tmp_path)
+    assert helixsr.package_current(tmp_path)
+    record = json.loads((tmp_path / helixsr.PACKAGE).read_text(encoding='utf-8'))
+    assert record['zip_sha256'] == helixsr.ZIP_SHA256 and record['folder'] == helixsr.TOP
+    assert record['zip_name'] == helixsr.ZIP_NAME and record['version'] == helixsr.VERSION
+
+
+def test_a_record_of_another_zip_or_folder_is_not_current(tmp_path):
+    (tmp_path / helixsr.PACKAGE).write_text('{}', encoding='utf-8')
+    assert not helixsr.package_current(tmp_path)                       # junk
+    (tmp_path / helixsr.PACKAGE).write_text(json.dumps({'zip_sha256': '0' * 64, 'folder': helixsr.TOP}))
+    assert not helixsr.package_current(tmp_path)                       # another zip
+    (tmp_path / helixsr.PACKAGE).write_text(json.dumps({'zip_sha256': helixsr.ZIP_SHA256,
+                                                        'folder': 'HelixSR-1.8.1'}))
+    assert not helixsr.package_current(tmp_path)                       # another folder
+
+
+def test_fetch_drops_the_build_records_of_the_files_it_replaces(tmp_path, monkeypatch):
+    """Update over an earlier build: the extracted package carries no build records, so the replaced build's
+    records must go with the files they described. Else a failed build could pass for the new files."""
+    folder = tmp_path / helixsr.TOP
+    folder.mkdir(parents=True)
+    (folder / helixsr.BUILT).write_text('{}', encoding='utf-8')
+    (folder / helixsr.FG_SETUP).write_text('{}', encoding='utf-8')
+    serve(monkeypatch, GOOD)
+    helixsr.fetch(tmp_path)
+    assert not (folder / helixsr.BUILT).exists() and not (folder / helixsr.FG_SETUP).exists()
+    assert (folder / helixsr.DLL).is_file() and helixsr.package_current(tmp_path)
 
 
 def test_hash_mismatch_is_rejected(tmp_path, monkeypatch):

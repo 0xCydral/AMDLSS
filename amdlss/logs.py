@@ -151,6 +151,19 @@ def session_log_path(data_dir, folder):
     return Path(data_dir) / 'logs' / f'{name}-{hashlib.sha1(key.encode()).hexdigest()[:8]}.log'
 
 
+def setup_log_path(data_dir):
+    """HelixSR's own setup output as the data folder keeps it (amdlss.helixsr.SetupLog): every run's lines, so a
+    frame generation failure can be read back after the window's log box is gone."""
+    return Path(data_dir) / helixsr.SETUP_LOG
+
+
+def setup_log_evidence(data_dir, redact):
+    """[(name, bytes)] of the setup output for a zip or a report; [] when no setup ran yet or it wrote nothing."""
+    path = setup_log_path(data_dir)
+    data = read_capped(path) if path.is_file() else None
+    return [(helixsr.SETUP_LOG, redact_bytes(data, redact))] if data else []
+
+
 class GameLog:
     """Appends the output of an install or remove to the game's own log in AMDLSS's data folder, and passes each line
     on to `sink(text, final)` (the window). Call it like an on_line function."""
@@ -441,12 +454,13 @@ def read_capped(path, limit=None):
 
 def contents(game, data_dir, windows=None):
     """The names that go into the zip: the files found, the AMDLSS writes, the crash record, the Proton log
-    when there is one, and the kept history."""
+    when there is one, the kept history, and HelixSR's setup output when one was run."""
     names = [name for name, _path in gather(game)]
     log = session_log_path(data_dir, game.folder) if game.folder else None
     proton = [] if host.is_windows(windows) or not crashes.proton_log_path(game) else [PROTON_LOG]
     unreal = [crashes.UNREAL_LOG] if crashes.unreal_log_path(game, windows) else []
     return (names + ['files.txt', CRASHES] + proton + unreal + ['system.txt']
+            + ([helixsr.SETUP_LOG] if setup_log_path(data_dir).is_file() else [])
             + ([SESSION_LOG] if log and log.is_file() else []) + history_names(game, data_dir))
 
 
@@ -552,8 +566,9 @@ def system_evidence(helixsr_folder, redact, info=None):
 def evidence(game, helixsr_folder, data_dir, info=None, windows=None, crash_run=None):
     """[(name, bytes)] of everything Collect logs puts in the zip for `game`."""
     redact = redactor()
-    return game_evidence(game, data_dir, redact, windows, crash_run) + \
-        [system_evidence(helixsr_folder, redact, info)]
+    return (game_evidence(game, data_dir, redact, windows, crash_run)
+            + setup_log_evidence(data_dir, redact)
+            + [system_evidence(helixsr_folder, redact, info)])
 
 
 def collect(game, helixsr_folder, data_dir, out_dir=None, info=None, now=None, windows=None, crash_run=None):
