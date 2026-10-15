@@ -9,6 +9,9 @@ HelixSR 1.9.0's own setup installs only the FSR drop-in and its installer report
     names (dxgi.dll first);
   - HelixSR's built amd_fidelityfx_dx12.dll as HelixSR\\helixsr.dll, and its helixsr-fg\\*.dll as
     HelixSR\\helixsr-fg\\*.dll when the setup built frame generation;
+  - every other OptiScaler copy next to the .exe (an older install, whatever it is called; its version resource or
+    its bytes say so) is moved into HelixSR\\amdlss-scaler-backup too: the game loads whichever proxy it finds
+    first, so a leftover would shadow ours;
   - every game file that had to give way goes to HelixSR\\amdlss-scaler-backup and comes back on Remove.
 
 The record beside it (HelixSR\\amdlss-scaler.json) lists what was moved and created with SHA-256s, so Remove puts
@@ -23,7 +26,7 @@ import shutil
 from pathlib import Path
 
 from . import VERSION as APP_VERSION
-from . import helixsr
+from . import helixsr, pe
 from .helixsr import HelixSRError
 
 VERSION = '1.0.3'
@@ -161,6 +164,95 @@ def _name_for(exe_folder):
     return NAMES[0]
 
 
+# Another OptiScaler copy under any name next to the game's .exe (an older install, or a pair another tool left
+# behind) hooks the same calls ours does: the game loads whichever proxy it finds first, so ours can be shadowed and
+# the game can hang inside the mix. The copy is moved aside and recorded, never deleted.
+OPTISCALER_MARKER = b'OptiScaler'   # the name every OptiScaler build carries in its bytes, spoofed resource or not
+MARKER_MAX = 64 << 20               # bytes of a file read for it (the name sits near the version resource's end)
+
+
+def _mentions_marker(path):
+    """True when the file's bytes carry OptiScaler's name (a copy that spoofs its own version resource shows only
+    this); at most MARKER_MAX bytes are read, in blocks."""
+    try:
+        with open(path, 'rb') as stream:
+            read, tail = 0, b''
+            while read < MARKER_MAX:
+                block = stream.read(8 << 20)
+                if not block:
+                    return False
+                read += len(block)
+                if OPTISCALER_MARKER in tail + block:
+                    return True
+                tail = block[-(len(OPTISCALER_MARKER) - 1):]
+    except OSError:
+        return False
+    return False
+
+
+def is_optiscaler(path):
+    """True when the DLL is an OptiScaler copy whatever it is called: its version resource names OptiScaler, or its
+    bytes carry the name (OptiScaler's own proxies - d3d12.dll, dxgi.dll - spoof their version resource, so the
+    system DLL's strings are in it). Any other mod's DLL is not an OptiScaler copy."""
+    return (any('optiscaler' in word.lower() for word in pe.version_words(path))
+            or _mentions_marker(path))
+
+
+def optiscaler_copies(exe_folder, previous=None):
+    """Sorted names of the DLLs next to the .exe that are OptiScaler copies other than ours; ours is the file the
+    previous record names and hashes (an update's own file must not be taken for a leftover)."""
+    ours = {item.get('name'): item.get('sha256') for item in (previous or {}).get('created', [])}
+    found = []
+    try:
+        entries = sorted(Path(exe_folder).iterdir(), key=lambda path: path.name.lower())
+    except OSError:
+        return found
+    for path in entries:
+        if not path.is_file() or path.suffix.lower() != '.dll':
+            continue
+        sha = ours.get(path.name)
+        if sha:
+            try:
+                if helixsr.sha256_of(path) == sha:
+                    continue   # AMDLSS's own file, as the record left it
+            except OSError:
+                pass
+        if is_optiscaler(path):
+            found.append(path.name)
+    return found
+
+
+def _move_aside(exe_folder, record, names):
+    """Moves other OptiScaler copies next to the .exe into the backup and records them like every other file an
+    install has to replace, so the game loads ours and Remove puts them back exactly. Returns the notes. A file that
+    cannot be moved (the game is running) or that does not hash the same after the move raises HelixSRError naming
+    it; nothing of it is ever deleted."""
+    exe_folder, backup = Path(exe_folder), Path(exe_folder) / FOLDER / BACKUP
+    notes = []
+    for name in names:
+        target, kept = exe_folder / name, backup / name
+        try:
+            before = helixsr.sha256_of(target)
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, kept)
+            after = helixsr.sha256_of(kept)
+        except OSError as error:
+            raise HelixSRError(f'{name} is another OptiScaler copy that would shadow HelixSR, and AMDLSS could not '
+                               f'move it aside ({error}). Close the game, remove that older mod (its file is '
+                               f'{name}), then try again; nothing was changed.')
+        if after != before:
+            try:
+                os.replace(kept, target)
+            except OSError:
+                pass
+            raise HelixSRError(f'{name} did not hash the same after moving it aside (it is at {kept}). Remove that '
+                               f'older OptiScaler copy from the game folder, then try again.')
+        record['moved'].append({'name': name, 'to': f'{FOLDER}/{BACKUP}/{name}', 'sha256': after})
+        notes.append(f'moved {name} aside: another OptiScaler copy (found by its version or its bytes) would '
+                     f'shadow HelixSR; it is kept in {FOLDER}/{BACKUP} and Remove puts it back')
+    return notes
+
+
 def _runtime_files(exe_folder):
     """The files OptiScaler and HelixSR make while the game runs (Scaler's own remover deletes these too)."""
     for name in LOG_FILES:
@@ -268,8 +360,10 @@ def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=N
     elif fresh.state in ('optiscaler', 'direct'):   # an install of HelixSR's own (AMDLSS 1.0.0's bridge too)
         helix.remove(fresh, extras, on_line)
     name = str(previous.get('name') or '') or _name_for(exe)
+    others = optiscaler_copies(exe, previous)   # another copy would shadow ours: it is moved aside, not deleted
     record = {'amdlss': APP_VERSION, 'scaler': VERSION, 'name': name, 'moved': [], 'created': []}
     try:
+        _say(on_line, _move_aside(exe, record, others))
         install_into(package, exe, helix.folder, name, record)
     except (OSError, HelixSRError) as error:
         _unwind(exe, record, force=True)

@@ -7,6 +7,7 @@ on Linux, and a DLL the user picked is untrusted input, so this reads the PE hea
 and refuses anything that points outside the file. Nothing is loaded or run.
 """
 import os
+import re
 import struct
 from collections import namedtuple
 
@@ -128,3 +129,27 @@ def inspect(path):
             return Info(is_64, _exports(image, export_dir), _version(image, resource_dir))
     except (OSError, struct.error) as error:
         raise PEError(f'cannot read {path}: {error}')
+
+
+# The readable strings of a version resource: at least three printable ASCII characters, each followed by a NUL
+# (UTF-16LE). Keys and values both come out; the values name the product.
+STRING_RUN = re.compile(rb'(?:[\x20-\x7e]\x00){3,}')
+
+
+def version_words(path):
+    """The strings in the DLL's version resource (mostly its values: ProductName, FileDescription, InternalName,
+    OriginalFilename), in file order; () when the file has none or is not a PE file. This is how an OptiScaler copy
+    under another name is told from the system DLL it pretends to be; a copy that spoofs its version resource only
+    shows itself in its bytes, which `amdlss.scaler` checks as well."""
+    try:
+        with open(path, 'rb') as stream:
+            image = _Image(stream, os.fstat(stream.fileno()).st_size)
+            _is_64, _exports, resource_dir = _headers(image)
+            rva, size = resource_dir
+            if not rva or not size:
+                return ()
+            start = image.to_offset(rva)
+            blob = image.read(start, min(size, 1 << 16, image.size - start))
+            return tuple(match.group().decode('utf-16-le', errors='replace') for match in STRING_RUN.finditer(blob))
+    except (OSError, struct.error, PEError):
+        return ()

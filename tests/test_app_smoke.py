@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from amdlss import covers, framegen, gpu, helixsr, settings
+from amdlss import covers, framegen, gpu, helixsr, scaler, settings
 from fake_helixsr import make
 
 tk = pytest.importorskip('tkinter')
@@ -387,6 +387,37 @@ def test_stale_dlss4_values_without_a_record_are_cleared_on_update(window, monke
     back = (one / 'OptiScaler.ini').read_bytes()
     assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
     assert b'nvngxfg' not in back and 'DLSS 4 frame generation is off' in answers.told[1]
+
+
+def test_updating_the_reported_wukong_state_moves_the_leftover_and_leaves_frame_generation_off(window, monkeypatch):
+    """Wukong's exact state after 1.1.0 (AMDLSS's dxgi.dll and record in place, a leftover d3d12.dll OptiScaler,
+    helixsr-fg built, the package's auto ini, no frame generation record): Update must move the leftover aside and
+    leave frame generation explicitly off, with the move in the game log."""
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    helix = Path(os.environ['AMDLSS_HELIXSR'])
+    fg = helix / 'helixsr-fg'
+    fg.mkdir()
+    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
+        (fg / name).write_bytes(b'MZ')
+    (helix / 'helixsr_fg_setup.json').write_text('{}')
+    app.tree.selection_set('0')
+    top.update()
+    app.install_game()                       # the install the tester already had
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert scaler.installed(one) and (one / 'dxgi.dll').is_file()
+    (one / 'd3d12.dll').write_bytes(b'MZ' + b'OptiScaler' + b'\0' * 32)   # the leftover, found by its bytes
+    (window[2] / 'data' / framegen.RECORD).unlink(missing_ok=True)        # no frame generation record, as he had
+    app.tree.selection_set('0')
+    top.update()
+    app.install_game()                       # Update, frame generation Off (nothing was picked)
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    assert not (one / 'd3d12.dll').exists()
+    assert (one / 'HelixSR' / scaler.BACKUP / 'd3d12.dll').is_file()
+    assert 'moved d3d12.dll aside' in app.log.get('1.0', 'end')
+    ini = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=off' in ini and b'Enabled=false' in ini and b'FGInput=nofg' in ini
+    assert framegen.generator_of(one) == ''
 
 
 def wait(top, app, until, seconds=10):

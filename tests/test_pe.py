@@ -9,11 +9,34 @@ import pytest
 from amdlss import pe
 
 
+def _node(key, value=b'', children=b''):
+    """One VS_VERSIONINFO node: its length and value length, the type, the UTF-16 key, the value, the children,
+    every part padded to a four-byte boundary."""
+    body = key.encode('utf-16-le') + b'\0\0'
+    body += b'\0' * ((4 - (6 + len(body)) % 4) % 4)
+    body += value
+    body += b'\0' * ((4 - (6 + len(body)) % 4) % 4)
+    body += children
+    return struct.pack('<HHH', 6 + len(body), len(value), 1) + body
+
+
+def version_blob(version=(4, 1, 1, 2740), strings=None):
+    """The RT_VERSION data: VS_FIXEDFILEINFO and, with `strings`, a StringFileInfo of {name: value} pairs (each a
+    UTF-16 string, as a real DLL's ProductName/FileDescription/OriginalFilename are)."""
+    high, low = (version[0] << 16) | version[1], (version[2] << 16) | version[3]
+    fixed = struct.pack('<IIIIIIIIIIIII', 0xFEEF04BD, 0x10000, high, low, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    children = b''
+    if strings:
+        table = b''.join(_node(name, value.encode('utf-16-le') + b'\0\0') for name, value in strings.items())
+        children = _node('StringFileInfo', b'', _node('040904B0', b'', table))
+    return _node('VS_VERSION_INFO', fixed, children)
+
+
 def build_dll(exports=('ffxCreateContext', 'ffxDestroyContext'), version=(4, 1, 1, 2740), machine=0x8664,
-              magic=0x20b, resources=True):
+              magic=0x20b, resources=True, strings=None):
     """A minimal PE with an export table and a version resource. Layout: headers at 0, .edata at file 0x400 (RVA
     0x1000), .rsrc at file 0x800 (RVA 0x2000)."""
-    image = bytearray(0xC00)
+    image = bytearray(0xD00)
     image[0:2] = b'MZ'
     struct.pack_into('<I', image, 0x3c, 0x80)
     image[0x80:0x84] = b'PE\0\0'
@@ -26,11 +49,12 @@ def build_dll(exports=('ffxCreateContext', 'ffxDestroyContext'), version=(4, 1, 
     if exports is not None:
         struct.pack_into('<II', image, directories, 0x1000, 0x200)
     if resources:
-        struct.pack_into('<II', image, directories + 16, 0x2000, 0x200)
+        struct.pack_into('<II', image, directories + 16, 0x2000, 0x300)
     sections = base + optional
-    for index, (name, virtual, raw) in enumerate(((b'.edata', 0x1000, 0x400), (b'.rsrc', 0x2000, 0x800))):
+    for index, (name, virtual, raw, size) in enumerate(((b'.edata', 0x1000, 0x400, 0x200),
+                                                        (b'.rsrc', 0x2000, 0x800, 0x300))):
         image[sections + 40 * index:sections + 40 * index + 8] = name.ljust(8, b'\0')
-        struct.pack_into('<IIII', image, sections + 40 * index + 8, 0x200, virtual, 0x200, raw)
+        struct.pack_into('<IIII', image, sections + 40 * index + 8, size, virtual, size, raw)
     if exports is not None:
         edata = 0x400
         names_at, strings_at = 0x1000 + 0x80, 0x1000 + 0x100
@@ -48,12 +72,11 @@ def build_dll(exports=('ffxCreateContext', 'ffxDestroyContext'), version=(4, 1, 
         struct.pack_into('<II', image, rsrc + 0x18 + 16, 1, 0x80000000 | 0x30)
         struct.pack_into('<H', image, rsrc + 0x30 + 14, 1)                # language 0x409
         struct.pack_into('<II', image, rsrc + 0x30 + 16, 0x409, 0x48)
-        struct.pack_into('<IIII', image, rsrc + 0x48, 0x2000 + 0x60, 0x40, 0, 0)   # the data entry
+        blob = version_blob(version, strings)
         info = rsrc + 0x60
-        struct.pack_into('<HHH', image, info, 0x40, 0x34, 0)
-        image[info + 6:info + 38] = 'VS_VERSION_INFO'.encode('utf-16-le') + b'\0\0'
-        high, low = (version[0] << 16) | version[1], (version[2] << 16) | version[3]
-        struct.pack_into('<IIIII', image, info + 40, 0xFEEF04BD, 0x10000, high, low, 0)
+        assert info + len(blob) <= rsrc + 0x300, 'the version resource does not fit the section'
+        struct.pack_into('<IIII', image, rsrc + 0x48, 0x2000 + 0x60, len(blob), 0, 0)   # the data entry
+        image[info:info + len(blob)] = blob
     return bytes(image)
 
 
@@ -72,6 +95,20 @@ def test_a_good_dll_gives_its_exports_and_version(tmp_path):
 def test_a_32_bit_dll_is_not_64_bit(tmp_path):
     info = pe.inspect(written(tmp_path, build_dll(machine=0x14c, magic=0x10b)))
     assert not info.is_64bit and 'ffxCreateContext' in info.exports
+
+
+def test_version_words_read_the_resource_texts(tmp_path):
+    words = pe.version_words(written(tmp_path, build_dll(
+        version=(0, 9, 4, 0), strings={'ProductName': 'OptiScaler', 'FileDescription': 'OptiScaler',
+                                       'OriginalFilename': 'OptiScaler.dll'})))
+    assert 'OptiScaler' in words and 'OptiScaler.dll' in words
+    assert 'VS_VERSION_INFO' in words and 'StringFileInfo' in words   # keys come out too
+
+
+def test_version_words_of_a_dll_without_strings_or_resources(tmp_path):
+    assert 'OptiScaler' not in pe.version_words(written(tmp_path, build_dll()))
+    assert pe.version_words(written(tmp_path, build_dll(resources=False))) == ()
+    assert pe.version_words(written(tmp_path, b'not a dll at all' * 40)) == ()   # never raises
 
 
 def test_a_dll_without_exports_or_version_still_reads(tmp_path):
