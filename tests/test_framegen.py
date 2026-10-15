@@ -195,6 +195,18 @@ def test_switching_generators_restores_exactly_what_the_file_held(opti, tmp_path
     assert (opti / framegen.INI).read_bytes() == DLSS4_INI
 
 
+def test_dlss4_values_without_a_record_go_back_to_auto(opti, tmp_path):
+    # a hand-edited ini, or another tool's: the DLSS 4 values are in it and the record is not. They must not be left
+    # pointing at HelixSR's frame generation files; OptiScaler's own auto is the safe place to put them.
+    assert framegen.apply_generator(opti, framegen.DLSS4, tmp_path)
+    (tmp_path / framegen.RECORD).unlink()
+    assert framegen.generator_of(opti) == framegen.DLSS4
+    assert framegen.clear_dlss4(opti, tmp_path)
+    assert (opti / framegen.INI).read_bytes() == DLSS4_INI and framegen.generator_of(opti) == ''
+    assert not framegen.clear_dlss4(opti, tmp_path)   # nothing left of ours: nothing to do, nothing to write
+    assert (opti / framegen.INI).read_bytes() == DLSS4_INI
+
+
 def test_dlss4_needs_its_lines_in_the_ini(exe, tmp_path):
     # an older OptiScaler.ini (no [HelixSR], no FGNvngxReplacement): DLSS 4 cannot be set up in it; AMD's switch
     # still works

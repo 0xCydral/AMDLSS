@@ -142,6 +142,41 @@ def apply_generator(exe_folder, generator, data_dir):
     return changed
 
 
+# OptiScaler's own values, as the ini HelixSR Scaler ships has them: what AMDLSS's DLSS 4 keys go back to when the
+# file holds them but no record of what they held is left (a user or another tool wrote them). They must never be
+# left pointing at HelixSR's frame generation files that are not there.
+DLSS4_DEFAULTS = ((HELIX_FG, {'FrameGeneration': 'auto'}),
+                  (DLSS4_FG, {'FGInput': 'auto', 'FGNvngxReplacement': 'auto'}))
+
+
+def clear_dlss4(exe_folder, data_dir=None):
+    """Puts AMDLSS's DLSS 4 values back to OptiScaler's own auto wherever the file holds them without a record to
+    restore (see DLSS4_DEFAULTS) and drops any record for them, so nothing points at HelixSR's frame generation
+    files. Returns True when the file changed."""
+    changed, dropped = False, False
+    records = _load(data_dir) if data_dir else {}
+    for setting, defaults in DLSS4_DEFAULTS:
+        if not is_on(exe_folder, setting):
+            continue
+        path = ini_path(exe_folder)
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            raise HelixSRError(f'cannot read {path}: {error}')
+        current = read_values(data, setting)
+        wanted = {name: defaults.get(name, value) for name, value in current.items()}
+        if wanted != current:
+            _write(path, set_values(data, wanted, setting))
+            changed = True
+        key = _record_key(exe_folder, setting)
+        if key in records:
+            del records[key]
+            dropped = True
+    if dropped:
+        _save(data_dir, records)
+    return changed
+
+
 # --- the record of what the file held before ---------------------------------------------------------------------
 
 def _record_key(exe_folder, setting=FRAMEGEN):

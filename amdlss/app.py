@@ -456,8 +456,8 @@ class App:
                 self.fg_var.set('')
                 note = game.framegen_reason + turns_off
             elif dlss4_off and self.fg_var.get() == framegen.DLSS4:
-                self.fg_var.set(framegen.AMD)   # e.g. the built folder changed under us: fall back, never on
-                note = dlss4_off
+                self.fg_var.set('')   # the built files are gone: Install/Update turns it off and says why
+                note = dlss4_off + ' Install or Update turns it off.'
             elif dlss4_off:
                 note = dlss4_off                # the DLSS 4 choice is greyed: say why
             elif self.fg_var.get() == framegen.DLSS4:
@@ -707,9 +707,16 @@ class App:
         extras, source = list(self.extras), self.source
         pick = self.route_var.get() if game.route_choice else None
         frame_gen = self.fg_var.get() if route == 'optiscaler' and game.exe_folder else None
-        if frame_gen is not None and (not game.streamline or
-                                      (frame_gen == framegen.DLSS4 and helixsr.fg_reason(self.helixsr_folder))):
-            frame_gen = ''   # nothing to replace, or the built files are gone: never on; an update turns it off
+        fallback = ''
+        if frame_gen is not None:
+            if not game.streamline:
+                fallback = game.framegen_reason   # nothing to replace: never on; an update turns the old one off
+                frame_gen = ''
+            elif frame_gen in ('', framegen.DLSS4) and helixsr.fg_reason(self.helixsr_folder) \
+                    and (frame_gen == framegen.DLSS4
+                         or framegen.generator_of(game.exe_folder) == framegen.DLSS4):
+                fallback = helixsr.fg_reason(self.helixsr_folder)   # the built FG files are gone: turn it off, and
+                frame_gen = ''                                      # say why (the picked one, or the file's own)
         shown_route = f'{route}, {fsr4.NAME}' if want == 'fsr4' else route   # the report page reads this heading
         record = self.game_log(game, f'{"update" if game.installed else "install"} ({shown_route})')
         if game.folder:
@@ -723,17 +730,27 @@ class App:
             except helixsr.HelixSRError as error:
                 record.fail(error)
                 raise
+            generator = frame_gen or ''
             if after.state == 'optiscaler' and after.exe_folder:
-                if frame_gen is not None and framegen.apply_generator(after.exe_folder, frame_gen, self.data_dir):
-                    record(f'frame generation {framegen.name_of(frame_gen)}: {framegen.ini_path(after.exe_folder)}')
+                changed = framegen.apply_generator(after.exe_folder, frame_gen, self.data_dir)
+                if helixsr.fg_reason(self.helixsr_folder):
+                    # the built FG files are gone: whatever of HelixSR's DLSS 4 values the ini still holds with no
+                    # record left to restore them through (a user or another tool wrote them) goes back to
+                    # OptiScaler's own auto, so nothing is left pointing at files that are not there
+                    changed = framegen.clear_dlss4(after.exe_folder, self.data_dir) or changed
+                generator = framegen.generator_of(after.exe_folder)
+                if fallback:
+                    record(f'DLSS 4 frame generation is off: {fallback}')
+                if changed or fallback:
+                    record(f'frame generation {framegen.name_of(generator)}: {framegen.ini_path(after.exe_folder)}')
                 try:   # so a game that "looks unchanged" leaves OptiScaler.log behind; never a reason to fail
                     if framegen.apply(after.exe_folder, True, self.data_dir, framegen.LOGGING):
                         record(f'OptiScaler logging on: {framegen.ini_path(after.exe_folder)}')
                 except (helixsr.HelixSRError, OSError) as error:
                     record(f'OptiScaler logging was not turned on: {error}')
-            return after
+            return after, generator, fallback
 
-        self.work(install, lambda after: self.installed(after, frame_gen or ''))
+        self.work(install, lambda result: self.installed(*result))
 
     def download_progress_fsr4(self, done, total):
         """The downloads this path can make: AMD's FSR loader (26 KB) and the HelixSR Scaler package (about 127 MB)."""
@@ -748,13 +765,14 @@ class App:
         record.start(f'{action} {game.name}')
         return record
 
-    def installed(self, game, frame_gen=''):
+    def installed(self, game, frame_gen='', fallback=''):
         self.set_busy(False)
         self.refresh_helixsr_status()
         if game.upscaler == 'fsr4':
-            text = fsr4.after_text(game, 'direct' if game.state == 'fsr4' else 'optiscaler', self.source, frame_gen)
+            text = fsr4.after_text(game, 'direct' if game.state == 'fsr4' else 'optiscaler', self.source, frame_gen,
+                                   fallback)
         else:
-            text = gamelist.after_text(game, frame_gen)
+            text = gamelist.after_text(game, frame_gen, fallback)
         self.messagebox.showinfo('AMDLSS', text)
         self.refresh_games()
 

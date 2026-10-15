@@ -305,6 +305,67 @@ def test_update_turns_frame_generation_off_when_the_game_has_no_streamline(windo
     assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
 
 
+def test_dlss4_falls_back_and_restores_when_the_fg_files_are_gone(window, monkeypatch):
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    helix = Path(os.environ['AMDLSS_HELIXSR'])
+    fg = helix / 'helixsr-fg'
+    fg.mkdir()
+    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
+        (fg / name).write_bytes(b'MZ')
+    (helix / 'helixsr_fg_setup.json').write_text('{}')
+    app.tree.selection_set('0')
+    top.update()
+    app.fg_buttons[2].choose()   # DLSS 4 frame generation
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert b'FGNvngxReplacement=HelixSR' in (one / 'OptiScaler.ini').read_bytes()
+    shutil.rmtree(fg)   # e.g. an Install HelixSR whose setup could not get the NVIDIA files: the build is gone
+    (helix / 'helixsr_fg_setup.json').unlink()
+    app.refresh_games()
+    wait(top, app, lambda: not app.busy)
+    app.tree.selection_set('0')
+    top.update()
+    assert app.fg_var.get() == '' and 'Install or Update turns it off' in app.fg_note.cget('text')
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    back = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=auto' in back and b'FGInput=auto' in back and b'FGNvngxReplacement=auto' in back
+    assert b'nvngxfg' not in back   # nothing points at HelixSR's frame generation files any more
+    assert 'DLSS 4 frame generation is off' in answers.told[1]
+    assert 'it runs' not in answers.told[1]   # and no hint that a generator is on
+
+
+def test_stale_dlss4_values_without_a_record_are_cleared_on_update(window, monkeypatch):
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    helix = Path(os.environ['AMDLSS_HELIXSR'])
+    fg = helix / 'helixsr-fg'
+    fg.mkdir()
+    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
+        (fg / name).write_bytes(b'MZ')
+    (helix / 'helixsr_fg_setup.json').write_text('{}')
+    app.tree.selection_set('0')
+    top.update()
+    app.fg_buttons[2].choose()
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert b'FGNvngxReplacement=HelixSR' in (one / 'OptiScaler.ini').read_bytes()
+    (window[2] / 'data' / framegen.RECORD).unlink()   # e.g. a hand-edited ini, or another tool wrote the values
+    shutil.rmtree(fg)
+    (helix / 'helixsr_fg_setup.json').unlink()
+    app.refresh_games()
+    wait(top, app, lambda: not app.busy)
+    app.tree.selection_set('0')
+    top.update()
+    assert app.fg_var.get() == ''
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    back = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=auto' in back and b'FGInput=auto' in back and b'FGNvngxReplacement=auto' in back
+    assert b'nvngxfg' not in back and 'DLSS 4 frame generation is off' in answers.told[1]
+
+
 def wait(top, app, until, seconds=10):
     end = time.time() + seconds
     while time.time() < end and not until():

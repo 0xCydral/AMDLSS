@@ -58,6 +58,7 @@ Some games, such as Dragon's Dogma 2, offer only NVIDIA's DLSS Frame Generation,
 In the game, turn on DLSS Frame Generation either way; keep NVIDIA Reflex off. The upscaler network HelixSR runs is DLSS "Model E" (a CNN); there is no transformer option and AMDLSS does not offer one.
 
 - The choice only appears in games that use NVIDIA Streamline for DLSS frame generation: AMDLSS looks for `sl.interposer.dll` and `sl.dlss_g.dll` in the game's folder (up to seven folders down; they often sit in a subfolder such as `NVStreamline\production`), and not in the `OptiScaler` folder the install itself brings. Without them the whole control is greyed out with "This game has no DLSS Frame Generation for AMDLSS to replace." Install never turns frame generation on there, and Update turns it off if an earlier version had.
+- If the DLSS 4 files go missing after an install (an **Install HelixSR** update that could not build them), Install or Update turns frame generation back off, names the reason in the after-install text and in the game's log, and never leaves `OptiScaler.ini` pointing at files that are not there.
 - It is untested on real games so far.
 - Switching the generator or turning frame generation off puts every value back exactly as the file held it (AMDLSS keeps them in `%LOCALAPPDATA%\AMDLSS\framegen.json`). **Remove** takes AMDLSS's Scaler install out and puts the game's files back, or runs HelixSR's own uninstall for an install AMDLSS 1.0.0 made, so nothing stays behind.
 

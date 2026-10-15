@@ -601,9 +601,10 @@ def plan_text(game, route, source, data_dir):
     return f'{text}\n\n{gamelist.WARNINGS}\n\nInstall into {game.name}?'
 
 
-def after_text(game, route, source, generator=''):
-    """What to do in the game once FSR 4.1.1 is installed. `generator` is the frame generation AMDLSS switched on
-    (amdlss.framegen's AMD or DLSS4), or '' for none."""
+def after_text(game, route, source, generator='', fallback=''):
+    """What to do in the game once FSR 4.1.1 is installed. `generator` is the frame generation AMDLSS left switched
+    on (amdlss.framegen's AMD or DLSS4), or '' for none; `fallback` says why DLSS 4 frame generation was turned
+    off instead (never empty together with DLSS4)."""
     text = f"{NAME} is installed in {game.name} ({source.label}).\n\n"
     if route == 'direct':
         text += "In the game's graphics settings choose AMD FSR."
@@ -616,6 +617,8 @@ def after_text(game, route, source, generator=''):
             text += '\n\n' + gamelist.FRAMEGEN_HINT
         elif generator == framegen.DLSS4:
             text += '\n\n' + gamelist.FRAMEGEN_DLSS4_HINT
+    if fallback:
+        text += f'\n\nDLSS 4 frame generation is off: {fallback}'
     return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'
                    '\n\nThe Remove button puts the original files back.')
 

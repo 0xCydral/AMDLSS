@@ -440,9 +440,10 @@ FRAMEGEN_DLSS4_HINT = ("Turn on DLSS Frame Generation in the game; it runs Helix
                        '(experimental: it makes one generated frame). Keep NVIDIA Reflex off.')
 
 
-def after_text(game, frame_gen=''):
+def after_text(game, frame_gen='', fallback=''):
     """What to choose in the game's menu once HelixSR is installed, as HelixSR's setup reports it. `frame_gen` is
-    the frame generation AMDLSS switched on (amdlss.framegen's AMD or DLSS4), or '' for none."""
+    the frame generation AMDLSS left switched on (amdlss.framegen's AMD or DLSS4), or '' for none; `fallback` says
+    why DLSS 4 frame generation was turned off instead (never empty together with DLSS4)."""
     from . import framegen   # lazy: framegen imports helixsr, which imports this module
     text = f"HelixSR is installed in {game.name}.\n\nIn the game's graphics settings choose {game.in_game()}."
     if game.active_route == 'optiscaler':
@@ -451,5 +452,7 @@ def after_text(game, frame_gen=''):
             text += '\n\n' + FRAMEGEN_HINT
         elif frame_gen == framegen.DLSS4:
             text += '\n\n' + FRAMEGEN_DLSS4_HINT
+    if fallback:
+        text += f'\n\nDLSS 4 frame generation is off: {fallback}'
     return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'
                    '\n\nThe Remove button puts the original files back.')
