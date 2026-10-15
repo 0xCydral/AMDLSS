@@ -72,8 +72,22 @@ Decisions:
   offered DLSS-G.
 - [x] T2 DLSS 4 frame generation choice on the OptiScaler/Scaler route for games with Streamline DLSS-G, gated on
   the built FG files; ini keys through `framegen`; switching/off restores exactly; reports name the generator.
-- [ ] T3 README frame generation section + DLSS Model E note; `__init__.py` 1.1.0; release notes for players at
-  `/tmp/amdlss-rel/notes110.md`.
+- [x] T3 README frame generation section + DLSS Model E note; `__init__.py` 1.1.0; release notes for players at
+  `/tmp/amdlss-rel/notes110.md` (the 404 fix, the Scaler download, the two generators, the ~400 MB NVIDIA
+  download once, the DLSS Model E note).
+
+## Evidence (observed)
+
+- Commits: `9bf8ffb` T1, `b0bf029` T2; the task file's own commit `af93b89`.
+- `pytest -q` (Xvfb :61): 480 passed, 9 skipped. `AMDLSS.pyw --selftest`: "selftest passed".
+- Real zips (`AMDLSS_TEST_HELIXSR=/tmp/helixsr-190-data/HelixSR-1.9.0` built by AMDLSS's own fetch+build from the
+  real `HelixSR-1.9.0.zip`, `AMDLSS_TEST_SCALER=/tmp/helixsr-scaler-pkg/HelixSR-Scaler-1.0.3` unpacked from the
+  real Scaler zip): `tests/test_real_helixsr.py tests/test_pe.py` → 14 passed. The built folder has
+  `helixsr_setup.json`, `helixsr_fg_setup.json`, `helixsr_ngx_core.txt=yes` and `helixsr-fg` with
+  nvexec64.dll/nvngx_dlssg.dll/_nvngx.dll/libxell.dll (the ~400 MB NVIDIA download ran once here).
+- Not verified: frame generation never ran (no AMD/Windows PC); the DLSS 4 path is verified at the file and ini
+  level, and HelixSR Scaler was placed and removed on Linux only (Proton/Wine paths are the same files).
+
 
 ## Checks
 
@@ -88,5 +102,3 @@ Decisions:
 4. Screenshots of the selected-game panel at 1366x768, 1920x1080, 2560x1440 under Xvfb.
 
 Known environment: `amdlss-wine` needs the Steam library mounted; the Wine build is reported as observed.
-Not verifiable here: frame generation never runs (no AMD/Windows PC); the DLSS 4 path is verified at the ini and
-file level only.
