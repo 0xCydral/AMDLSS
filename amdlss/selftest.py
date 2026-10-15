@@ -192,6 +192,11 @@ def check_streamline():
         (root / 'sl.dlss_g.dll').write_bytes(b'MZ')
         assert games.scan_streamline(Path(folder)) and not games.scan_streamline(Path(folder) / 'none')
         assert games.Game(name='x', streamline=False).framegen_reason == games.NO_DLSSG
+    with tempfile.TemporaryDirectory() as folder:
+        win64 = Path(folder) / 'b1' / 'Binaries' / 'Win64'   # Black Myth: Wukong: NGX frame generation, no sl.*
+        win64.mkdir(parents=True)
+        (win64 / 'nvngx_dlssg.dll').write_bytes(b'MZ')
+        assert games.scan_streamline(Path(folder))
 
 
 def check_hang_and_unreal():

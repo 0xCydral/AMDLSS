@@ -718,7 +718,10 @@ class App:
         fallback = ''
         if frame_gen is not None:
             if not game.streamline:
-                fallback = game.framegen_reason   # nothing to replace: never on; an update turns the old one off
+                # Nothing to replace: never on. Name it only when DLSS 4 was picked or the ini itself still runs it
+                # (then this install turns a real value off); else the line claims something that was never on.
+                if frame_gen == framegen.DLSS4 or framegen.generator_of(game.exe_folder) == framegen.DLSS4:
+                    fallback = game.framegen_reason
                 frame_gen = ''
             elif frame_gen in ('', framegen.DLSS4) and helixsr.fg_reason(self.helixsr_folder) \
                     and (frame_gen == framegen.DLSS4

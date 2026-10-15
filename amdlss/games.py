@@ -37,7 +37,7 @@ class Game:
     reason: str = ''            # why the list hides this game ('' = ready); set by classify()
     manual: bool = False        # the folder was added by hand with "Add game folder"
     helixsr: str = ''           # the HelixSR version installed in the game; '' when none or unknown
-    streamline: bool = True     # the game ships Streamline DLSS-G; set by scan_streamline(), True while unscanned
+    streamline: bool = True     # the game offers DLSS Frame Generation (Streamline or NGX); scan_streamline()
     upscaler: str = ''          # 'fsr4' when AMD's FSR 4.1.1 is what runs in the game (amdlss.fsr4.mark), else ''
     fsr4: object = None         # amdlss.fsr4.Availability: can this game use FSR 4.1.1; None until judged
 
@@ -386,14 +386,19 @@ def scan_anticheat(folder, depth=3):
 # under <Project>\Plugins\...\Binaries\ThirdParty\Win64, six folders down.
 NO_DLSSG = "This game has no DLSS Frame Generation for AMDLSS to replace."
 STREAMLINE_DLLS = frozenset(('sl.interposer.dll', 'sl.dlss_g.dll'))
-# Folders of the mod's own install: their Streamline copies (OptiScaler\streamline) and HelixSR's files are the
-# mod's, never the game's, so they do not count as the game offering DLSS Frame Generation.
+# DLSS Frame Generation without Streamline: the NGX plugin the game runs (Black Myth: Wukong ships it, no sl.*
+# files at all). OptiScaler's nvngxfg input replaces exactly this DLL, so it is enough to offer HelixSR's.
+NGX_DLSSG_DLL = 'nvngx_dlssg.dll'
+# Folders of the mod's own install: their Streamline copies (OptiScaler\streamline), HelixSR's files and its
+# helixsr-fg copies are the mod's, never the game's, so they do not count as the game offering DLSS Frame Generation.
 MOD_FOLDERS = frozenset(('optiscaler', 'helixsr', 'amdlss-scaler-backup'))
 
 
 def scan_streamline(folder, depth=7):
-    """True when the game itself holds both Streamline DLLs, in any two places up to `depth` levels down (links not
-    followed); the folders AMDLSS's own installs bring (see MOD_FOLDERS) are not searched."""
+    """True when the game itself offers DLSS Frame Generation: Streamline's pair (sl.interposer.dll and sl.dlss_g.dll,
+    in any two places up to `depth` levels down) or the NGX plugin nvngx_dlssg.dll alone (games that integrate frame
+    generation without Streamline, such as Black Myth: Wukong). Links are not followed, and the folders AMDLSS's own
+    installs bring (see MOD_FOLDERS) are not searched."""
     found, todo = set(), [(folder, 0)]
     while todo and found != STREAMLINE_DLLS:
         path, level = todo.pop()
@@ -402,10 +407,12 @@ def scan_streamline(folder, depth=7):
         except OSError:
             continue
         for entry in entries:
-            if entry.name.lower() in STREAMLINE_DLLS:
-                found.add(entry.name.lower())
-            elif level < depth and entry.is_dir(follow_symlinks=False) \
-                    and entry.name.lower() not in MOD_FOLDERS:
+            name = entry.name.lower()
+            if name == NGX_DLSSG_DLL:
+                return True
+            if name in STREAMLINE_DLLS:
+                found.add(name)
+            elif level < depth and entry.is_dir(follow_symlinks=False) and name not in MOD_FOLDERS:
                 todo.append((entry.path, level + 1))
     return found == STREAMLINE_DLLS
 

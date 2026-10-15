@@ -140,6 +140,24 @@ def test_a_game_without_both_streamline_dlls_has_no_dlss_frame_generation(tmp_pa
     assert games.scan_streamline(tmp_path)   # the pair, wherever the two files are
 
 
+def test_ngx_frame_generation_counts_without_streamline(tmp_path):
+    """Black Myth: Wukong ships nvngx_dlssg.dll and no Streamline files (b1\\Binaries\\Win64). OptiScaler's
+    FGInput=nvngxfg replaces exactly that plugin, and HelixSR Scaler's own code says a game without sl.dlss_g.dll
+    can still have DLSS Frame Generation, so the game must be offered the DLSS 4 choice."""
+    streamline_files(tmp_path / 'b1' / 'Binaries' / 'Win64', 'nvngx_dlssg.dll')
+    assert games.scan_streamline(tmp_path)
+    assert games.scan_streamline(tmp_path, depth=3) and not games.scan_streamline(tmp_path, depth=2)
+
+
+def test_the_mods_own_ngx_dll_is_not_the_games(tmp_path):
+    """The files AMDLSS's own installs bring must not make a game look like it offers frame generation: HelixSR's
+    helixsr-fg copy and OptiScaler's own copy of the NGX plugin are the mod's, not the game's."""
+    win64 = tmp_path / 'b1' / 'Binaries' / 'Win64'
+    streamline_files(win64 / 'HelixSR' / 'helixsr-fg', 'nvngx_dlssg.dll')   # HelixSR's installed FG copy
+    streamline_files(win64 / 'OptiScaler', 'nvngx_dlssg.dll')               # OptiScaler's own copy
+    assert not games.scan_streamline(tmp_path)
+
+
 def test_the_frame_generation_reason_follows_the_scan():
     assert games.Game('Unscanned').framegen_reason == ''
     assert 'no DLSS Frame Generation' in games.Game('Bare', streamline=False).framegen_reason

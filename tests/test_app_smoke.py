@@ -305,6 +305,27 @@ def test_update_turns_frame_generation_off_when_the_game_has_no_streamline(windo
     assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
 
 
+def test_dlss4_off_is_named_only_when_it_was_really_on(window, monkeypatch):
+    """The Black Myth: Wukong report: a game with no DLSS Frame Generation got "DLSS 4 frame generation is off" in
+    its log although nothing had ever been on. It must be named only when DLSS 4 was picked or the ini itself still
+    runs it -- then this install turns a real value off."""
+    answers = Answers()
+    top, app, _one = two_game_app(window, monkeypatch, answers)
+    three = window[2] / 'Three'
+    app.tree.selection_set('1')          # XeSS only: no DLSS Frame Generation to replace
+    top.update()
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    assert 'DLSS 4 frame generation is off' not in app.log.get('1.0', 'end')
+    framegen.apply_generator(three, framegen.DLSS4, window[2] / 'data')   # as an earlier install or tool left it
+    app.tree.selection_set('1')
+    top.update()
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    assert 'DLSS 4 frame generation is off' in app.log.get('1.0', 'end')   # it WAS on: turning it off is reported
+    assert b'nvngxfg' not in (three / 'OptiScaler.ini').read_bytes()       # and nothing points at it any more
+
+
 def test_dlss4_falls_back_and_restores_when_the_fg_files_are_gone(window, monkeypatch):
     answers = Answers()
     top, app, one = two_game_app(window, monkeypatch, answers)
