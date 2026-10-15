@@ -509,9 +509,9 @@ def plan_text(game, route=None):
 
 FRAMEGEN_HINT = ("Turn on DLSS Frame Generation in the game; it runs AMD's frame generation. "
                  "Never pick the game's own FSR frame generation as well: two frame generators at once cause "
-                 "ghosting and stutter. Keep NVIDIA Reflex off.")
+                 "ghosting and stutter.")
 FRAMEGEN_DLSS4_HINT = ("Turn on DLSS Frame Generation in the game; it runs HelixSR's own frame generation "
-                       '(experimental: it makes one generated frame). Keep NVIDIA Reflex off.')
+                       '(experimental: it makes one generated frame).')
 
 
 def after_text(game, frame_gen='', fallback=''):
