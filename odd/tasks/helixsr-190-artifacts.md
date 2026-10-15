@@ -123,7 +123,17 @@ bright pixels - and scattered single-pixel coloured speckles (blue, purple, whit
 Control: the same game and PC with the original OptiScaler and Nukem's dlssg-to-fsr3 (no HelixSR), Reflex forced on
 as usual: no artifacts.
 
+## Pattern: only on water, rain and snow
+
+The artifacts appear only on certain surfaces, never on the rest of the picture:
+
+- Stellar Blade: only while it rains, and when the camera is underwater.
+- Black Myth: Wukong: only on snow.
+
 ## Questions
+
+- Rain, underwater and snow are transparent or particle-heavy surfaces with weak or missing motion vectors. Does
+  HelixSR handle those pixels differently (reactive or transparency mask, a value range the network does not expect)?
 
 - Is this the same fault as #44 (int8 path) or a second one in 1.9.0? Speed boost off changed nothing here. Would a
   run with `[HelixSR] FrameGeneration=off` (and `WaveSize=64`) help you split upscaler and frame generation? We can
