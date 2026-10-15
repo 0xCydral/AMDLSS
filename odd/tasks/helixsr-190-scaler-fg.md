@@ -149,3 +149,10 @@ Decisions:
 4. Screenshots of the selected-game panel at 1366x768, 1920x1080, 2560x1440 under Xvfb.
 
 Known environment: `amdlss-wine` needs the Steam library mounted; the Wine build is reported as observed.
+
+## Follow-up (2026-10-15): the RX 6700 XT artifacts
+
+The tester's picture defects with 1.9.0 + Scaler 1.0.3 (Wukong square tiles, Stellar Blade orbs/speckles) are a
+HelixSR defect: Reflex is ruled out by the owner's control test, nothing points at an AMDLSS default, and no ini
+setting has evidence of avoiding it. Evidence, the decision and the drafted HelixSR issue are in
+`odd/tasks/helixsr-190-artifacts.md`. AMDLSS stays at 1.1.1: no code, no release.
