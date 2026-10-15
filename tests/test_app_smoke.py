@@ -787,11 +787,17 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
     answers, installs = Answers(), []
 
-    def fake_install(data_dir, consented, progress, on_line):
-        installs.append(consented)
+    def fake_install(data_dir, consented, progress, on_line, force=False):
+        installs.append((consented, force))
         new = old.parent / helixsr.TOP
         shutil.copytree(old, new)
         (new / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+        (new / helixsr.FG_SETUP).write_text('{}')          # the real update builds frame generation too
+        fg = new / helixsr.FG_FOLDER
+        fg.mkdir()
+        for name in helixsr.FG_DLLS:
+            (fg / name).write_bytes(b'MZ')
+        helixsr.write_package_record(data_dir, new)   # the real fetch records the pinned zip after extracting
         return new
 
     monkeypatch.setattr(helixsr, 'install_helixsr', fake_install)
@@ -803,10 +809,83 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
     app.install_helixsr()
     assert answers.asked[0][0] == 'Install HelixSR' and 'HelixSR 1.9.0' in answers.asked[0][1]
     wait(top, app, lambda: installs and not app.busy)
-    assert installs == [True]
+    assert installs == [(True, True)]   # an update fetches the pinned zip, it does not trust the folder
     assert 'HelixSR 1.9.0 is installed and built' in app.status.cget('text')
     assert app.install_button.text == 'Install HelixSR' and app.install_button.state == 'disabled'
     assert (old / helixsr.DLL).is_file()  # the old folder stays on disk
+
+
+def test_the_old_layout_build_without_frame_generation_offers_update(window, monkeypatch):
+    """The folder AMDLSS 1.0.0 built from the older HelixSR zip (old layout: amd-fsr, dlss-loader, my-fsr; no
+    helixsr-fg, no record of the pinned zip): it must count as outdated; the button must offer Update, enabled,
+    and the frame generation note must name that same button instead of a disabled one."""
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    top, _make, tmp = window
+    one = tmp / 'One'
+    one.mkdir()
+    (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    (one / 'NVStreamline' / 'production').mkdir(parents=True)   # the game offers DLSS-G, so the FG box shows
+    for name in ('sl.interposer.dll', 'sl.dlss_g.dll'):
+        (one / 'NVStreamline' / 'production' / name).write_bytes(b'MZ')
+    old = tmp / 'data' / helixsr.TOP
+    old.parent.mkdir(exist_ok=True)
+    make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(old)
+    (old / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')   # the older zip's build: same version, no FG
+    for name in ('amd-fsr', 'dlss-loader', 'fsr3-drop-in', 'manual-install', 'my-fsr', 'optiscaler'):
+        (old / name).mkdir()
+    monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
+    app = App(top, tk, ttk, filedialog, Answers(), font)
+    pump(top, app)
+    assert not helixsr.package_current(tmp / 'data')   # the pinned zip's record is missing: not current
+    assert 'from another build' in app.status.cget('text')
+    assert app.install_button.text == 'Update HelixSR' and app.install_button.state == 'normal'
+    app.tree.selection_set('0')
+    top.update()
+    note = app.fg_note.cget('text')
+    assert 'frame generation is not built' in note and 'press Update HelixSR' in note   # the note names the button
+    assert [r[0] for r in rows_of(app)] == ['One']     # the old build still lists the games
+
+
+def test_a_built_helixsr_without_frame_generation_builds_it_without_a_refetch(window, monkeypatch):
+    """Built from the pinned zip, frame generation missing: the button is enabled with the label the note names,
+    and pressing it runs the setup in place -- HelixSR builds only the missing frame generation -- instead of
+    downloading the zip again."""
+    from tkinter import filedialog, font, ttk
+
+    from amdlss.app import App
+    top, _make, tmp = window
+    one = tmp / 'One'
+    one.mkdir()
+    (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
+    (one / 'NVStreamline' / 'production').mkdir(parents=True)   # the game offers DLSS-G, so the FG box shows
+    for name in ('sl.interposer.dll', 'sl.dlss_g.dll'):
+        (one / 'NVStreamline' / 'production' / name).write_bytes(b'MZ')
+    data = tmp / 'data'
+    folder = data / helixsr.TOP
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(folder)
+    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+    helixsr.write_package_record(data, folder)   # the pinned zip was extracted here; only the FG is missing
+    monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
+    installs = []
+
+    def fake_install(data_dir, consented, progress, on_line, force=False):
+        installs.append((consented, force))
+        return data_dir / helixsr.TOP
+
+    monkeypatch.setattr(helixsr, 'install_helixsr', fake_install)
+    app = App(top, tk, ttk, filedialog, Answers(), font)
+    pump(top, app)
+    assert 'is installed and built' in app.status.cget('text')
+    assert app.install_button.text == 'Update HelixSR' and app.install_button.state == 'normal'   # not a dead end
+    app.tree.selection_set('0')
+    top.update()
+    assert 'press Update HelixSR' in app.fg_note.cget('text')   # the note and the button agree
+    app.install_helixsr()
+    wait(top, app, lambda: installs and not app.busy)
+    assert installs == [(True, False)]   # no fetch: the setup builds only the missing frame generation
 
 
 def test_a_game_on_an_older_helixsr_shows_update(window, monkeypatch):

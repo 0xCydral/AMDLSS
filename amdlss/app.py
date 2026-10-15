@@ -64,7 +64,8 @@ class App:
         self.helixsr_folder = None
         self.helixsr = None        # a HelixSR once its network is built
         self.helixsr_version = ''  # its version, read once per refresh
-        self.helixsr_stale = False  # built, but older than the pinned release: the button updates it
+        self.helixsr_stale = False  # built, but older than the pinned release or not from the pinned zip: update it
+        self.helixsr_fg_missing = False  # built, but HelixSR's frame generation is not: the button builds it
         self.games, self.shown = [], []
         self.failed = {}            # folder added by hand -> why it was not offered, until the next Rescan
         self.busy = False
@@ -360,7 +361,8 @@ class App:
         game, idle = self.selected(), not self.busy
         self.update_options(game, idle)   # first: it sets the upscaler and route the buttons below follow
         ready = idle and self.helixsr is not None
-        self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale)
+        self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale
+                                                                 or self.helixsr_fg_missing)
                                       else 'disabled')
         self.rescan_button.configure(state='normal' if idle else 'disabled')   # before HelixSR is installed too
         self.add_button.configure(state='normal' if idle else 'disabled')
@@ -529,21 +531,26 @@ class App:
     def refresh_helixsr(self):
         override = os.environ.get('AMDLSS_HELIXSR', '')
         folder = helixsr.locate(self.data_dir, override)
-        self.helixsr_folder, self.helixsr, self.helixsr_stale = folder, None, False
+        self.helixsr_folder, self.helixsr, self.helixsr_stale, self.helixsr_fg_missing = folder, None, False, False
         if folder is None:
             self.set_status('✗ HelixSR is not installed. Install it once, then pick your games.')
             self.install_button.configure(text='Install HelixSR')
         elif not helixsr.built(folder):
+            # a folder this AMDLSS did not extract from the pinned zip is replaced by Update, not built as it is
+            self.helixsr_stale = not override and not helixsr.package_current(self.data_dir)
             self.set_status(f'⚠ HelixSR {helixsr.version_of(folder) or helixsr.VERSION} is downloaded but its '
                             'network is not built yet.')
-            self.install_button.configure(text='Build HelixSR')
+            self.install_button.configure(text='Update HelixSR' if self.helixsr_stale else 'Build HelixSR')
         else:
             self.helixsr = helixsr.HelixSR(
                 folder, preserve=lambda game: logs.preserve_history(game, self.data_dir))
             self.helixsr_version = self.helixsr.version
-            self.helixsr_stale = not override and helixsr.older(self.helixsr_version, helixsr.VERSION)
+            self.helixsr_stale = not override and (helixsr.older(self.helixsr_version, helixsr.VERSION)
+                                                   or not helixsr.package_current(self.data_dir))
+            self.helixsr_fg_missing = bool(helixsr.fg_reason(folder))  # the note then says to press the button
             self.set_status(self.helixsr_text())
-            self.install_button.configure(text='Update HelixSR' if self.helixsr_stale else 'Install HelixSR')
+            self.install_button.configure(text='Update HelixSR' if self.helixsr_stale or self.helixsr_fg_missing
+                                          else 'Install HelixSR')
             self.refresh_games()
         self.update_buttons()
 
@@ -557,7 +564,8 @@ class App:
         def progress(done, total):
             self.post(self.download_progress, done, total)
 
-        self.work(lambda: helixsr.install_helixsr(self.data_dir, consented, progress, self.on_line),
+        force = self.helixsr_stale   # an update replaces the folder's files; a build (frame generation) does not fetch
+        self.work(lambda: helixsr.install_helixsr(self.data_dir, consented, progress, self.on_line, force=force),
                   self.helixsr_done)
 
     def download_progress(self, done, total):
@@ -899,7 +907,10 @@ class App:
     def helixsr_text(self):
         version = self.helixsr_version or '?'
         if self.helixsr_stale:
-            return f'✓ HelixSR {version} is installed. HelixSR {helixsr.VERSION} is available.'
+            if helixsr.older(version, helixsr.VERSION):
+                return f'✓ HelixSR {version} is installed. HelixSR {helixsr.VERSION} is available.'
+            return (f'✓ HelixSR {version} is installed, but from another build: press Update HelixSR '
+                    'to replace it.')
         return f'✓ HelixSR {version} is installed and built ({short_path(self.helixsr_folder)})'
 
     def outdated(self, game):
