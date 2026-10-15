@@ -78,7 +78,9 @@ Decisions:
 
 ## Evidence (observed)
 
-- Commits: `9bf8ffb` T1, `b0bf029` T2; the task file's own commit `af93b89`.
+- Commits: `9bf8ffb` T1 (plus its task-file commit `af93b89`), `b0bf029` T2, `1e85ac3` T3, and the two fixes the
+  build shook out: `954da1d` (the frame generation note wraps under the choices) and `4542482` (packaging's
+  `check_build.py` reads the version from the source instead of a hard-coded '0.1.0').
 - `pytest -q` (Xvfb :61): 480 passed, 9 skipped. `AMDLSS.pyw --selftest`: "selftest passed".
 - Real zips (`AMDLSS_TEST_HELIXSR=/tmp/helixsr-190-data/HelixSR-1.9.0` built by AMDLSS's own fetch+build from the
   real `HelixSR-1.9.0.zip`, `AMDLSS_TEST_SCALER=/tmp/helixsr-scaler-pkg/HelixSR-Scaler-1.0.3` unpacked from the
@@ -87,6 +89,16 @@ Decisions:
   nvexec64.dll/nvngx_dlssg.dll/_nvngx.dll/libxell.dll (the ~400 MB NVIDIA download ran once here).
 - Not verified: frame generation never ran (no AMD/Windows PC); the DLSS 4 path is verified at the file and ini
   level, and HelixSR Scaler was placed and removed on Linux only (Proton/Wine paths are the same files).
+- Build (`bash packaging/release.sh > /tmp/amdlss-rel/build.log 2>&1`): `pyinstaller-win exit=0`,
+  `build-linux exit=0`, `VERSION 1.1.0` + `modules True` from both binaries, `exe selftest exit=0`,
+  `linux selftest exit=0`.
+  - AMDLSS.exe `a03498e55eaf545ee063ce21f48b2438be8b8f0279356368a7c95b69a9bfede8`
+  - AMDLSS-linux-x86_64 `af0ae374c709ed716b649e3f1fe947aedd9008aba15de2ad5516939c504345c0`
+- Screenshots (Xvfb, generator choice visible): `/tmp/amdlss-rel/shots/1366x768.png`, `1920x1080.png`,
+  `2560x1440.png`.
+- Note for the record: an earlier `helixsr.install_helixsr` attempt over an existing 1.9.0.2 build deleted that
+  folder's `helixsr_setup.json` before failing; the user's HelixSR folder was replaced with the freshly built
+  1.9.0 from the real zip (same data dir), which is what Update HelixSR would have produced.
 
 
 ## Checks
