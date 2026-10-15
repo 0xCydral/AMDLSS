@@ -22,7 +22,9 @@ Logging (on after every OptiScaler install, so "it looks unchanged in game" can 
 HelixSR's installer already puts the files that needs next to the game's .exe (OptiScaler.ini, fakenvapi,
 amd_fidelityfx_framegeneration_dx12.dll, and its [Libraries] path to the last one). This module edits only those
 values in the OptiScaler.ini HelixSR placed there; every other byte of the file stays as it was. The values the file
-held before are kept in AMDLSS's data folder (framegen.json), so unchecking the frame generation box puts them back.
+held before are kept in AMDLSS's data folder (framegen.json), and a game with frame generation off has the off values
+written out (see OFF): Scaler reads its own auto as "run HelixSR's frame generation once the helixsr-fg files are
+there", so off must be said, or every Scaler install turns DLSS 4 frame generation on by itself.
 HelixSR's own uninstall restores or deletes OptiScaler.ini, so Remove needs no help from here beyond forget() dropping
 the records (and the OptiScaler.log that our logging switch made).
 """
@@ -49,6 +51,21 @@ AMD, DLSS4 = 'amd', 'dlss4'
 HELIX_FG = Setting(b'HelixSR', {'FrameGeneration': 'on'}, '#helixsrfg')
 DLSS4_FG = Setting(b'FrameGen', {'FGInput': 'nvngxfg', 'FGNvngxReplacement': 'HelixSR'}, '#dlss4')
 NAMES = {AMD: 'AMD FSR', DLSS4: 'DLSS 4 (HelixSR)'}   # for reports, the window and the game's log
+# What each switch says when frame generation is off. The ini Scaler ships says auto, and Scaler reads auto as "run
+# HelixSR's frame generation" once the helixsr-fg files are there (its own ini: "[HelixSR] FrameGeneration=off"
+# switches it off; FGInput's default is nofg, Enabled's is false). A game with no generator chosen must say so, or
+# DLSS 4 frame generation turns itself on in every Scaler install.
+OFF = ((FRAMEGEN, {'Enabled': 'false'}),
+       (HELIX_FG, {'FrameGeneration': 'off'}),
+       (DLSS4_FG, {'FGInput': 'nofg'}))
+
+
+def off_values(setting):
+    """The setting's off values (OFF)."""
+    for candidate, values in OFF:
+        if candidate == setting:
+            return values
+    return {}
 RECORD = 'framegen.json'
 INI = 'OptiScaler.ini'
 LOG = 'OptiScaler.log'
@@ -123,40 +140,69 @@ def generator_of(exe_folder):
     return AMD if is_on(exe_folder, FRAMEGEN) else ''
 
 
+def write_off(exe_folder, setting):
+    """Writes the setting's own "off" values (OFF), so it never stays at Scaler's auto, which Scaler resolves to
+    HelixSR's frame generation once its files are there. A file without the setting's section cannot hold them and
+    is left as it is. Returns True when the file changed."""
+    path = ini_path(exe_folder)
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        raise HelixSRError(f'cannot read {path}: {error}')
+    try:
+        current = read_values(data, setting)
+    except HelixSRError:
+        return False
+    values = off_values(setting)
+    if all(current.get(name) == value for name, value in values.items()):
+        return False
+    new = set_values(data, values, setting)
+    if new == data:
+        return False   # the keys have no line in this file: nothing to write
+    _write(path, new)
+    return True
+
+
 def apply_generator(exe_folder, generator, data_dir):
-    """Puts exactly one frame generation generator on — or both off for '' — in the game's OptiScaler.ini. The
-    other generator's values go back first and the wanted one goes on last, so a switch never leaves a mix; every
-    value the file held is kept in this module's records and comes back when it is switched again or turned off.
-    Returns True when the file changed."""
+    """Puts exactly one frame generation generator on — or all of them off for '' — in the game's OptiScaler.ini.
+    Every switch that is not wanted goes back to what the file held first (the records) and then to its own off
+    values, so none is left at Scaler's auto and switching back comes to exactly the same bytes; the wanted one
+    goes on last, so a switch never leaves a mix. Returns True when the file changed."""
+    chosen = {AMD: (FRAMEGEN,), DLSS4: (HELIX_FG, DLSS4_FG)}.get(generator, ())
     changed = False
-    if generator != AMD:
-        changed = apply(exe_folder, False, data_dir, FRAMEGEN) or changed
-    if generator != DLSS4:
-        changed = apply(exe_folder, False, data_dir, HELIX_FG) or changed
-        changed = apply(exe_folder, False, data_dir, DLSS4_FG) or changed
-    if generator == AMD:
-        changed = apply(exe_folder, True, data_dir, FRAMEGEN) or changed
-    elif generator == DLSS4:
-        changed = apply(exe_folder, True, data_dir, HELIX_FG) or changed
-        changed = apply(exe_folder, True, data_dir, DLSS4_FG) or changed
+    for setting in (FRAMEGEN, HELIX_FG, DLSS4_FG):
+        if setting not in chosen:
+            changed = apply(exe_folder, False, data_dir, setting) or changed   # the values the file held first
+            changed = write_off(exe_folder, setting) or changed                # ...and never Scaler's auto
+    for setting in chosen:
+        changed = apply(exe_folder, True, data_dir, setting) or changed
     return changed
 
 
-# OptiScaler's own values, as the ini HelixSR Scaler ships has them: what AMDLSS's DLSS 4 keys go back to when the
-# file holds them but no record of what they held is left (a user or another tool wrote them). They must never be
-# left pointing at HelixSR's frame generation files that are not there.
-DLSS4_DEFAULTS = ((HELIX_FG, {'FrameGeneration': 'auto'}),
-                  (DLSS4_FG, {'FGInput': 'auto', 'FGNvngxReplacement': 'auto'}))
+# What AMDLSS's DLSS 4 keys are put to when the file holds them but no record of what it held is left (a user or
+# another tool wrote them): each switch's own off values and the replacement back to the package's auto. They must
+# never be left pointing at HelixSR's frame generation files that are not there, nor at Scaler's auto either.
+DLSS4_OFF = ((HELIX_FG, off_values(HELIX_FG)),
+             (DLSS4_FG, {'FGInput': 'nofg', 'FGNvngxReplacement': 'auto'}))
+
+
+def _holds_any(exe_folder, setting):
+    """True when the file holds any one of the setting's "on" values (the other may already be off)."""
+    try:
+        current = read_values(ini_path(exe_folder).read_bytes(), setting)
+    except (OSError, HelixSRError):
+        return False
+    return any(current.get(name) == value for name, value in setting.values.items())
 
 
 def clear_dlss4(exe_folder, data_dir=None):
-    """Puts AMDLSS's DLSS 4 values back to OptiScaler's own auto wherever the file holds them without a record to
-    restore (see DLSS4_DEFAULTS) and drops any record for them, so nothing points at HelixSR's frame generation
-    files. Returns True when the file changed."""
+    """Puts AMDLSS's DLSS 4 values to off wherever the file holds them without a record to restore (see DLSS4_OFF)
+    and drops any record for them, so nothing points at HelixSR's frame generation files. Returns True when the file
+    changed."""
     changed, dropped = False, False
     records = _load(data_dir) if data_dir else {}
-    for setting, defaults in DLSS4_DEFAULTS:
-        if not is_on(exe_folder, setting):
+    for setting, defaults in DLSS4_OFF:
+        if not _holds_any(exe_folder, setting):
             continue
         path = ini_path(exe_folder)
         try:

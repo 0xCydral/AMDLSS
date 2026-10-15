@@ -157,6 +157,9 @@ def test_the_in_game_hint_follows_the_installed_route_and_the_generator():
 DLSS4_INI = (INI.replace(b'[FrameGen]\r\n', b'[FrameGen]\r\nFGNvngxReplacement=auto\r\n')
              .replace(b'[Upscalers]\r\n',
                       b'[HelixSR]\r\n; frame generation\r\nFrameGeneration=auto\r\nInt8=auto\r\n\r\n[Upscalers]\r\n'))
+# The same file with frame generation off: the explicit off values, never Scaler's auto.
+DLSS4_OFF_INI = DLSS4_INI.replace(b'FrameGeneration=auto', b'FrameGeneration=off').replace(b'FGInput=auto',
+                                                                                          b'FGInput=nofg')
 
 
 @pytest.fixture
@@ -168,7 +171,7 @@ def opti(tmp_path):
     return folder
 
 
-def test_the_dlss4_generator_sets_three_values_and_puts_them_back(opti, tmp_path):
+def test_the_dlss4_generator_sets_three_values_and_off_writes_the_explicit_off_values(opti, tmp_path):
     assert framegen.generator_of(opti) == ''
     assert framegen.apply_generator(opti, framegen.DLSS4, tmp_path)
     data = (opti / framegen.INI).read_bytes()
@@ -176,7 +179,11 @@ def test_the_dlss4_generator_sets_three_values_and_puts_them_back(opti, tmp_path
     assert b'FrameGeneration=on' in data and b'FGInput=nvngxfg' in data and b'FGNvngxReplacement=HelixSR' in data
     assert b'Enabled=true' not in data and b'FGOutput=auto' in data   # AMD FSR's switch is left alone
     assert framegen.apply_generator(opti, '', tmp_path)
-    assert (opti / framegen.INI).read_bytes() == DLSS4_INI and framegen.generator_of(opti) == ''
+    off = (opti / framegen.INI).read_bytes()
+    assert framegen.generator_of(opti) == ''
+    # off is written out: Scaler's auto would run HelixSR's frame generation as soon as helixsr-fg is there
+    assert off == DLSS4_OFF_INI and b'FrameGeneration=off' in off and b'FGInput=nofg' in off and b'nvngxfg' not in off
+    assert not framegen.apply_generator(opti, '', tmp_path)   # already off: nothing changes
 
 
 def test_switching_generators_restores_exactly_what_the_file_held(opti, tmp_path):
@@ -192,19 +199,20 @@ def test_switching_generators_restores_exactly_what_the_file_held(opti, tmp_path
     assert framegen.apply_generator(opti, framegen.AMD, tmp_path)            # and back: byte for byte as before
     assert (opti / framegen.INI).read_bytes() == amd
     assert framegen.apply_generator(opti, '', tmp_path)
-    assert (opti / framegen.INI).read_bytes() == DLSS4_INI
+    assert (opti / framegen.INI).read_bytes() == DLSS4_OFF_INI   # off: the explicit off values, never auto
 
 
-def test_dlss4_values_without_a_record_go_back_to_auto(opti, tmp_path):
+def test_dlss4_values_without_a_record_go_to_off(opti, tmp_path):
     # a hand-edited ini, or another tool's: the DLSS 4 values are in it and the record is not. They must not be left
-    # pointing at HelixSR's frame generation files; OptiScaler's own auto is the safe place to put them.
+    # pointing at HelixSR's frame generation files, and Scaler's auto would run them as soon as the files are there,
+    # so the off values are written.
     assert framegen.apply_generator(opti, framegen.DLSS4, tmp_path)
     (tmp_path / framegen.RECORD).unlink()
     assert framegen.generator_of(opti) == framegen.DLSS4
     assert framegen.clear_dlss4(opti, tmp_path)
-    assert (opti / framegen.INI).read_bytes() == DLSS4_INI and framegen.generator_of(opti) == ''
+    assert (opti / framegen.INI).read_bytes() == DLSS4_OFF_INI and framegen.generator_of(opti) == ''
     assert not framegen.clear_dlss4(opti, tmp_path)   # nothing left of ours: nothing to do, nothing to write
-    assert (opti / framegen.INI).read_bytes() == DLSS4_INI
+    assert (opti / framegen.INI).read_bytes() == DLSS4_OFF_INI
 
 
 def test_dlss4_needs_its_lines_in_the_ini(exe, tmp_path):

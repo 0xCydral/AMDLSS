@@ -154,13 +154,18 @@ def test_dlss4_frame_generation_on_the_real_scaler_ini(fake_game, tmp_path, monk
 
     assert framegen.apply_generator(game, framegen.AMD, tmp_path / 'data')
     amd = (game / 'OptiScaler.ini').read_bytes()
-    assert b'FGInput=dlssg' in amd and b'FGOutput=fsrfg' in amd and b'FrameGeneration=auto' in amd
+    assert b'FGInput=dlssg' in amd and b'FGOutput=fsrfg' in amd and b'FrameGeneration=off' in amd
     assert b'FGNvngxReplacement=auto' in amd
     assert framegen.generator_of(game) == framegen.AMD
 
     assert framegen.apply_generator(game, framegen.DLSS4, tmp_path / 'data')
     assert framegen.apply_generator(game, '', tmp_path / 'data')
-    assert (game / 'OptiScaler.ini').read_bytes() == ini and framegen.generator_of(game) == ''
+    off = (game / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=off' in off and b'FGInput=nofg' in off and b'FGNvngxReplacement=auto' in off
+    assert framegen.generator_of(game) == ''
+    assert framegen.apply_generator(game, framegen.AMD, tmp_path / 'data')
+    assert framegen.apply_generator(game, '', tmp_path / 'data')
+    assert (game / 'OptiScaler.ini').read_bytes() == off   # on and off again: byte for byte the same off state
 
 
 def test_an_earlier_versions_install_is_recognised_and_removed(fake_game):

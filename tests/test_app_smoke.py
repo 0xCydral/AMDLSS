@@ -267,7 +267,7 @@ def test_dlss4_is_offered_when_the_build_has_the_fg_files_and_written_into_the_i
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
     back = (one / 'OptiScaler.ini').read_bytes()
     assert b'FGInput=dlssg' in back and b'FGOutput=fsrfg' in back
-    assert b'FrameGeneration=auto' in back and b'FGNvngxReplacement=auto' in back   # HelixSR's own values back
+    assert b'FrameGeneration=off' in back and b'FGNvngxReplacement=auto' in back   # off, never Scaler's auto
     assert "it runs AMD's frame generation" in answers.told[1]
 
 
@@ -281,7 +281,9 @@ def test_install_never_writes_frame_generation_on_without_streamline(window, mon
     app.install_game()
     wait(top, app, lambda: answers.told and not app.busy)
     ini = (three / 'OptiScaler.ini').read_bytes()
-    assert b'FGInput=auto\r\n' in ini and b'FGOutput=auto\r\n' in ini and 'Turn on DLSS' not in answers.told[0]
+    assert b'FGInput=nofg\r\n' in ini and b'FGOutput=auto\r\n' in ini and 'Turn on DLSS' not in answers.told[0]
+    # off is written out, not left at Scaler's auto, which would run HelixSR's frame generation by itself
+    assert b'FrameGeneration=off\r\n' in ini and b'Enabled=false\r\n' in ini
     assert not (window[2] / 'data' / 'framegen.json').exists() or 'dlssg' not in (window[2] / 'data' / 'framegen.json').read_text()
 
 
@@ -302,7 +304,7 @@ def test_update_turns_frame_generation_off_when_the_game_has_no_streamline(windo
     assert app.fg_var.get() == '' and 'Update turns it off' in app.fg_note.cget('text')
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
-    assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
+    assert b'FGInput=nofg\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
 
 
 def test_dlss4_off_is_named_only_when_it_was_really_on(window, monkeypatch):
@@ -351,7 +353,7 @@ def test_dlss4_falls_back_and_restores_when_the_fg_files_are_gone(window, monkey
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
     back = (one / 'OptiScaler.ini').read_bytes()
-    assert b'FrameGeneration=auto' in back and b'FGInput=auto' in back and b'FGNvngxReplacement=auto' in back
+    assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
     assert b'nvngxfg' not in back   # nothing points at HelixSR's frame generation files any more
     assert 'DLSS 4 frame generation is off' in answers.told[1]
     assert 'it runs' not in answers.told[1]   # and no hint that a generator is on
@@ -383,7 +385,7 @@ def test_stale_dlss4_values_without_a_record_are_cleared_on_update(window, monke
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
     back = (one / 'OptiScaler.ini').read_bytes()
-    assert b'FrameGeneration=auto' in back and b'FGInput=auto' in back and b'FGNvngxReplacement=auto' in back
+    assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
     assert b'nvngxfg' not in back and 'DLSS 4 frame generation is off' in answers.told[1]
 
 
@@ -415,10 +417,10 @@ def test_optiscaler_install_with_frame_generation_and_remove(window, monkeypatch
     top.update()
     assert not shown(app.route_row) and shown(app.fg_row)
     assert app.fg_var.get() == framegen.AMD   # installed: shows what the file says
-    app.fg_buttons[0].choose()                # Update with frame generation off puts the old values back
+    app.fg_buttons[0].choose()                # Update with frame generation off: the explicit off values
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
-    assert b'FGInput=auto\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
+    assert b'FGInput=nofg\r\n' in (one / 'OptiScaler.ini').read_bytes() and 'Turn on DLSS' not in answers.told[1]
     app.tree.selection_set('0')
     top.update()
     app.fg_buttons[1].choose()

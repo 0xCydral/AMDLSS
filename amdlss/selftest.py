@@ -125,7 +125,12 @@ def check_framegen():
         assert framegen.generator_of(folder) == framegen.DLSS4 and b'FGNvngxReplacement=HelixSR' in path.read_bytes()
         assert framegen.apply_generator(folder, framegen.AMD, folder)
         assert framegen.generator_of(folder) == framegen.AMD and b'FGInput=dlssg' in path.read_bytes()
-        assert framegen.apply_generator(folder, '', folder) and path.read_bytes() == sc
+        assert framegen.apply_generator(folder, '', folder)
+        off = path.read_bytes()
+        # Scaler reads auto as "run HelixSR's frame generation": off must be written out, and be byte-exact again
+        assert b'FrameGeneration=off' in off and b'FGInput=nofg' in off and framegen.generator_of(folder) == ''
+        assert framegen.apply_generator(folder, framegen.DLSS4, folder)
+        assert framegen.apply_generator(folder, '', folder) and path.read_bytes() == off
     assert framegen.name_of(framegen.DLSS4) == 'DLSS 4 (HelixSR)' and framegen.name_of('') == 'off'
 
 
