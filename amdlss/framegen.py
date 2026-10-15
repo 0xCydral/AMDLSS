@@ -44,6 +44,9 @@ SECTION = b'FrameGen'
 FRAMEGEN = Setting(SECTION, {'Enabled': 'true', **ON, 'PreserveSwapChain': 'false'}, '',
                    ('Enabled', 'PreserveSwapChain'))
 LOGGING = Setting(b'Log', {'LogToFile': 'true', 'LogLevel': '2'}, '#log')
+# amdlss.luma's route: OptiScaler loads the ReShade build Luma UE is (renamed ReShade64.dll) from the game's .exe
+# folder. Scaler's own ini ships "LoadReshade = auto", which OptiScaler reads as false, so the key must be written.
+RESHADE = Setting(b'Plugins', {'LoadReshade': 'true'}, '#reshade')
 # The frame generation generator: AMD FSR's (OptiScaler turns the game's DLSS Frame Generation into FSR frames) or
 # HelixSR's own experimental DLSS 4 mode (the game's DLSS Frame Generation runs HelixSR's network on any GPU, from
 # the helixsr-fg files; FGInput=nvngxfg makes OptiScaler leave FGOutput alone, dllmain.cpp).

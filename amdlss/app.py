@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import (VERSION, covers, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, reports,
+from . import (VERSION, covers, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, luma, reports,
                settings, update)
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
@@ -388,11 +388,14 @@ class App:
         self.hint.configure(text=f'in the game choose {game.in_game(self.route_of(game))}.' if hint else '')
 
     def route_of(self, game):
-        """The route Install will use for `game`: the installed one, the box's pick, or the upscaler's default."""
+        """The route Install will use for `game`: the installed one, the injected one, the box's pick, or the
+        upscaler's default."""
         if game.state == 'fsr4':
             return 'direct'
         if game.installed:
             return game.state
+        if game.route == gamelist.INJECT:
+            return gamelist.INJECT   # no upscaler of its own: Luma UE and Scaler are the only route for it
         if self.wants_fsr4(game):
             return self.route_var.get() if game.route_choice and len(game.fsr4.routes) > 1 else game.fsr4.routes[0]
         return self.route_var.get() if game.route_choice else game.route
@@ -402,7 +405,10 @@ class App:
         return self.upscaler_var.get() == 'fsr4' and bool(game.fsr4 and game.fsr4.ok)
 
     def upscaler_ok(self, game):
-        """False when FSR 4.1.1 is picked for a game that cannot use it: Install waits for another pick."""
+        """False when FSR 4.1.1 is picked for a game that cannot use it: Install waits for another pick. The injected
+        route has no upscaler to pick, so it always passes."""
+        if self.route_of(game) == gamelist.INJECT:
+            return True
         return self.upscaler_var.get() != 'fsr4' or self.wants_fsr4(game)
 
     def upscaler_default(self, game):
@@ -443,7 +449,9 @@ class App:
         self.fg_row.pack_forget()
         if game and game.route_choice:
             self.route_row.pack(side='right')
-        if game:
+        if game and self.route_of(game) == gamelist.INJECT:
+            self.show_inject(game, idle)
+        elif game:
             self.show_upscaler(game, idle)
         self.fg_note.pack_forget()
         offered = not game or game.streamline
@@ -496,6 +504,18 @@ class App:
                 self.dll_forget.pack(side='right', padx=(0, px(8)))
         if text:
             self.fsr4_note.pack(side='left', fill='x', expand=True, padx=(px(14), px(10)))
+
+    def show_inject(self, game, idle):
+        """The Upscaler row of a game whose route is the injection: there is no upscaler to pick (both choices are
+        greyed, whatever the upscaler pick is), only what AMDLSS will do with it."""
+        px = self.look.px
+        self.upscaler_row.pack(fill='x')
+        for widget in self.upscaler_buttons:
+            widget.configure(state='disabled')
+        for widget in (self.dll_button, self.dll_forget):
+            widget.pack_forget()
+        self.fsr4_note.configure(text=plain(luma.ROW_NOTE), fg=MUTED)
+        self.fsr4_note.pack(side='left', fill='x', expand=True, padx=(px(14), px(10)))
 
     def set_busy(self, busy, progress=None):
         self.busy = busy
@@ -605,11 +625,17 @@ class App:
             found = gamelist.classify(self.helixsr.list_games(asked), extras)
             for game in found:
                 # an unsafe entry is scanned in its corrected folder only; a root is never walked
-                if game.folder and os.path.isdir(game.folder) and not gamelist.is_root_folder(game.folder) \
-                        and game.reason in ('', gamelist.UNSAFE_FOLDER):
-                    game.anticheat = gamelist.scan_anticheat(game.folder)
-                    game.streamline = gamelist.scan_streamline(game.folder)
-                fsr4.mark(game)   # the state of whatever is installed, Scaler and FSR 4 included
+                if game.folder and os.path.isdir(game.folder) and not gamelist.is_root_folder(game.folder):
+                    offered = game.reason in ('', gamelist.UNSAFE_FOLDER)
+                    # a game with no upscaler is scanned when its .exe folder is one the injection could go in
+                    injected = game.reason == gamelist.NO_UPSCALER and gamelist.inject_layout(game)
+                    if offered or injected:
+                        game.anticheat = gamelist.scan_anticheat(game.folder)
+                    if offered:
+                        game.streamline = gamelist.scan_streamline(game.folder)
+                gamelist.mark_inject(game)   # the injection's offer; the anti-cheat scan above is what it needs
+                fsr4.mark(game)   # the state of whatever is installed, Scaler, FSR 4 and the injection included
+                luma.mark(game)
             self.judge(found)
             return found
 
@@ -704,14 +730,17 @@ class App:
         game = self.selected()
         if not (self.helixsr and game and game.can_install and self.upscaler_ok(game) and not self.busy):
             return
-        route, want = self.route_of(game), 'fsr4' if self.wants_fsr4(game) else 'helixsr'
-        plan = fsr4.plan_text(game, route, self.source, self.data_dir) if want == 'fsr4' \
+        route = self.route_of(game)
+        want = 'luma' if route == gamelist.INJECT else ('fsr4' if self.wants_fsr4(game) else 'helixsr')
+        plan = luma.plan_text(game) if want == 'luma' \
+            else fsr4.plan_text(game, route, self.source, self.data_dir) if want == 'fsr4' \
             else gamelist.plan_text(game, route)
         if not self.messagebox.askyesno(f'Install into {game.name}', plan, icon='warning', default='no'):
             return
         self.set_busy(True, None)
         self.progress.configure(text=plain(f'Installing into {game.name}…'))
-        self.set_status(f'• Installing {fsr4.NAME if want == "fsr4" else "HelixSR"} into {game.name}…')
+        what = luma.NAME if want == 'luma' else fsr4.NAME if want == 'fsr4' else 'HelixSR'
+        self.set_status(f'• Installing {what} into {game.name}…')
         extras, source = list(self.extras), self.source
         pick = self.route_var.get() if game.route_choice else None
         frame_gen = self.fg_var.get() if route == 'optiscaler' and game.exe_folder else None
@@ -728,13 +757,18 @@ class App:
                          or framegen.generator_of(game.exe_folder) == framegen.DLSS4):
                 fallback = helixsr.fg_reason(self.helixsr_folder)   # the built FG files are gone: turn it off, and
                 frame_gen = ''                                      # say why (the picked one, or the file's own)
-        shown_route = f'{route}, {fsr4.NAME}' if want == 'fsr4' else route   # the report page reads this heading
+        shown_route = (f'{route}, {luma.NAME}' if want == 'luma'       # the report page reads this heading
+                       else f'{route}, {fsr4.NAME}' if want == 'fsr4' else route)
         record = self.game_log(game, f'{"update" if game.installed else "install"} ({shown_route})')
-        if game.folder:
+        if game.folder and want != 'luma':   # the injection is not an upscaler pick: there is nothing to remember
             settings.save_upscaler(self.data_dir, game.folder, want)
 
         def install():
             try:
+                if want == 'luma':
+                    return (luma.install_game(self.helixsr, game, extras, self.data_dir, record,
+                                              lambda done, total: self.post(self.download_progress_inject, done, total)),
+                            '', '')
                 after = fsr4.install_game(self.helixsr, game, extras, want, pick, source,
                                           fsr4.license_of(self.helixsr_folder, self.data_dir), self.data_dir, record,
                                           lambda done, total: self.post(self.download_progress_fsr4, done, total))
@@ -770,6 +804,12 @@ class App:
         else:
             self.progress.configure(text=f"Downloading AMD's FSR loader: {done >> 10} of {total >> 10} KB")
 
+    def download_progress_inject(self, done, total):
+        """The injected route's downloads: Luma UE's own zip, then the HelixSR Scaler package. Their labels come from
+        luma.download_text, which tells the two apart by their pinned sizes."""
+        self.bar.set(done / total)
+        self.progress.configure(text=plain(luma.download_text(done, total)))
+
     def game_log(self, game, action):
         """on_line for one action in `game`: the window's log, and the game's own log file for Collect logs."""
         record = logs.GameLog(self.data_dir, game.folder, self.on_line)
@@ -779,7 +819,9 @@ class App:
     def installed(self, game, frame_gen='', fallback=''):
         self.set_busy(False)
         self.refresh_helixsr_status()
-        if game.upscaler == 'fsr4':
+        if game.state == gamelist.INJECT:
+            text = luma.after_text(game)
+        elif game.upscaler == 'fsr4':
             text = fsr4.after_text(game, 'direct' if game.state == 'fsr4' else 'optiscaler', self.source, frame_gen,
                                    fallback)
         else:
@@ -791,8 +833,8 @@ class App:
         game = self.selected()
         if not (self.helixsr and game and game.installed and not game.reason and not self.busy):
             return
-        who = 'AMDLSS' if game.state == 'fsr4' else 'HelixSR'
-        what = fsr4.NAME if game.upscaler == 'fsr4' else 'HelixSR'
+        who = 'AMDLSS' if game.state in ('fsr4', gamelist.INJECT) else 'HelixSR'
+        what = luma.NAME if game.state == gamelist.INJECT else fsr4.NAME if game.upscaler == 'fsr4' else 'HelixSR'
         if not self.messagebox.askyesno(f'Remove from {game.name}',
                                         f"Close {game.name} first.\n\n{who} puts the game's original files back. "
                                         f'Remove {what}?', icon='warning', default='no'):
@@ -804,6 +846,8 @@ class App:
 
         def remove():
             try:
+                if game.state == gamelist.INJECT:
+                    return luma.remove_game(self.helixsr, game, extras, self.data_dir, record)
                 return fsr4.remove_game(self.helixsr, game, extras, self.data_dir, record)
             except helixsr.HelixSRError as error:
                 record.fail(error)

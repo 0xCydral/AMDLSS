@@ -334,11 +334,14 @@ def install_notes(game, exe_folder, scaler_name, record):
             f'placed {len(placed)} files: {listed}']
 
 
-def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=None):
+def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=None, name='', placed=False):
     """Installs (or updates) HelixSR Scaler in `game` (the OptiScaler route) and returns the game with its state
-    set. The folder is safe, the game closed and still in HelixSR's list (helix.guard). AMDLSS 1.0.0's bridge
-    install, or our own older one, is taken out first; the user's OptiScaler.ini settings are kept."""
-    fresh = helix.guard(game, extras)
+    set. The folder is safe, the game closed and still in HelixSR's list (helix.guard; `placed` uses
+    helix.guard_placed instead, for amdlss.luma's injected route, whose games HelixSR does not list at all). AMDLSS
+    1.0.0's bridge install, or our own older one, is taken out first; the user's OptiScaler.ini settings are kept.
+    `name` forces what OptiScaler.dll is called there (the injected route needs dxgi.dll, whatever an earlier install
+    used); '' keeps the previous install's name, else Scaler's own first free one."""
+    fresh = helix.guard_placed(game, extras) if placed else helix.guard(game, extras)
     if not fresh.exe_folder:
         raise HelixSRError(f"HelixSR does not know {game.name}'s .exe folder, so Scaler has nowhere to go")
     exe = Path(fresh.exe_folder)
@@ -359,7 +362,7 @@ def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=N
             ini.unlink(missing_ok=True)      # ours (perhaps edited): the package's own version goes back
     elif fresh.state in ('optiscaler', 'direct'):   # an install of HelixSR's own (AMDLSS 1.0.0's bridge too)
         helix.remove(fresh, extras, on_line)
-    name = str(previous.get('name') or '') or _name_for(exe)
+    name = name or str(previous.get('name') or '') or _name_for(exe)
     others = optiscaler_copies(exe, previous)   # another copy would shadow ours: it is moved aside, not deleted
     record = {'amdlss': APP_VERSION, 'scaler': VERSION, 'name': name, 'moved': [], 'created': []}
     try:

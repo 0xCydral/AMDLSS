@@ -8,7 +8,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import VERSION, covers, crashes, framegen, fsr4, games, gpu, helixsr, identify, logs, reports, scaler, update
+from . import (VERSION, covers, crashes, framegen, fsr4, games, gpu, helixsr, identify, logs, luma, reports, scaler,
+               update)
 
 
 def check_parsing():
@@ -306,6 +307,53 @@ def check_scaler():
         assert {str(p.relative_to(game)): p.read_bytes() for p in game.rglob('*') if p.is_file()} == before
 
 
+def check_luma():
+    """Luma UE's placement (its dxgi.dll becomes ReShade64.dll), its record, Remove, and the layout it is offered
+    in. No network: the package is a stand-in."""
+    assert framegen.RESHADE.section == b'Plugins' and framegen.RESHADE.values == {'LoadReshade': 'true'}
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        package = root / luma.TOP
+        for rel in (luma.SCALER_NAME, luma.ADDON, f'{luma.SHADERS}/Unreal Engine/Shader.hlsl', luma.DLSS):
+            path = package / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f'stand-in {rel}'.encode())
+        assert luma.extracted(root) and luma.locate(root) == package
+        named = {name: source.name for source, name in luma.files(package)}
+        assert named[luma.SCALER_NAME] == luma.RESHADE     # OptiScaler loads ReShade64.dll (LoadReshade=true)
+        assert named[luma.ADDON] == luma.ADDON and named[luma.DLSS] == luma.DLSS
+        game = root / 'Game'
+        game.mkdir()
+        (game / 'Game.exe').write_bytes(b'MZ')
+        (game / luma.DLSS).write_bytes(b'the game already had one')   # a game file the install has to keep
+        record = {'amdlss': VERSION, 'luma': luma.BUILD, 'moved': [], 'created': []}
+        luma.install_into(game, package, record)
+        assert (game / luma.RESHADE).read_bytes().startswith(b'stand-in') and not (game / luma.SCALER_NAME).exists()
+        assert (game / luma.SHADERS / 'Unreal Engine' / 'Shader.hlsl').is_file()
+        assert [item['name'] for item in record['moved']] == [luma.DLSS]
+        assert record['moved'][0]['to'].startswith(f'{scaler.FOLDER}/{scaler.BACKUP}/')
+        luma.record_path(game).parent.mkdir(parents=True, exist_ok=True)
+        luma.record_path(game).write_text(json.dumps(record), encoding='utf-8')
+        assert luma.installed(game) and luma.mark(games.Game(name='G', exe_folder=str(game))).state == games.INJECT
+        luma.remove(game)
+        assert not luma.installed(game)
+        assert (game / luma.DLSS).read_bytes() == b'the game already had one'
+        assert sorted(p.name for p in game.iterdir()) == ['Game.exe', luma.DLSS]
+        # the layout: only an Unreal shipping folder with a shipping .exe in it counts, and never a 32-bit one
+        binaries = root / 'Game' / 'Binaries' / 'Win64'
+        binaries.mkdir(parents=True)
+        (binaries / 'Game-Win64-Shipping.exe').write_bytes(b'MZ' + b'\0' * 8)
+        assert games.shipping_exe(str(binaries)) == str(binaries / 'Game-Win64-Shipping.exe')
+        assert games.shipping_exe(str(root / 'Game')) == ''
+        assert not games.inject_layout(games.Game(name='G', exe_folder=str(root / 'Game')))       # not Binaries
+        assert not games.inject_layout(games.Game(name='G', exe_folder=str(binaries)))            # not a real PE
+        hidden = games.Game(name='G', folder=str(root / 'Game'), exe_folder=str(binaries), reason=games.NO_UPSCALER)
+        assert games.mark_inject(hidden).reason == games.NO_UPSCALER   # nothing readable there: never claimed
+        refuser = games.Game(name='G', folder=str(root / 'Game'), exe_folder=str(binaries),
+                             reason=games.NO_UPSCALER, anticheat=['BattlEye'])
+        assert games.mark_inject(refuser).reason == games.NO_UPSCALER  # not an Unreal layout: the plain reason stays
+
+
 def check_running_game():
     locked = 'PermissionError: [WinError 5] Acceso denegado: "E:\\Games\\One\\dxgi.dll"'
     assert helixsr.plain_failure(locked, 'One') == helixsr.still_running_message('One')
@@ -447,8 +495,8 @@ def check_fsr4():
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_unsafe_folder, check_framegen, check_logging_switch,
                   check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
-                  check_helixsr, check_scaler, check_running_game, check_zip_slip, check_update, check_identify,
-                  check_covers, check_fsr4):
+                  check_helixsr, check_scaler, check_luma, check_running_game, check_zip_slip, check_update,
+                  check_identify, check_covers, check_fsr4):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

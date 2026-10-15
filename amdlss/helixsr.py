@@ -823,10 +823,19 @@ class HelixSR:
     def guard(self, game, extras):
         """The checks every change to a game starts with, for changes AMDLSS makes itself too: the folder is safe,
         the game is closed, and the game is still in HelixSR's fresh list. Keeps the game's logs, and returns the
-        game as listed now."""
+        game as listed now. For everything that runs HelixSR's installer by the game's list number."""
         self._need_safe(game)
         self._need_closed(game)
         return self._fresh(game, extras)
+
+    def guard_placed(self, game, extras):
+        """The checks for a change AMDLSS places itself (HelixSR Scaler, and the injected route): the folder is safe
+        and the game is closed. A game HelixSR's list does not hold at all is fine here: a game with no upscaler of
+        its own is what the injected route is for, and HelixSR's games() drops it, so it has no number - and this path
+        never runs the installer by one. When the list does hold the game, its fresh entry is what comes back."""
+        self._need_safe(game)
+        self._need_closed(game)
+        return self._fresh(game, extras, numbered=False)
 
     @staticmethod
     def need_no_fsr4(game):
@@ -837,14 +846,14 @@ class HelixSR:
                 raise HelixSRError(f'FSR 4.1.1 is installed in {game.name}: remove it first (pick HelixSR as the '
                                    f'upscaler and press Update, or press Remove).')
 
-    def _fresh(self, game, extras):
+    def _fresh(self, game, extras, numbered=True):
         listed = self.list_games(extras)
         fresh = gamelist.match_game(listed, game)
         if fresh is None:
             raise HelixSRError(f'{game.name} is no longer in HelixSR\'s list: refresh the list and try again')
         if gamelist.unsafe_reason(fresh, listed, extras=extras):
             raise HelixSRError(f'AMDLSS will not change {game.name or "this game"}: {gamelist.UNSAFE_FOLDER}')
-        if not fresh.index:  # a game HelixSR does not list has no number to install or remove by
+        if numbered and not fresh.index:  # a game HelixSR does not list has no number to install or remove by
             raise HelixSRError(f'HelixSR does not list {game.name}, so it cannot be changed from here')
         if self.preserve:   # the run about to be replaced is evidence: keep its logs, never block on the copy
             try:

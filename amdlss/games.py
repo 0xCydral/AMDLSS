@@ -11,14 +11,17 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import host
+from . import host, pe
 
 SENTINEL = 'AMDLSS-GAMES '  # the bridge prints one line: this prefix and a JSON list
 
 STATE_TEXT = {'none': 'not installed', 'direct': 'FSR drop-in', 'optiscaler': 'OptiScaler',
-              'dlss': 'DLSS loader (experimental)', 'fsr4': 'FSR 4.1.1 drop-in', 'unknown': 'installed'}
-# What to pick in the game's menu, as HelixSR's setup reports it (helixsr_install.in_game).
-IN_GAME = {'direct': 'AMD FSR', 'optiscaler': 'DLSS', 'dlss': 'DLSS', 'fsr4': 'AMD FSR'}
+              'dlss': 'DLSS loader (experimental)', 'fsr4': 'FSR 4.1.1 drop-in', 'unknown': 'installed',
+              'inject': 'DLSS injected (Luma UE)'}
+# What to pick in the game's menu, as HelixSR's setup reports it (helixsr_install.in_game). The injected route has no
+# entry of its own in the game: what it runs is chosen in Luma's own overlay.
+IN_GAME = {'direct': 'AMD FSR', 'optiscaler': 'DLSS', 'dlss': 'DLSS', 'fsr4': 'AMD FSR',
+           'inject': "DLSS in Luma's menu (press Home)"}
 
 
 @dataclass
@@ -416,6 +419,69 @@ def scan_streamline(folder, depth=9):
             elif level < depth and entry.is_dir(follow_symlinks=False) and name not in MOD_FOLDERS:
                 todo.append((entry.path, level + 1))
     return found == STREAMLINE_DLLS
+
+
+# --- Inject DLSS (Luma UE) ----------------------------------------------------------------------------------------
+# Luma Framework's Unreal Engine mod replaces the TAA pass of an Unreal Engine game with a DLSS (DLAA) call, which
+# HelixSR Scaler (OptiScaler) then runs. It is the only route AMDLSS has for a game that ships no upscaler at all, and
+# it only fits an Unreal shipping build: the mod hooks the engine's own temporal pass, so nothing else can be told
+# from the files. The DirectX 11 requirement Luma UE has cannot be detected either (amdlss.luma's texts say so).
+INJECT = 'inject'
+INJECT_ANTICHEAT = 'anti-cheat: DLSS injection is not offered'
+SHIPPING_SUFFIXES = ('-win64-shipping.exe', '-wingdk-shipping.exe')
+UNREAL_BINARIES = ('win64', 'wingdk')
+
+
+def shipping_exe(folder):
+    """The Unreal shipping .exe in `folder` (the platform is in its name), or ''; links are not followed."""
+    try:
+        entries = sorted(os.scandir(folder), key=lambda entry: entry.name.lower())
+    except OSError:
+        return ''
+    for entry in entries:
+        if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(SHIPPING_SUFFIXES):
+            return str(entry.path)
+    return ''
+
+
+def inject_layout(game):
+    """True when `game`'s .exe folder is an Unreal shipping folder - its name is what Binaries holds (Win64 or WinGDK)
+    and a shipping .exe is in it - and that .exe is 64-bit (amdlss.luma's mod ships x64 only): the one place its
+    engine hook can go. A game AMDLSS cannot see this in is never claimed."""
+    folder = str(game.exe_folder or '')
+    path = host.path_module()
+    if not folder or not os.path.isdir(folder):
+        return False
+    if path.basename(path.dirname(path.normpath(folder))).casefold() != 'binaries':
+        return False
+    if path.basename(path.normpath(folder)).casefold() not in UNREAL_BINARIES:
+        return False
+    exe = shipping_exe(folder)
+    if not exe:
+        return False
+    try:
+        return pe.inspect(exe).is_64bit
+    except pe.PEError:
+        return False
+
+
+def mark_inject(game):
+    """An Unreal x64 shipping game that ships no upscaler of its own takes AMDLSS's DLSS injection: it is offered (no
+    reason) with the route 'inject'. Anti-cheat files refuse it, with a reason of its own, and everything else keeps
+    the plain "no DLSS, FSR 3.1 or XeSS found" and stays hidden. Called once the anti-cheat scan has run
+    (app.refresh_games): classify() cannot know its files yet."""
+    if game.reason not in ('', NO_UPSCALER) or not (game.folder and game.exe_folder):
+        return game
+    if game.fsr_targets or game.inputs:
+        return game                       # it has an upscaler of its own: the other routes are the ones for it
+    if not inject_layout(game):
+        return game
+    if game.anticheat:
+        if game.reason:                   # an install already in the game keeps its state, and its Remove
+            game.reason = INJECT_ANTICHEAT
+        return game
+    game.reason, game.route = '', INJECT
+    return game
 
 
 # --- what the window says ---------------------------------------------------------------------------------------
