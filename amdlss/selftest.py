@@ -275,7 +275,8 @@ def check_scaler():
         assert scaler.files(package) == list(listed)
         other = root / 'd3d12.dll'   # an older OptiScaler copy under another name, its version resource spoofed
         other.write_bytes(b'MZ' + b'OptiScaler' + b'\0' * 32)
-        assert scaler.is_optiscaler(other) and not scaler.is_optiscaler(package / 'OptiScaler.ini')
+        assert scaler.is_optiscaler(other) and not scaler.is_optiscaler(package / 'README.txt')
+        assert scaler.optiscaler_copies(root) == ['d3d12.dll']   # only .dll files are looked at, and only the copy
         helix = root / helixsr.TOP
         helix.mkdir()
         (helix / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
