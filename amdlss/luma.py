@@ -205,7 +205,9 @@ def remove(exe_folder):
         return []
     notes = _unwind(exe_folder, record)
     record_path(exe_folder).unlink(missing_ok=True)
-    _prune(exe_folder, {Path(exe_folder) / SHADERS})
+    # the record's own folder too: _unwind's prune ran while the record was still in it (a Scaler install left there
+    # keeps it, since it is not empty)
+    _prune(exe_folder, {Path(exe_folder) / SHADERS, Path(exe_folder) / scaler.FOLDER})
     return notes
 
 
