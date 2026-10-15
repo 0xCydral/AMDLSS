@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import covers, crashes, framegen, fsr4, games, gpu, helixsr, identify, logs, reports, update
+from . import VERSION, covers, crashes, framegen, fsr4, games, gpu, helixsr, identify, logs, reports, scaler, update
 
 
 def check_parsing():
@@ -18,13 +18,17 @@ def check_parsing():
                '    2. Far Cry 6                                    DLSS / XeSS (through OptiScaler: select DLSS in '
                'the game)\n'
                '    3. Sven Co-op                                   HelixSR installed\n'
-               '  10. A Game With A Very Long Name That Is Past The Pad HelixSR installed\n')
+               '    4. Other Game                                   DLSS / XeSS only: not supported by the drop-in: '
+               'use HelixSR Desktop (HelixSR Scaler)\n'
+               '  10. A Game With A Very Long Name That Is Past The Pad HelixSR installed (OptiScaler, earlier '
+               'version)\n')
     rows = games.parse_list_output(printed)
-    assert [g.index for g in rows] == [1, 2, 3, 10], rows
+    assert [g.index for g in rows] == [1, 2, 3, 4, 10], rows
     assert rows[0].route == 'direct' and rows[0].fsr31
     assert rows[1].inputs == ['DLSS', 'XeSS'] and rows[1].route == 'optiscaler'
     assert rows[2].state == 'unknown' and rows[2].installed
-    assert rows[3].name.endswith('Past The Pad')
+    assert rows[3].inputs == ['DLSS', 'XeSS'] and rows[3].route == 'optiscaler'   # 1.9.0's own label
+    assert rows[4].name.endswith('Past The Pad') and rows[4].state == 'unknown'
     line = games.SENTINEL + json.dumps([{'index': 1, 'name': 'A', 'folder': 'C:\\g', 'state': 'direct'}])
     parsed = games.parse_bridge_output('noise\n' + line + '\n')
     assert parsed[0].state_text == 'FSR drop-in' and parsed[0].index == 1
@@ -48,10 +52,13 @@ def check_routes():
     assert not games.Game(name='x', route='optiscaler').route_choice  # only one route works
     assert not games.Game(name='x', can_opti=True, state='optiscaler').route_choice  # installed
     assert both.in_game() == 'AMD FSR' and games.Game(name='x', state='optiscaler', route='direct').in_game() == 'DLSS'
-    command = helixsr.HelixSR('C:/h', python='C:/p/python.exe').optiscaler_command('D:/g', ['E:/x'])
-    assert [str(c) for c in command[1:3]] == ['-I', '-c']
-    assert [str(c) for c in command[-3:]] == [str(Path('C:/h')), 'D:/g', 'E:/x']
-    assert "g.route, g.chosen = 'optiscaler', g.can_opti" in helixsr.BRIDGE_INSTALL
+    # the OptiScaler route is HelixSR Scaler now: AMDLSS installs it itself, pinned by SHA-256, and the bridge
+    # maps 1.9.0's 'unsupported' to it
+    assert scaler.ZIP_URL.endswith(f'/v1.9.0/{scaler.ZIP_NAME}') and scaler.ZIP_SIZE > 100 << 20
+    assert scaler.NAMES[0] == 'dxgi.dll' and scaler.LIST == 'HelixSR-Scaler-package.txt'
+    assert "== 'unsupported'" in helixsr.BRIDGE   # 1.9.0's route for a DLSS/XeSS/FSR 2 only game
+    plan = games.plan_text(games.Game(name='G', route='optiscaler', exe_folder='E:\\G'))
+    assert 'HelixSR Scaler' in plan and 'Install into G?' in plan
 
 
 def check_visibility():
@@ -213,8 +220,57 @@ def check_helixsr():
         assert not helixsr.built(folder)
         (Path(folder) / helixsr.BUILT).write_text('{}')
         assert helixsr.built(folder)
+        assert 'frame generation is not built' in helixsr.fg_reason(folder)   # the setup made none (or an older one)
+        (Path(folder) / helixsr.FG_SETUP).write_text('{}')
+        fg = Path(folder) / helixsr.FG_FOLDER
+        fg.mkdir()
+        for name in helixsr.FG_DLLS:
+            (fg / name).write_bytes(b'MZ')
+        assert helixsr.fg_reason(folder) == '' and helixsr.fg_folder(folder) == fg
         assert helixsr.install_helixsr(folder, consented=False) is None  # declined: nothing runs, nothing is written
-        assert sorted(p.name for p in Path(folder).iterdir()) == sorted([helixsr.DLL, helixsr.BUILT])
+        assert sorted(p.name for p in Path(folder).iterdir() if p.is_file()) == \
+            sorted([helixsr.DLL, helixsr.BUILT, helixsr.FG_SETUP])
+
+
+def check_scaler():
+    """HelixSR Scaler's placement, record and removal, on a stand-in package and a fake game (no network)."""
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        package = root / 'package'
+        listed = ('OptiScaler.dll', 'OptiScaler.ini', 'OptiScaler/streamline/sl.dlss_g.dll')
+        for rel in listed + ('README.txt',):
+            path = package / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f'stand-in {rel}'.encode())
+        (package / scaler.LIST).write_text('\n'.join(listed), encoding='utf-8')
+        assert scaler.files(package) == list(listed)
+        helix = root / helixsr.TOP
+        helix.mkdir()
+        (helix / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+        fg = helix / helixsr.FG_FOLDER
+        fg.mkdir()
+        for name in helixsr.FG_DLLS:
+            (fg / name).write_bytes(b'MZ')
+        (helix / helixsr.FG_SETUP).write_text('{}')
+        game = root / 'Game'
+        game.mkdir()
+        (game / 'Game.exe').write_bytes(b'MZ')
+        (game / 'OptiScaler.ini').write_bytes(b'[FrameGen]\r\nFGInput=auto\r\nFGOutput=auto\r\n')
+        before = {str(p.relative_to(game)): p.read_bytes() for p in game.rglob('*') if p.is_file()}
+        record = {'amdlss': VERSION, 'scaler': scaler.VERSION, 'name': 'dxgi.dll', 'moved': [], 'created': []}
+        scaler.install_into(package, game, helix, 'dxgi.dll', record)
+        assert (game / 'dxgi.dll').read_bytes() == b'stand-in OptiScaler.dll'
+        assert (game / 'OptiScaler' / 'streamline' / 'sl.dlss_g.dll').is_file()
+        assert (game / 'HelixSR' / 'helixsr.dll').read_bytes().startswith(b'MZ')
+        assert (game / 'HelixSR' / 'helixsr-fg' / 'nvexec64.dll').is_file()
+        assert (game / 'OptiScaler.ini').read_bytes() == b'stand-in OptiScaler.ini'   # the game's own was kept
+        assert record['moved'] and record['moved'][0]['name'] == 'OptiScaler.ini'
+        assert not (game / 'README.txt').exists()      # not in the package list: never copied
+        scaler.record_path(game).write_text(json.dumps(record), encoding='utf-8')
+        assert scaler.installed(game)
+        scaler.remove(game)
+        assert not scaler.installed(game)
+        assert {str(p.relative_to(game)): p.read_bytes() for p in game.rglob('*') if p.is_file()} == before
 
 
 def check_running_game():
@@ -358,7 +414,8 @@ def check_fsr4():
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_unsafe_folder, check_framegen, check_logging_switch,
                   check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
-                  check_helixsr, check_running_game, check_zip_slip, check_update, check_identify, check_covers, check_fsr4):
+                  check_helixsr, check_scaler, check_running_game, check_zip_slip, check_update, check_identify,
+                  check_covers, check_fsr4):
         check()
         print(f'ok  {check.__name__}')
     print('selftest passed')

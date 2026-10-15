@@ -7,6 +7,7 @@ import pytest
 from amdlss import app as appmod, fsr4, gpu, helixsr
 from amdlss.ui import plain
 from fake_helixsr import make
+from fake_scaler import make as make_package
 from test_app_smoke import Answers, shown, wait, window, hidden_root  # noqa: F401 (fixtures)
 from test_pe import build_dll
 
@@ -44,6 +45,7 @@ def build_app(window, monkeypatch, card='rdna3', answers=None, downloads_files=N
     (helix / 'amd-fsr').mkdir()
     (helix / 'amd-fsr' / fsr4.DLL).write_bytes(AMD)
     (helix / 'amd-fsr' / fsr4.LICENSE).write_text('AMD license\n')
+    make_package(tmp / 'data')   # HelixSR Scaler's package where the app looks for it
     monkeypatch.setenv('AMDLSS_HELIXSR', str(helix))
     answers = answers or Answers()
     app = appmod.App(top, tk, ttk, filedialog, answers, font)
@@ -137,6 +139,7 @@ def test_install_fsr_4_through_optiscaler(window, monkeypatch):
     app.install_game()
     wait(top, app, lambda: answers.told and not app.busy)
     assert 'choose DLSS' in answers.told[0] and 'FFX Upscaler' in answers.told[0]
+    assert (folders['Three'] / 'dxgi.dll').is_file() and (folders['Three'] / 'HelixSR' / 'helixsr.dll').is_file()
     wait(top, app, lambda: card_of(app, 'Three').state == 'FSR 4.1.1 (OptiScaler)')
     assert fsr4.in_use(folders['Three'])
     select(top, app, 'Three')

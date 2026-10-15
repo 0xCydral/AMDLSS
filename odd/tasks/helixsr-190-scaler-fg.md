@@ -63,10 +63,13 @@ Decisions:
 
 ## Tasks
 
-- [ ] T1 Pin HelixSR 1.9.0 (`HelixSR-1.9.0.zip`, 3803249, `795268f6…`); bridge maps `unsupported` and computes
+- [x] T1 Pin HelixSR 1.9.0 (`HelixSR-1.9.0.zip`, 3803249, `795268f6…`); bridge maps `unsupported` and computes
   `can_opti`; `amdlss/scaler.py` downloads/checks/extracts Scaler 1.0.3 and installs it on the OptiScaler route
   (record + backup, Remove restores); old AMDLSS 1.0.0 installs are removed through HelixSR's own uninstall;
-  fakes and tests updated.
+  fakes and tests updated. Also: 1.9.0 no longer builds `amd-fsr`, so AMD's FSR 4 DLL and its license now come
+  from the Scaler package when the HelixSR folder has none (`fsr4.amd_dll`); the streamline scan skips the mod's
+  own folders (`OptiScaler`, `HelixSR`), else its copied `streamline` DLLs made every Scaler game look like it
+  offered DLSS-G.
 - [ ] T2 DLSS 4 frame generation choice on the OptiScaler/Scaler route for games with Streamline DLSS-G, gated on
   the built FG files; ini keys through `framegen`; switching/off restores exactly; reports name the generator.
 - [ ] T3 README frame generation section + DLSS Model E note; `__init__.py` 1.1.0; release notes for players at

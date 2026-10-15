@@ -184,7 +184,9 @@ def two_game_app(window, monkeypatch, answers=None):
     from tkinter import filedialog, font, ttk
 
     from amdlss.app import App
+    from fake_scaler import make as make_package
     top, _make, tmp = window
+    make_package(tmp / 'data')   # HelixSR Scaler's package where the app looks for it
     one = tmp / 'One'
     one.mkdir()
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')

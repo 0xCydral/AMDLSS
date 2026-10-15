@@ -113,10 +113,12 @@ def parse_bridge_output(text):
 
 _INPUT = r'(?:DLSS|XeSS|FSR 2)'
 # The status text of one printed row (helixsr_install.Game.label and show); the name is whatever precedes it.
-_ROW = re.compile(r'^\s*(?P<index>\d+)\.\s+(?P<name>.+?)\s+(?P<status>HelixSR installed'
+# 1.9.0 prints "X only: not supported by the drop-in: use HelixSR Desktop (HelixSR Scaler)" for the games AMDLSS
+# installs Scaler into, and "HelixSR installed (OptiScaler, earlier version)" for an earlier install.
+_ROW = re.compile(r'^\s*(?P<index>\d+)\.\s+(?P<name>.+?)\s+(?P<status>HelixSR installed.*'
                   r'|FSR 3\.1 \(HelixSR replaces.*'
                   r'|DLSS \(HelixSR as the game.*'
-                  r'|' + _INPUT + r'(?: / ' + _INPUT + r')* \(through OptiScaler.*)$')
+                  r'|' + _INPUT + r'(?: / ' + _INPUT + r')*(?: \(through OptiScaler.*| only: .*))$')
 
 
 def parse_list_output(text):
@@ -129,8 +131,8 @@ def parse_list_output(text):
             continue
         status = match.group('status')
         game = Game(name=match.group('name').strip(), index=int(match.group('index')))
-        if status == 'HelixSR installed':
-            game.state = 'unknown'
+        if status.startswith('HelixSR installed'):
+            game.state = 'unknown'   # 'HelixSR installed' / 'HelixSR installed (OptiScaler, earlier version)'
         elif status.startswith('FSR 3.1'):
             game.fsr31, game.route = True, 'direct'
         elif status.startswith('DLSS (HelixSR as'):
@@ -384,10 +386,14 @@ def scan_anticheat(folder, depth=3):
 # under <Project>\Plugins\...\Binaries\ThirdParty\Win64, six folders down.
 NO_DLSSG = "This game has no DLSS Frame Generation for AMDLSS to replace."
 STREAMLINE_DLLS = frozenset(('sl.interposer.dll', 'sl.dlss_g.dll'))
+# Folders of the mod's own install: their Streamline copies (OptiScaler\streamline) and HelixSR's files are the
+# mod's, never the game's, so they do not count as the game offering DLSS Frame Generation.
+MOD_FOLDERS = frozenset(('optiscaler', 'helixsr', 'amdlss-scaler-backup'))
 
 
 def scan_streamline(folder, depth=7):
-    """True when `folder` holds both Streamline DLLs, in any two places up to `depth` levels down (links not followed)."""
+    """True when the game itself holds both Streamline DLLs, in any two places up to `depth` levels down (links not
+    followed); the folders AMDLSS's own installs bring (see MOD_FOLDERS) are not searched."""
     found, todo = set(), [(folder, 0)]
     while todo and found != STREAMLINE_DLLS:
         path, level = todo.pop()
@@ -398,7 +404,8 @@ def scan_streamline(folder, depth=7):
         for entry in entries:
             if entry.name.lower() in STREAMLINE_DLLS:
                 found.add(entry.name.lower())
-            elif level < depth and entry.is_dir(follow_symlinks=False):
+            elif level < depth and entry.is_dir(follow_symlinks=False) \
+                    and entry.name.lower() not in MOD_FOLDERS:
                 todo.append((entry.path, level + 1))
     return found == STREAMLINE_DLLS
 
@@ -410,15 +417,15 @@ WARNINGS = ("Close the game first.\n"
 
 
 def plan_text(game, route=None):
-    """What installing will do, before the user agrees (HelixSR's own description of its two routes)."""
+    """What installing will do, before the user agrees (HelixSR's own description of its routes; the OptiScaler
+    route is HelixSR Scaler, which AMDLSS installs)."""
     if (route or game.route) == 'direct':
         files = ''.join(f'\n  {path}' for path in game.fsr_targets[:3])
         what = ("HelixSR replaces the game's FSR 3.1 DLL and keeps the game's own file next to it as "
                 f"*.original.dll:{files}")
     else:
-        where = game.exe_folder or "the game's .exe folder"
-        what = (f"HelixSR puts OptiScaler 0.9.4 next to the game's .exe ({where}) and points it at HelixSR. "
-                f"Files it replaces go to the HelixSR{host.path_module().sep}backup folder there.")
+        from . import scaler   # lazy: scaler imports helixsr, which imports this module
+        what = scaler.plan_text(game)
     text = f'{what}\n\n{WARNINGS}'
     if game.anticheat:
         text += (f"\n\nAMDLSS found anti-cheat files in this game ({', '.join(game.anticheat)}). Installing here "

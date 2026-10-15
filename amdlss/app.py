@@ -12,8 +12,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import (VERSION, covers, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, reports, settings,
-               update)
+from . import (VERSION, covers, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, reports,
+               settings, update)
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
 
@@ -580,7 +580,7 @@ class App:
                         and game.reason in ('', gamelist.UNSAFE_FOLDER):
                     game.anticheat = gamelist.scan_anticheat(game.folder)
                     game.streamline = gamelist.scan_streamline(game.folder)
-                fsr4.mark(game)
+                fsr4.mark(game)   # the state of whatever is installed, Scaler and FSR 4 included
             self.judge(found)
             return found
 
@@ -696,7 +696,7 @@ class App:
         def install():
             try:
                 after = fsr4.install_game(self.helixsr, game, extras, want, pick, source,
-                                          fsr4.license_of(self.helixsr_folder), self.data_dir, record,
+                                          fsr4.license_of(self.helixsr_folder, self.data_dir), self.data_dir, record,
                                           lambda done, total: self.post(self.download_progress_fsr4, done, total))
             except helixsr.HelixSRError as error:
                 record.fail(error)
@@ -714,7 +714,11 @@ class App:
         self.work(install, lambda after: self.installed(after, bool(frame_gen)))
 
     def download_progress_fsr4(self, done, total):
-        self.progress.configure(text=f"Downloading AMD's FSR loader: {done >> 10} of {total >> 10} KB")
+        """The downloads this path can make: AMD's FSR loader (26 KB) and the HelixSR Scaler package (about 127 MB)."""
+        if total >= 1 << 20:
+            self.progress.configure(text=f'Downloading HelixSR Scaler: {done >> 20} of {total >> 20} MB')
+        else:
+            self.progress.configure(text=f"Downloading AMD's FSR loader: {done >> 10} of {total >> 10} KB")
 
     def game_log(self, game, action):
         """on_line for one action in `game`: the window's log, and the game's own log file for Collect logs."""

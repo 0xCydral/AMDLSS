@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """FSR 4.1.1 as a per-game upscaler next to HelixSR.
 
-HelixSR 1.9.0 ships AMD's official FidelityFX upscaler DLL (amd-fsr/amd_fidelityfx_upscaler_dx12.dll, file version
-4.1.1.2740, redistributed under AMD's license, which is copied beside every AMD DLL AMDLSS installs). It holds FSR 4 for
-RDNA 4 (FP8) and for RDNA 3 desktop cards (INT8), and FSR 3.1.5 for every other card. RDNA 2 (RX 6000) is not covered:
-those cards need a community DLL that the user picks once and AMDLSS does not download.
+HelixSR ships AMD's official FidelityFX upscaler DLL (amd_fidelityfx_upscaler_dx12.dll, file version 4.1.1.2740,
+redistributed under AMD's license, which is copied beside every AMD DLL AMDLSS installs). It holds FSR 4 for RDNA 4
+(FP8) and for RDNA 3 desktop cards (INT8), and FSR 3.1.5 for every other card. RDNA 2 (RX 6000) is not covered:
+those cards need a community DLL that the user picks once and AMDLSS does not download. Where the DLL lives depends
+on the release: HelixSR 1.9.0.2 built it into the HelixSR folder's amd-fsr, and 1.9.0 ships it in the HelixSR Scaler
+package (OptiScaler\\amd_fidelityfx_upscaler_dx12.dll) — amd_dll() reads both.
 
 This file is the whole feature apart from the window:
 
@@ -20,13 +22,15 @@ import shutil
 from collections import namedtuple
 from pathlib import Path
 
-from . import VERSION, framegen, gpu, helixsr, host, pe
+from . import VERSION, framegen, gpu, helixsr, host, pe, scaler
 from . import games as gamelist
 from .helixsr import HelixSRError
 
 DLL = 'amd_fidelityfx_upscaler_dx12.dll'
 LICENSE = 'FidelityFX_v2_LICENSE.md'
-FOLDER = 'amd-fsr'                     # in the HelixSR folder: AMD's DLL and its license
+FOLDER = 'amd-fsr'                     # in a pre-1.9.0 HelixSR folder: AMD's DLL and its license
+PACKAGE_DLL = Path('OptiScaler') / DLL      # in the HelixSR Scaler package (1.9.0): AMD's DLL
+PACKAGE_LICENSE = Path('Licenses') / LICENSE  # and its license, beside the package's other ones
 USER_FOLDER = 'fsr4'                   # in the AMDLSS data folder: the DLL the user picked
 ORIGIN = 'origin.txt'                  # beside it: the path it came from
 AMD_VERSION = '4.1.1.2740'
@@ -124,9 +128,24 @@ def _amd_dll_ok(path):
     return _VERIFIED[key]
 
 
-def license_of(helixsr_folder):
-    """AMD's license file in the HelixSR folder: it travels with every AMD DLL AMDLSS installs."""
-    return Path(helixsr_folder) / FOLDER / LICENSE if helixsr_folder else None
+def license_of(helixsr_folder, data_dir=None):
+    """AMD's license file: it travels with every AMD DLL AMDLSS installs (from the HelixSR folder, or the HelixSR
+    Scaler package where HelixSR 1.9.0 keeps AMD's DLL). None when neither holds it."""
+    _dll, license_file = amd_dll(helixsr_folder, data_dir)
+    return license_file if license_file is not None and license_file.is_file() else None
+
+
+def amd_dll(helixsr_folder, data_dir):
+    """(DLL, license) for AMD's official FSR 4 DLL: from the HelixSR folder (HelixSR 1.9.0.2 built it into
+    amd-fsr), else from the HelixSR Scaler package (1.9.0 drops its own build and ships AMD's DLL under OptiScaler\\
+    with its license under Licenses\\). (None, None) when neither is there."""
+    legacy = Path(helixsr_folder) / FOLDER if helixsr_folder else None
+    if legacy is not None and (legacy / DLL).is_file():
+        return legacy / DLL, legacy / LICENSE
+    package = scaler.locate(data_dir, os.environ.get('AMDLSS_SCALER', '')) if data_dir else None
+    if package is not None and (package / PACKAGE_DLL).is_file():
+        return package / PACKAGE_DLL, package / PACKAGE_LICENSE
+    return None, None
 
 
 def find_source(gpu_class, helixsr_folder, data_dir):
@@ -143,14 +162,18 @@ def find_source(gpu_class, helixsr_folder, data_dir):
                       "press Rescan, or press Choose FSR 4 DLL.", 'needs your DLL')
     if not helixsr_folder:
         return Source(None, '', "HelixSR is not installed, so AMD's FSR 4 DLL is missing.", 'no DLL')
-    path = Path(helixsr_folder) / FOLDER / DLL
+    path, _license = amd_dll(helixsr_folder, data_dir)
+    if path is None:
+        return Source(None, '', "AMD's FSR 4 DLL is missing: the HelixSR folder has no amd-fsr (HelixSR 1.9.0 does "
+                                'not build one) and the HelixSR Scaler package, which carries it, is not '
+                                'downloaded yet: it comes with the OptiScaler route.', 'no DLL')
     try:
         good = _amd_dll_ok(path)
     except OSError:
         return Source(None, '', "The HelixSR folder has no AMD FSR 4 DLL (amd-fsr).", 'no DLL')
     if not good:
-        return Source(None, '', "AMD's FSR 4 DLL in the HelixSR folder has changed (its SHA-256 differs from the one "
-                                'AMDLSS expects), so AMDLSS will not use it.', 'DLL changed')
+        return Source(None, '', f"AMD's FSR 4 DLL at {path} has changed (its SHA-256 differs from the one AMDLSS "
+                                'expects), so AMDLSS will not use it.', 'DLL changed')
     return Source(path, f"AMD's DLL {AMD_VERSION}", '', '')
 
 
@@ -345,7 +368,7 @@ def _install_folder(folder, targets, source, loader, license_file, record):
         move(names[OLD_DLL])
         create(names[OLD_DLL].name, loader)
     create(names[DLL].name if DLL in names else DLL, source.path)
-    if (loader or not source.user) and not (folder / LICENSE).exists():
+    if license_file is not None and (loader or not source.user) and not (folder / LICENSE).exists():
         create(LICENSE, license_file)
 
 
@@ -541,6 +564,7 @@ def target_folders(game):
 def mark(game):
     """Sets `game.upscaler`, and `game.state` for a drop-in, from the files on disk: HelixSR does not know about a
     drop-in AMDLSS made, and sees an OptiScaler install the same whichever DLL it is pointed at."""
+    scaler.mark(game)   # an AMDLSS Scaler install first: the OptiScaler route's state comes from its record
     game.upscaler = ''
     if game.state == 'none' and dropin_folders(target_folders(game)):
         game.state, game.upscaler = 'fsr4', 'fsr4'
@@ -568,9 +592,10 @@ def plan_text(game, route, source, data_dir):
             text += '\n\n' + LOADER_NOTE
     else:
         where = game.exe_folder or "the game's .exe folder"
-        text = (f"HelixSR puts OptiScaler 0.9.4 next to the game's .exe ({where}), then AMDLSS points OptiScaler at "
-                f"{NAME} ({source.label}). Files HelixSR replaces go to the HelixSR{host.path_module().sep}backup "
-                'folder there.')
+        text = (f"AMDLSS downloads HelixSR Scaler {scaler.VERSION} (about {scaler.ZIP_SIZE >> 20} MB, checked by "
+                f"SHA-256) and puts OptiScaler 0.9.4 with HelixSR built in next to the game's .exe ({where}), then "
+                f"points OptiScaler at {NAME} ({source.label}). Files it replaces are kept in the HelixSR folder's "
+                f"{scaler.BACKUP} and put back by Remove.")
     if not source.user:
         text += "\n\nAMD's license notice (FidelityFX_v2_LICENSE.md) is copied next to AMD's DLL."
     return f'{text}\n\n{gamelist.WARNINGS}\n\nInstall into {game.name}?'
@@ -615,13 +640,17 @@ def install_game(helix, game, extras, want, route, source, license_file, data_di
     `game.fsr4` (the Availability) says whether the game can use it and by which routes."""
     if want == 'helixsr':
         if game.state != 'fsr4' and game.upscaler != 'fsr4':
-            return mark(helix.install(game, extras, on_line, route))
+            if (route or game.route) == 'optiscaler':
+                return scaler.install_game(helix, game, extras, data_dir, on_line, progress)
+            return mark(helix.install(game, extras, on_line))
         fresh = mark(helix.guard(game, extras))
         if fresh.state == 'fsr4':
             _say(on_line, remove_dropin(target_folders(fresh)))
-        else:
-            restore_optiscaler(fresh.exe_folder, data_dir)
-        return mark(helix.install(game, extras, on_line, None))
+            return mark(helix.install(fresh, extras, on_line))
+        restore_optiscaler(fresh.exe_folder, data_dir)
+        if not scaler.installed(fresh.exe_folder):
+            _say(on_line, ["HelixSR's earlier install stays; its Update replaces it with HelixSR Scaler."])
+        return mark(fresh)
     if not (game.fsr4 and game.fsr4.ok):
         raise HelixSRError(game.fsr4.reason if game.fsr4 else f'{NAME} has not been checked for {game.name}.')
     fresh = mark(helix.guard(game, extras))
@@ -640,11 +669,11 @@ def install_game(helix, game, extras, want, route, source, license_file, data_di
     if way == 'direct':
         install_dropin(_relisted(helix, game, extras).fsr_targets, source, data_dir, license_file, progress)
     else:
-        after = helix.install(game, extras, on_line, 'optiscaler')
+        after = scaler.install_game(helix, game, extras, data_dir, on_line, progress)
         try:
             use_in_optiscaler(after.exe_folder, source, license_file, data_dir)
         except HelixSRError as error:
-            raise HelixSRError(f'OptiScaler is installed in {game.name}, but {NAME} could not be set up: {error}')
+            raise HelixSRError(f'HelixSR Scaler is installed in {game.name}, but {NAME} could not be set up: {error}')
     return _relisted(helix, game, extras)
 
 
@@ -658,7 +687,12 @@ def remove_game(helix, game, extras, data_dir, on_line=None):
     if game.upscaler == 'fsr4':
         helix.guard(game, extras)
         restore_optiscaler(game.exe_folder, data_dir)
-    after = helix.remove(game, extras, on_line)
+    if scaler.installed(game.exe_folder):
+        fresh = mark(helix.guard(game, extras))
+        _say(on_line, scaler.remove(fresh.exe_folder))
+        fresh.state, fresh.upscaler = 'none', ''
+    else:
+        fresh = helix.remove(game, extras, on_line)
     if game.exe_folder:
         framegen.forget(game.exe_folder, data_dir)
-    return mark(after)
+    return mark(fresh)

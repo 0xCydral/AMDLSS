@@ -236,62 +236,61 @@ def run_recorder(monkeypatch):
     return seen
 
 
-def test_the_default_route_runs_the_installers_own_install_n(fake, monkeypatch):
+def test_the_direct_route_runs_the_installers_own_install_n(fake, monkeypatch):
     client, _one, _two = fake
     game = client.list_games()[0]
     seen = run_recorder(monkeypatch)
-    for route in (None, 'direct'):
-        with pytest.raises(helixsr.HelixSRError):
-            client.install(game, route=route)
-    assert [command[3:5] for command in seen] == [['install', '1'], ['install', '1']]
-
-
-def test_the_optiscaler_route_runs_the_install_bridge_with_the_game_folder(fake, monkeypatch):
-    client, one, _two = fake
-    game = client.list_games()[0]
-    seen = run_recorder(monkeypatch)
     with pytest.raises(helixsr.HelixSRError):
-        client.install(game, ['D:/extra'], route='optiscaler')
-    _python, flag, code, script, here, folder, extra = seen[0]
-    assert (flag, code, script) == ('-I', '-c', helixsr.BRIDGE_INSTALL)
-    assert (here, folder, extra) == (str(client.folder), str(one), 'D:/extra')
-    # the bridge sets what the installer's "o" answer sets, then calls its own install and done message
-    assert "g.route, g.chosen = 'optiscaler', g.can_opti" in helixsr.BRIDGE_INSTALL
-    assert 'h.install(g, here)' in helixsr.BRIDGE_INSTALL and 'h.done_message([g])' in helixsr.BRIDGE_INSTALL
+        client.install(game)
+    assert [command[3:5] for command in seen] == [['install', '1']]
 
 
-def test_a_game_without_both_routes_ignores_the_optiscaler_request(fake, monkeypatch):
+def test_install_into_a_game_without_fsr31_uses_the_installers_own_refusal(fake):
+    # HelixSR 1.9.0's installer refuses games without an FSR 3.1 DLL (HelixSR Scaler is the route there): the
+    # error is the installer's own, in its own words
     client, _one, _two = fake
     three = client.list_games()[2]
-    seen = run_recorder(monkeypatch)
-    with pytest.raises(helixsr.HelixSRError):
-        client.install(three, route='optiscaler')
-    assert seen[0][3:5] == ['install', '3']
+    with pytest.raises(helixsr.HelixSRError, match='no FSR 3.1 DLL'):
+        client.install(three)
 
 
-def test_the_optiscaler_route_installs_and_removes_through_the_bridge(fake):
+def test_the_bridge_maps_the_new_installers_unsupported_route(fake):
+    client, _one, _two = fake
+    listed = client.list_games()
+    assert [g.route for g in listed] == ['direct', 'direct', 'optiscaler']  # 'unsupported' -> the Scaler route
+    assert [g.can_opti for g in listed] == [True, True, False]
+    assert [g.state for g in listed] == ['none', 'none', 'none']
+
+
+def test_the_bridge_reads_an_earlier_installs_record_and_version(fake):
+    # an AMDLSS 1.0.0 install (OptiScaler 0.9.4 through the old bridge): the new installer reports it as an
+    # install of an earlier version that can only be removed, and its own DLL names the version
+    from fake_helixsr import old_install
     client, one, _two = fake
-    dll = one / 'amd_fidelityfx_upscaler_dx12.dll'
-    lines = []
-    after = client.install(client.list_games()[0], on_line=lambda text, final: lines.append(text), route='optiscaler')
-    assert after.state == 'optiscaler' and after.route == 'optiscaler' and after.in_game() == 'DLSS'
-    assert dll.read_bytes() == b'GAME ORIGINAL'  # the drop-in was not used
-    assert (one / 'opti.marker').read_text() == 'chosen' and (one / 'OptiScaler.ini').is_file()
-    assert any('Done. Start the game' in line for line in lines), lines
-    assert 'Insert' in games.after_text(after)
+    old_install(one)
     listed = client.list_games()[0]
-    assert listed.state == 'optiscaler' and not listed.route_choice
+    assert listed.state == 'optiscaler' and listed.route == 'direct'   # the drop-in is what `install N` would do
+    assert listed.helixsr == '1.9.0' and not listed.route_choice
+    assert listed.installed and listed.default_route == 'optiscaler'
+    # `uninstall N` removes it (HelixSR's own uninstall_optiscaler reads the same record)
     client.remove(listed)
-    assert not (one / 'opti.marker').exists() and not (one / 'OptiScaler.ini').exists()
+    assert not (one / 'dxgi.dll').exists() and not (one / 'OptiScaler.ini').exists()
+    assert not (one / 'HelixSR').exists()
+    assert sorted(p.name for p in one.iterdir()) == ['amd_fidelityfx_upscaler_dx12.dll']
 
 
-def test_the_bridge_refuses_a_game_that_cannot_use_the_optiscaler_route(fake):
+def test_the_bridge_reads_a_scaler_only_games_old_install(fake):
+    # a game without FSR 3.1: an earlier install there shows as the Scaler route, which is also what Update does
+    from fake_helixsr import old_install
     client, _one, _two = fake
     three = client.list_games()[2]
-    code, tail = helixsr.run_streaming(client.optiscaler_command(three.folder), client.folder)
-    assert code != 0 and 'cannot use the OptiScaler route' in tail[-1]
-    code, tail = helixsr.run_streaming(client.optiscaler_command(three.folder + 'x'), client.folder)
-    assert code != 0 and 'no longer in the list' in tail[-1]
+    Path(three.folder).mkdir()
+    old_install(Path(three.folder))
+    listed = client.list_games()[2]
+    assert listed.state == 'optiscaler' and listed.route == 'optiscaler'
+    assert listed.helixsr == '1.9.0' and listed.can_install and not listed.route_choice
+    client.remove(listed)
+    assert sorted(p.name for p in Path(three.folder).iterdir()) == []
 
 
 def test_the_bridge_also_reports_games_helixsr_does_not_list_without_changing_its_numbering(tmp_path):
@@ -339,14 +338,13 @@ def test_the_bridge_reports_the_helixsr_version_a_game_runs(fake):
     client, one, _two = fake
     assert [g.helixsr for g in client.list_games()] == ['', '', '']   # nothing installed
     client.install(client.list_games()[0])
-    assert client.list_games()[0].helixsr == ''   # installed, but no record and no version in the stand-in DLL
-    dll = one / 'amd_fidelityfx_upscaler_dx12.dll'
-    dll.write_bytes(b'HELIX\x00HelixSR 1.8.1\x00')
-    assert client.list_games()[0].helixsr == '1.8.1'   # the DLL is the fallback
-    (one / 'helixsr-install.json').write_text('{"helixsr": "1.9.0"}')
-    assert client.list_games()[0].helixsr == '1.9.0'   # the install record wins
+    assert client.list_games()[0].helixsr == '1.9.0'   # the direct install's record names it
     (one / 'helixsr-install.json').write_text('not json')
-    assert client.list_games()[0].helixsr == '1.8.1'
+    (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'HELIX\x00HelixSR 1.8.1\x00')
+    assert client.list_games()[0].helixsr == '1.8.1'   # no record: the DLL in the game is the fallback
+    (one / 'HelixSR').mkdir(exist_ok=True)
+    (one / 'HelixSR' / 'helixsr.dll').write_bytes(b'HELIX\x00HelixSR 1.8.9\x00')
+    assert client.list_games()[0].helixsr == '1.8.1'   # the drop-in's own DLL answers for the direct route
     assert games.from_json([{'name': 'x'}])[0].helixsr == ''   # a bridge without the field: no hint
 
 

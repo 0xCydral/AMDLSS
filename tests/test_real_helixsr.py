@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The real thing, without a real game: HelixSR's own installer (both routes) into a FAKE game folder.
+"""The real thing, without a real game: HelixSR's own installer and HelixSR Scaler into a FAKE game folder.
 
-Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json); the Python
-HelixSR's setup uses must be there (%LOCALAPPDATA%\\HelixSR\\python, or on Linux a python3 with numpy). The folder
-is copied into the temp folder's amdlss-fake first, so HelixSR's
-own files are never written, and the install goes only into the fake game there. AMDLSS_TEST_INSTALLER may name a
-newer setup/helixsr_install.py to lay over the copy. AMDLSS_TEST_ROOT replaces the %TEMP%\\amdlss-fake folder.
-Everything under that folder is deleted at the end.
+Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json) and
+AMDLSS_TEST_SCALER names the unpacked HelixSR Scaler package (HelixSR-Scaler-1.0.3, the one with OptiScaler.dll);
+the Python HelixSR's setup uses must be there (%LOCALAPPDATA%\\HelixSR\\python, or on Linux a python3 with numpy).
+The HelixSR folder is copied into the temp folder's amdlss-fake first, so HelixSR's own files are never written; the
+Scaler package is only read. The install goes only into the fake game there. AMDLSS_TEST_INSTALLER may name a newer
+setup/helixsr_install.py to lay over the copy. AMDLSS_TEST_ROOT replaces the %TEMP%\\amdlss-fake folder. Everything
+under that folder is deleted at the end.
 """
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -18,11 +20,14 @@ from pathlib import Path
 
 import pytest
 
-from amdlss import framegen, games, helixsr, logs
+from amdlss import framegen, fsr4, games, helixsr, logs, scaler
 
 SOURCE = os.environ.get('AMDLSS_TEST_HELIXSR', '')
-pytestmark = pytest.mark.skipif(not (SOURCE and helixsr.built(SOURCE) and helixsr.find_python() is not None),
-                                reason='AMDLSS_TEST_HELIXSR does not name a built HelixSR folder')
+SCALER_SOURCE = os.environ.get('AMDLSS_TEST_SCALER', '')
+pytestmark = pytest.mark.skipif(
+    not (SOURCE and helixsr.built(SOURCE) and helixsr.find_python() is not None and SCALER_SOURCE
+         and (Path(SCALER_SOURCE) / scaler.DLL).is_file()),
+    reason='AMDLSS_TEST_HELIXSR does not name a built HelixSR folder, or AMDLSS_TEST_SCALER a Scaler package')
 FAKE_ROOT = Path(os.environ.get('AMDLSS_TEST_ROOT') or Path(tempfile.gettempdir()) / 'amdlss-fake')
 
 
@@ -32,6 +37,12 @@ def sha(path):
 
 def tree(folder):
     return {str(p.relative_to(folder)): sha(p) for p in sorted(Path(folder).rglob('*')) if p.is_file()}
+
+
+def amd_dll():
+    """AMD's real FSR 4 DLL: from the HelixSR folder when that build has it (1.9.0.2), else the Scaler package."""
+    legacy = Path(SOURCE) / 'amd-fsr' / fsr4.DLL
+    return legacy if legacy.is_file() else Path(SCALER_SOURCE) / 'OptiScaler' / fsr4.DLL
 
 
 @pytest.fixture
@@ -46,10 +57,13 @@ def fake_game():
     game.mkdir()
     (game / 'FakeGame.exe').write_bytes(b'MZ dummy executable')
     (game / 'nvngx_dlss.dll').write_bytes(b'dummy dlss')
-    shutil.copyfile(Path(SOURCE) / 'amd-fsr' / 'amd_fidelityfx_upscaler_dx12.dll',
-                    game / 'amd_fidelityfx_upscaler_dx12.dll')
+    shutil.copyfile(amd_dll(), game / 'amd_fidelityfx_upscaler_dx12.dll')
     yield copy, game.resolve()
     shutil.rmtree(FAKE_ROOT, ignore_errors=True)
+
+
+def listed(client, game):
+    return [g for g in client.list_games([game]) if Path(g.folder) == game][0]
 
 
 def test_install_and_remove_into_a_fake_game(fake_game):
@@ -58,9 +72,8 @@ def test_install_and_remove_into_a_fake_game(fake_game):
     before = tree(game)
     fsr_dll = game / 'amd_fidelityfx_upscaler_dx12.dll'
     client = helixsr.HelixSR(copy)
-    listed = [g for g in client.list_games([game]) if Path(g.folder) == game]
-    assert len(listed) == 1
-    entry = listed[0]
+    entry = listed(client, game)
+    assert len([g for g in client.list_games([game]) if Path(g.folder) == game]) == 1
     assert entry.state == 'none' and entry.route == 'direct' and entry.fsr31 and 'DLSS' in entry.inputs
 
     lines = []
@@ -77,47 +90,71 @@ def test_install_and_remove_into_a_fake_game(fake_game):
     assert tree(game) == before  # every file back, byte for byte, and nothing left behind
 
 
-def test_optiscaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_path):
+def test_the_scaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_path, monkeypatch):
+    # the OptiScaler route: AMDLSS downloads and places HelixSR Scaler 1.0.3 (the real package, read-only);
+    # OptiScaler's own streamline DLLs and HelixSR's built DLL go in, its ini gets AMDLSS's frame generation
+    # switches, and Remove puts every game file back byte for byte
     copy, game = fake_game
     assert FAKE_ROOT in game.parents
     before = tree(game)
+    monkeypatch.setenv('AMDLSS_SCALER', SCALER_SOURCE)
     client = helixsr.HelixSR(copy)
-    entry = [g for g in client.list_games([game]) if Path(g.folder) == game][0]
+    entry = listed(client, game)
     assert entry.can_opti and entry.route_choice and entry.route == 'direct' and entry.default_route == 'optiscaler'
 
     lines = []
-    after = client.install(entry, [game], lambda text, final: lines.append(text), route='optiscaler')
+    after = scaler.install_game(client, entry, [game], tmp_path / 'data', lambda text, final: lines.append(text))
     assert after.state == 'optiscaler' and after.in_game() == 'DLSS'
-    fsr_dll = 'amd_fidelityfx_upscaler_dx12.dll'
-    assert sha(game / fsr_dll) == before[fsr_dll]  # the drop-in was not used: the game's FSR DLL is untouched
-    for name in ('dxgi.dll', 'OptiScaler.ini', 'fakenvapi.dll', 'HelixSR/helixsr-install.json',
-                 'HelixSR/amd_fidelityfx_framegeneration_dx12.dll'):
-        assert (game / name).is_file(), name
-    assert any('Done. Start the game' in line for line in lines), lines
-    assert [g for g in client.list_games([game]) if Path(g.folder) == game][0].state == 'optiscaler'
-
+    assert scaler.installed(game) and scaler.mark(listed(client, game)).state == 'optiscaler'
+    assert (game / 'dxgi.dll').read_bytes() == (Path(SCALER_SOURCE) / 'OptiScaler.dll').read_bytes()
+    assert (game / 'OptiScaler' / 'streamline' / 'sl.dlss_g.dll').is_file()
+    assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (copy / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes()
+    assert (game / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == Path(amd_dll()).read_bytes()  # not touched
+    assert not (game / 'setup_linux.sh').exists()   # the download's own files are not copied
     ini = (game / 'OptiScaler.ini').read_bytes()
-    assert framegen.apply(game, True, tmp_path)
+    assert not framegen.is_on(game) and b'FGInput=auto' in ini
+
+    assert framegen.apply(game, True, tmp_path / 'data')   # AMD FSR frame generation, as before
     on = (game / 'OptiScaler.ini').read_bytes()
     assert framegen.is_on(game)
     assert on.replace(b'FGInput=dlssg', b'FGInput=auto').replace(b'FGOutput=fsrfg', b'FGOutput=auto').replace(
         b'PreserveSwapChain=false', b'PreserveSwapChain=auto').replace(b'\r\nEnabled=true', b'\r\nEnabled=auto') == ini
-    assert b'FGInput=dlssg' in on and b'FGOutput=fsrfg' in on
-    assert framegen.apply(game, False, tmp_path) and (game / 'OptiScaler.ini').read_bytes() == ini
+    assert framegen.apply(game, False, tmp_path / 'data') and (game / 'OptiScaler.ini').read_bytes() == ini
 
-    assert framegen.apply(game, True, tmp_path, framegen.LOGGING)   # the real [Log] section has both keys
+    assert framegen.apply(game, True, tmp_path / 'data', framegen.LOGGING)   # the real [Log] section has both keys
     assert framegen.is_on(game, framegen.LOGGING) and b'LogToFile=true' in (game / 'OptiScaler.ini').read_bytes()
     (game / 'OptiScaler.log').write_text('[Info] a log the switch made')
     with zipfile.ZipFile(logs.collect(after, copy, tmp_path / 'data', tmp_path / 'out', {}, windows=False)) as archive:
         names = set(archive.namelist())
-    assert {'exe-folder/OptiScaler.log', 'exe-folder/OptiScaler.ini', 'exe-folder/HelixSR/helixsr-install.json',
+    assert {'exe-folder/OptiScaler.log', 'exe-folder/OptiScaler.ini', 'exe-folder/HelixSR/helixsr.dll',
             'files.txt', 'system.txt'} <= names, names
 
-    framegen.apply(game, True, tmp_path)
-    listed =[g for g in client.list_games([game]) if Path(g.folder) == game][0]
-    client.remove(listed, [game])
-    framegen.forget(game, tmp_path)
+    fsr4.remove_game(client, scaler.mark(listed(client, game)), [game], tmp_path / 'data')
+    framegen.forget(game, tmp_path / 'data')
     assert tree(game) == before  # every file back, byte for byte, OptiScaler.ini and the HelixSR folder gone
+    assert not (tmp_path / 'data' / framegen.RECORD).exists()
+
+
+def test_an_earlier_versions_install_is_recognised_and_removed(fake_game):
+    # an AMDLSS 1.0.0 install: the old bridge called HelixSR's own installer, whose record lives in
+    # HelixSR\helixsr-install.json. The new installer reports it and removes it with its own uninstall_optiscaler.
+    copy, game = fake_game
+    before = tree(game)
+    folder = game / 'HelixSR'
+    folder.mkdir()
+    (game / 'dxgi.dll').write_bytes(b'OPTISCALER 0.9.4')
+    (game / 'OptiScaler.ini').write_bytes(b'[FrameGen]\r\nFGInput=auto\r\nFGOutput=auto\r\n')
+    (folder / 'helixsr.dll').write_bytes(b'HELIX\x00HelixSR 1.9.0\x00')
+    (folder / 'amd_fidelityfx_framegeneration_dx12.dll').write_bytes(b'AMD FG')
+    (folder / 'helixsr-install.json').write_text(json.dumps(
+        {'route': 'optiscaler', 'optiscaler': 'dxgi.dll', 'ini': 'created',
+         'created': ['dxgi.dll', 'OptiScaler.ini', 'HelixSR/helixsr.dll',
+                     'HelixSR/amd_fidelityfx_framegeneration_dx12.dll']}), encoding='utf-8')
+    client = helixsr.HelixSR(copy)
+    entry = listed(client, game)
+    assert entry.state == 'optiscaler' and entry.helixsr == '1.9.0' and entry.installed
+    client.remove(entry, [game])
+    assert tree(game) == before
 
 
 def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
@@ -138,8 +175,7 @@ def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
     other = drive / 'OtherGame'
     other.mkdir(parents=True)
     (other / 'Other-Win64-Shipping.exe').write_bytes(b'M' * 1000)
-    shutil.copyfile(Path(SOURCE) / 'amd-fsr' / 'amd_fidelityfx_upscaler_dx12.dll',
-                    other / 'amd_fidelityfx_upscaler_dx12.dll')
+    shutil.copyfile(amd_dll(), other / 'amd_fidelityfx_upscaler_dx12.dll')
     before = tree(other)
     client = helixsr.HelixSR(copy)
     rows = games.classify(client.list_games([content, other]), [str(content), str(other)])
@@ -151,37 +187,39 @@ def test_an_xbox_gdk_folder_helixsr_widens_is_corrected_and_refused(fake_game):
     assert tree(other) == before
 
 
-def fsr4_world(fake_game, tmp_path):
-    """The real client, AMD's real DLL from this HelixSR folder, and the fake game as HelixSR lists it."""
+def fsr4_world(fake_game, tmp_path, monkeypatch):
+    """The real client, AMD's real DLL (from the Scaler package on 1.9.0), and the fake game as HelixSR lists it."""
     from amdlss import fsr4, gpu
     copy, game = fake_game
     assert FAKE_ROOT in game.parents
+    monkeypatch.setenv('AMDLSS_SCALER', SCALER_SOURCE)
     client = helixsr.HelixSR(copy)
     source = fsr4.find_source(gpu.RDNA4, copy, tmp_path / 'data')
     assert source.path and source.label == "AMD's DLL 4.1.1.2740"   # the pinned SHA-256 matches the real file
 
-    def listed():
+    def listed_():
         entry = [g for g in client.list_games([game]) if Path(g.folder) == game][0]
         entry.fsr4 = fsr4.availability(entry, source)
         return fsr4.mark(entry)
 
     def go(want, route=None, entry=None):
-        entry = entry or listed()
+        entry = entry or listed_()
         entry.fsr4 = fsr4.availability(entry, source)
-        return fsr4.install_game(client, entry, [game], want, route, source, fsr4.license_of(copy), tmp_path / 'data')
+        return fsr4.install_game(client, entry, [game], want, route, source, fsr4.license_of(copy, tmp_path / 'data'),
+                                 tmp_path / 'data')
 
-    return client, game, listed, go, source
+    return client, game, listed_, go, source
 
 
-def test_fsr4_on_the_optiscaler_route_and_back_with_the_real_helixsr(fake_game, tmp_path):
+def test_fsr4_on_the_optiscaler_route_and_back_with_the_real_helixsr(fake_game, tmp_path, monkeypatch):
     from amdlss import fsr4
-    client, game, listed, go, source = fsr4_world(fake_game, tmp_path)
+    client, game, listed, go, source = fsr4_world(fake_game, tmp_path, monkeypatch)
     before = tree(game)
     assert listed().fsr4.ok and listed().fsr4.routes == ('direct', 'optiscaler')
 
     after = go('helixsr', 'optiscaler')
     helix_ini = (game / 'OptiScaler.ini').read_bytes()
-    assert after.state == 'optiscaler' and after.upscaler == ''
+    assert after.state == 'optiscaler' and after.upscaler == '' and scaler.installed(game)
     after = go('fsr4', entry=after)
     assert after.state == 'optiscaler' and after.upscaler == 'fsr4' and after.state_text == 'FSR 4.1.1 (OptiScaler)'
     ini = (game / 'OptiScaler.ini').read_bytes()
@@ -203,9 +241,9 @@ def test_fsr4_on_the_optiscaler_route_and_back_with_the_real_helixsr(fake_game, 
     assert not (tmp_path / 'data' / framegen.RECORD).exists()
 
 
-def test_fsr4_drop_in_and_switching_with_the_real_helixsr(fake_game, tmp_path):
+def test_fsr4_drop_in_and_switching_with_the_real_helixsr(fake_game, tmp_path, monkeypatch):
     from amdlss import fsr4
-    client, game, listed, go, source = fsr4_world(fake_game, tmp_path)
+    client, game, listed, go, source = fsr4_world(fake_game, tmp_path, monkeypatch)
     dll = game / fsr4.DLL
     dll.write_bytes(b'THE GAMES OWN FSR 3.1 DLL')
     before = tree(game)

@@ -58,6 +58,24 @@ def test_a_changed_or_missing_amd_dll_is_not_used(helix, tmp_path):
     assert 'HelixSR' in fsr4.find_source(gpu.RDNA4, None, tmp_path / 'data').problem
 
 
+def test_amds_dll_comes_from_the_scaler_package_when_the_folder_has_none(helix, tmp_path):
+    # HelixSR 1.9.0 does not build amd-fsr: the HelixSR Scaler package carries AMD's DLL and its license
+    from fake_scaler import make as make_package
+    (helix / 'amd-fsr' / fsr4.DLL).unlink()
+    data = tmp_path / 'data'
+    package = make_package(data)
+    (package / fsr4.PACKAGE_DLL).write_bytes(AMD_BYTES)
+    (package / fsr4.PACKAGE_LICENSE).write_text('AMD license\n')
+    source = fsr4.find_source(gpu.RDNA4, helix, data)
+    assert source.path == package / fsr4.PACKAGE_DLL and source.label == "AMD's DLL 4.1.1.2740"
+    assert fsr4.license_of(helix, data) == package / fsr4.PACKAGE_LICENSE
+    (package / fsr4.PACKAGE_DLL).write_bytes(AMD_BYTES + b'!')
+    assert 'changed' in fsr4.find_source(gpu.RDNA4, helix, data).problem
+    (package / fsr4.PACKAGE_DLL).unlink()
+    assert fsr4.find_source(gpu.RDNA4, helix, data).path is None
+    assert fsr4.license_of(helix, data) is None
+
+
 def test_rdna2_needs_a_dll_the_user_picked(helix, tmp_path):
     data = tmp_path / 'data'
     source = fsr4.find_source(gpu.RDNA2, helix, data)

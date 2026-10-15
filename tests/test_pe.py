@@ -102,5 +102,11 @@ def test_an_absurd_export_count_is_refused(tmp_path):
 @pytest.mark.skipif(not os.environ.get('AMDLSS_TEST_HELIXSR'), reason='needs a real HelixSR folder')
 def test_amds_real_dll_reads():
     dll = Path(os.environ['AMDLSS_TEST_HELIXSR']).expanduser() / 'amd-fsr' / 'amd_fidelityfx_upscaler_dx12.dll'
+    if not dll.is_file():
+        # HelixSR 1.9.0 does not build amd-fsr: AMD's DLL travels in the HelixSR Scaler package
+        source = os.environ.get('AMDLSS_TEST_SCALER', '')
+        if not source:
+            pytest.skip("AMD's DLL is not in the HelixSR folder and AMDLSS_TEST_SCALER is not set")
+        dll = Path(source) / 'OptiScaler' / 'amd_fidelityfx_upscaler_dx12.dll'
     info = pe.inspect(dll)
     assert info.is_64bit and info.version == '4.1.1.2740' and 'ffxCreateContext' in info.exports
