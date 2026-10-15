@@ -141,6 +141,7 @@ def test_remove_puts_the_games_own_files_back(tmp_path, game):
     save_record(game, record_data)
     assert luma.remove(game) == []
     assert tree(game) == before and not luma.installed(game)
+    assert sorted(p.name for p in game.iterdir()) == sorted(before)   # nothing of ours and no empty folder left
 
 
 def test_remove_keeps_a_file_the_user_changed(tmp_path, game):

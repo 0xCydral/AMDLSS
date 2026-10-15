@@ -319,9 +319,9 @@ def check_luma():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(f'stand-in {rel}'.encode())
         assert luma.extracted(root) and luma.locate(root) == package
-        named = {name: source.name for source, name in luma.files(package)}
-        assert named[luma.SCALER_NAME] == luma.RESHADE     # OptiScaler loads ReShade64.dll (LoadReshade=true)
-        assert named[luma.ADDON] == luma.ADDON and named[luma.DLSS] == luma.DLSS
+        targets = {name for _source, name in luma.files(package)}
+        assert luma.SCALER_NAME not in targets and luma.RESHADE in targets   # OptiScaler keeps dxgi.dll for itself
+        assert luma.ADDON in targets and luma.DLSS in targets
         game = root / 'Game'
         game.mkdir()
         (game / 'Game.exe').write_bytes(b'MZ')
