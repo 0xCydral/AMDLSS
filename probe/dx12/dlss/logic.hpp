@@ -112,13 +112,14 @@ inline bool parse_tsr_constants(const uint8_t *buf, size_t size, TsrConstants &o
 	return true;
 }
 
-enum class Preset { dlaa, ultra_quality, quality, balanced, performance, ultra_performance };
+enum class Preset { dlaa, quality, balanced, performance, ultra_performance };
 
 // Nominal render/output width ratios of the DLSS modes; the closest one is used, there is no fixed mode.
+// No UltraQuality: DLSS 3.10 refuses it at create (0xbad00010 FAIL_UnsupportedParameter).
 inline Preset preset_for_ratio(double ratio)
 {
 	static const struct { Preset preset; double ratio; } table[] = {
-		{ Preset::dlaa, 1.0 }, { Preset::ultra_quality, 0.77 }, { Preset::quality, 2.0 / 3.0 },
+		{ Preset::dlaa, 1.0 }, { Preset::quality, 2.0 / 3.0 },
 		{ Preset::balanced, 0.58 }, { Preset::performance, 0.5 }, { Preset::ultra_performance, 1.0 / 3.0 },
 	};
 	Preset best = Preset::dlaa;
@@ -137,7 +138,6 @@ inline const char *preset_name(Preset p)
 	switch (p)
 	{
 	case Preset::dlaa: return "DLAA";
-	case Preset::ultra_quality: return "UltraQuality";
 	case Preset::quality: return "MaxQuality";
 	case Preset::balanced: return "Balanced";
 	case Preset::performance: return "MaxPerf";

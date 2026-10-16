@@ -24,7 +24,7 @@ int main()
 	assert(preset_for_ratio(1552.0 / 2560.0) == Preset::balanced);
 	assert(preset_for_ratio(1.0) == Preset::dlaa && preset_for_ratio(0.5) == Preset::performance);
 	assert(preset_for_ratio(1.0 / 3) == Preset::ultra_performance && preset_for_ratio(0.66) == Preset::quality);
-	assert(preset_for_ratio(1400.0 / 1920.0) == Preset::ultra_quality); // 0.729 is closer to 0.77 than to 0.667
+	assert(preset_for_ratio(1400.0 / 1920.0) == Preset::quality); // 0.729: DLSS 3.10 has no UltraQuality
 
 	// 32767/65535 is "no motion"; +-1 NDC maps inside [0, 1] with the 0.499 safety margin.
 	assert(std::fabs(decode_velocity(kVelocityBias)) < 1e-6);

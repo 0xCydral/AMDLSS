@@ -896,7 +896,6 @@ NVSDK_NGX_PerfQuality_Value ngx_quality(logic::Preset p)
 	switch (p)
 	{
 	case logic::Preset::dlaa: return NVSDK_NGX_PerfQuality_Value_DLAA;
-	case logic::Preset::ultra_quality: return NVSDK_NGX_PerfQuality_Value_UltraQuality;
 	case logic::Preset::quality: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
 	case logic::Preset::balanced: return NVSDK_NGX_PerfQuality_Value_Balanced;
 	case logic::Preset::performance: return NVSDK_NGX_PerfQuality_Value_MaxPerf;

@@ -40,7 +40,7 @@ Stage 3b of the DX12 spike (`odd/tasks/dx12-spike.md`): a ReShade add-on that re
    The scales, encoding and composite flag are root constants, so an ini change needs no shader rebuild.
 4. Evaluates DLSS on the game's own command list (`get_native()`), flags `IsHDR | AutoExposure | MVLowRes |
    DepthInverted`, output written straight into u0, preset chosen from the render/output width ratio (nearest of
-   DLAA, UltraQuality, MaxQuality, Balanced, MaxPerf, UltraPerformance). `InReset` is set on the first frame and
+   DLAA, MaxQuality, Balanced, MaxPerf, UltraPerformance; DLSS 3.10 rejects UltraQuality). `InReset` is set on the first frame and
    whenever the feature is recreated, which happens when the render or output size changes.
 5. Returns true from the `dispatch` event so ReShade skips the original dispatch.
 6. If NGX, the feature, a binding or the jitter is missing, or the evaluation fails, it does not skip: the game
