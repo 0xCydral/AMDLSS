@@ -136,7 +136,8 @@ def test_the_report_holds_the_files_of_every_game_under_its_folder_and_the_syste
     assert sorted(report['files']) == [
         'Fake-Game/crashes.txt', 'Fake-Game/exe-folder/HelixSR/helixsr-install.json',
         'Fake-Game/exe-folder/HelixSR/helixsr.log', 'Fake-Game/exe-folder/OptiScaler.ini',
-        'Fake-Game/exe-folder/OptiScaler.log', 'Fake-Game/exe-folder/fakenvapi.ini', 'Fake-Game/files.txt',
+        'Fake-Game/exe-folder/OptiScaler.log', 'Fake-Game/exe-folder/ReShade.ini',
+        'Fake-Game/exe-folder/ReShade.log', 'Fake-Game/exe-folder/fakenvapi.ini', 'Fake-Game/files.txt',
         'Fake-Game/fsr-dll-folder/helixsr.log', 'Second-Game/crashes.txt',
         'Second-Game/exe-folder/OptiScaler.log', 'Second-Game/files.txt', 'games.txt', 'system.txt']
     assert report['app'] == 'AMDLSS' and report['version'] == reports.VERSION
@@ -370,7 +371,7 @@ def test_the_confirm_text_lists_the_games_and_how_many_files_each_sends(fake):  
     second = add_game(fake, 'Second Game', log='x')
     empty = add_game(fake, 'Empty Game', state='none')
     text = reports.confirm_text([fake[0], second, empty], fake[2])
-    assert 'Fake: Game?: 8 files' in text   # the six files found, plus files.txt and crashes.txt
+    assert 'Fake: Game?: 10 files' in text   # the eight files found, plus files.txt and crashes.txt
     assert 'Second Game: 3 files' in text and 'Empty Game' not in text
     assert 'AMDLSS log server' in text and '30 days' in text and '<user>' in text and text.endswith('Send logs?')
     assert 'system.txt' in text and 'games.txt' in text
