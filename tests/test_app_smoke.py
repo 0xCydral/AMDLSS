@@ -845,7 +845,7 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
         installs.append((consented, force))
         new = old.parent / helixsr.TOP
         shutil.copytree(old, new)
-        (new / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+        (new / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
         (new / helixsr.FG_SETUP).write_text('{}')          # the real update builds frame generation too
         fg = new / helixsr.FG_FOLDER
         fg.mkdir()
@@ -857,14 +857,14 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
     monkeypatch.setattr(helixsr, 'install_helixsr', fake_install)
     app = App(top, tk, ttk, filedialog, answers, font)
     pump(top, app)
-    assert app.status.cget('text') == 'HelixSR 1.8.1 is installed. HelixSR 1.9.0 is available.'
+    assert app.status.cget('text') == f'HelixSR 1.8.1 is installed. HelixSR {helixsr.VERSION} is available.'
     assert app.install_button.text == 'Update HelixSR' and app.install_button.state == 'normal'
     assert [r[0] for r in rows_of(app)] == ['One']  # the older HelixSR still lists the games
     app.install_helixsr()
-    assert answers.asked[0][0] == 'Install HelixSR' and 'HelixSR 1.9.0' in answers.asked[0][1]
+    assert answers.asked[0][0] == 'Install HelixSR' and f'HelixSR {helixsr.VERSION}' in answers.asked[0][1]
     wait(top, app, lambda: installs and not app.busy)
     assert installs == [(True, True)]   # an update fetches the pinned zip, it does not trust the folder
-    assert 'HelixSR 1.9.0 is installed and built' in app.status.cget('text')
+    assert f'HelixSR {helixsr.VERSION} is installed and built' in app.status.cget('text')
     assert app.install_button.text == 'Install HelixSR' and app.install_button.state == 'disabled'
     assert (old / helixsr.DLL).is_file()  # the old folder stays on disk
 
@@ -886,7 +886,7 @@ def test_the_old_layout_build_without_frame_generation_offers_update(window, mon
     old = tmp / 'data' / helixsr.TOP
     old.parent.mkdir(exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(old)
-    (old / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')   # the older zip's build: same version, no FG
+    (old / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())   # the older zip's build: same version, no FG
     for name in ('amd-fsr', 'dlss-loader', 'fsr3-drop-in', 'manual-install', 'my-fsr', 'optiscaler'):
         (old / name).mkdir()
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
@@ -920,7 +920,7 @@ def test_a_built_helixsr_without_frame_generation_builds_it_without_a_refetch(wi
     folder = data / helixsr.TOP
     folder.parent.mkdir(parents=True, exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(folder)
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
+    (folder / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
     helixsr.write_package_record(data, folder)   # the pinned zip was extracted here; only the FG is missing
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
     installs = []

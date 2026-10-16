@@ -126,12 +126,14 @@ def test_locate_prefers_the_override_then_the_data_folder(tmp_path):
 
 
 def test_locate_falls_back_to_the_newest_older_folder_and_prefers_the_pinned_one(tmp_path):
-    for name in ('HelixSR-1.8.9', 'HelixSR-1.8.10', 'HelixSR-1.10.0', 'HelixSR-1.9.0', 'HelixSR-2.0.0', 'HelixSR-nope',
-                 'HelixSR-1.7.0'):
+    for name in ('HelixSR-1.8.9', 'HelixSR-1.8.10', 'HelixSR-1.10.0', 'HelixSR-1.9.0', 'HelixSR-1.9.1',
+                 'HelixSR-2.0.0', 'HelixSR-nope', 'HelixSR-1.7.0'):
         (tmp_path / name).mkdir()
         (tmp_path / name / helixsr.DLL).write_bytes(b'x')
     (tmp_path / 'HelixSR-1.8.5').mkdir()   # no DLL: not a HelixSR folder
-    assert helixsr.VERSION == '1.9.0' and helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.0'
+    assert helixsr.VERSION == '1.9.1' and helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.1'
+    (tmp_path / 'HelixSR-1.9.1' / helixsr.DLL).unlink()
+    assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.0'   # not updated yet: the newest below the pin
     (tmp_path / 'HelixSR-1.9.0' / helixsr.DLL).unlink()
     assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.8.10'   # numeric order; the newer ones are above the pin
     assert helixsr.older('1.9.0', '1.10.0') and not helixsr.older('1.10.0', '1.9.0') and not helixsr.older('?', '1.9.0')
@@ -293,21 +295,70 @@ def test_the_direct_route_runs_the_installers_own_install_n(fake, monkeypatch):
     assert [command[3:5] for command in seen] == [['install', '1']]
 
 
-def test_install_into_a_game_without_fsr31_uses_the_installers_own_refusal(fake):
-    # HelixSR 1.9.0's installer refuses games without an FSR 3.1 DLL (HelixSR Scaler is the route there): the
-    # error is the installer's own, in its own words
+def test_the_direct_path_never_claims_a_scaler_route_game_got_the_drop_in(fake):
+    # HelixSR 1.9.1 takes `install N` on a game without an FSR 3.1 DLL as its own HelixSR Scaler install: AMDLSS's
+    # drop-in path must not report success then (amdlss.scaler is the path for such a game)
     client, _one, _two = fake
     three = client.list_games()[2]
-    with pytest.raises(helixsr.HelixSRError, match='no FSR 3.1 DLL'):
+    Path(three.folder).mkdir()
+    with pytest.raises(helixsr.HelixSRError, match='shows as "OptiScaler"'):
         client.install(three)
 
 
-def test_the_bridge_maps_the_new_installers_unsupported_route(fake):
+def test_the_bridge_maps_the_installers_scaler_route(fake):
     client, _one, _two = fake
     listed = client.list_games()
-    assert [g.route for g in listed] == ['direct', 'direct', 'optiscaler']  # 'unsupported' -> the Scaler route
+    assert [g.route for g in listed] == ['direct', 'direct', 'optiscaler']  # 1.9.1's 'scaler' -> the Scaler route
     assert [g.can_opti for g in listed] == [True, True, False]
     assert [g.state for g in listed] == ['none', 'none', 'none']
+
+
+def test_the_bridge_maps_the_installers_blocked_route(tmp_path):
+    # 1.9.1 refuses HelixSR Scaler ('blocked') in a game with anti-cheat; AMDLSS keeps its own way (a warning the
+    # player decides on), which is what 1.9.0's 'unsupported' route meant for those games
+    guarded = tmp_path / 'Guarded'
+    folder = make(tmp_path, [{'name': 'Guarded', 'folder': str(guarded), 'fsr': False, 'inputs': ['DLSS'],
+                              'anticheat': ['EasyAntiCheat']}])
+    client = helixsr.HelixSR(folder, python=sys.executable)
+    (row,) = client.list_games()
+    assert row.route == 'optiscaler'
+
+
+def test_the_bridge_maps_a_not_yet_updated_folders_route(tmp_path):
+    # a data folder still holding a built 1.9.0 calls the same route 'unsupported': listing must keep working
+    three = tmp_path / 'Three'
+    folder = make(tmp_path, [{'name': 'Three', 'folder': str(three), 'fsr': False, 'inputs': ['XeSS']}])
+    module = folder / 'setup' / 'helixsr_install.py'
+    module.write_text(module.read_text(encoding='utf-8') + '''
+
+_real_games = games
+
+
+def games(extra):
+    out = _real_games(extra)
+    for g in out:
+        if g.route == "scaler":
+            g.route = "unsupported"
+    return out
+''', encoding='utf-8')
+    client = helixsr.HelixSR(folder, python=sys.executable)
+    (row,) = client.list_games()
+    assert row.route == 'optiscaler'   # 1.9.0's name for the same route
+
+
+def test_the_bridge_recognizes_and_removes_a_helixsr_installed_scaler(fake):
+    # HelixSR 1.9.1's own setup installs HelixSR Scaler (its HelixSR-Scaler.files record): AMDLSS must show it as
+    # installed and let Remove take it out through the installer's own `uninstall N`
+    from fake_helixsr import scaler_install
+    client, _one, _two = fake
+    three = client.list_games()[2]
+    Path(three.folder).mkdir()
+    scaler_install(Path(three.folder))
+    listed = client.list_games()[2]
+    assert listed.state == 'optiscaler' and listed.route == 'optiscaler' and listed.installed
+    assert listed.helixsr == '1.9.1'   # the HelixSR DLL copy in the game's HelixSR folder names the version
+    client.remove(listed)
+    assert sorted(p.name for p in Path(three.folder).iterdir()) == []
 
 
 def test_the_bridge_reads_an_earlier_installs_record_and_version(fake):
@@ -386,7 +437,7 @@ def test_the_bridge_reports_the_helixsr_version_a_game_runs(fake):
     client, one, _two = fake
     assert [g.helixsr for g in client.list_games()] == ['', '', '']   # nothing installed
     client.install(client.list_games()[0])
-    assert client.list_games()[0].helixsr == '1.9.0'   # the direct install's record names it
+    assert client.list_games()[0].helixsr == '1.9.1'   # the direct install's record names it
     (one / 'helixsr-install.json').write_text('not json')
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'HELIX\x00HelixSR 1.8.1\x00')
     assert client.list_games()[0].helixsr == '1.8.1'   # no record: the DLL in the game is the fallback

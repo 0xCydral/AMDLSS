@@ -12,6 +12,9 @@ PRINTED = '''[helixsr-setup] looking for games with DLSS, XeSS or FSR ...
     2. Far Cry 6                                    DLSS / XeSS / FSR 2 (through OptiScaler: select DLSS in the game)
     3. Sven Co-op                                   HelixSR installed
     4. Some Game                                    DLSS (HelixSR as the game's DLSS, experimental: select DLSS in the game)
+    5. Scaler Game                                  DLSS: HelixSR Scaler (select DLSS in the game)
+    6. Dropin Game                                  FSR 3.1: FSR drop-in (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)
+    7. Guarded Game                                 DLSS only, anti-cheat: HelixSR Scaler is not installed in games with anti-cheat (EasyAntiCheat)
   12. This Name Is Longer Than The Forty Five Chars Pad HelixSR installed
 Close your games first.
 '''
@@ -20,11 +23,16 @@ Close your games first.
 def test_printed_list_is_parsed():
     rows = games.parse_list_output(PRINTED)
     assert [(g.index, g.name) for g in rows] == [(1, 'Aniimo'), (2, 'Far Cry 6'), (3, 'Sven Co-op'), (4, 'Some Game'),
+                                                (5, 'Scaler Game'), (6, 'Dropin Game'), (7, 'Guarded Game'),
                                                 (12, 'This Name Is Longer Than The Forty Five Chars Pad')]
     assert rows[0].route == 'direct' and rows[0].fsr31 and rows[0].state == 'none'
     assert rows[1].inputs == ['DLSS', 'XeSS', 'FSR 2'] and rows[1].route == 'optiscaler'
     assert rows[2].installed and rows[2].state == 'unknown'
     assert rows[3].state == 'dlss' and not rows[3].can_install
+    assert rows[4].inputs == ['DLSS'] and rows[4].route == 'optiscaler'   # 1.9.1's Scaler label
+    assert rows[5].route == 'direct' and rows[5].fsr31                    # 1.9.1's drop-in label
+    assert rows[6].inputs == ['DLSS'] and rows[6].route == 'optiscaler'   # 1.9.1's anti-cheat label: offered as before
+    assert rows[7].installed and rows[7].state == 'unknown'
 
 
 def test_unrecognised_or_empty_output_gives_no_games():

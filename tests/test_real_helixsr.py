@@ -2,7 +2,7 @@
 """The real thing, without a real game: HelixSR's own installer and HelixSR Scaler into a FAKE game folder.
 
 Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json) and
-AMDLSS_TEST_SCALER names the unpacked HelixSR Scaler package (HelixSR-Scaler-1.0.3, the one with OptiScaler.dll);
+AMDLSS_TEST_SCALER names the unpacked HelixSR Scaler package (HelixSR-Scaler-1.0.4, the one with OptiScaler.dll);
 the Python HelixSR's setup uses must be there (%LOCALAPPDATA%\\HelixSR\\python, or on Linux a python3 with numpy).
 The HelixSR folder is copied into the temp folder's amdlss-fake first, so HelixSR's own files are never written; the
 Scaler package is only read. The install goes only into the fake game there. AMDLSS_TEST_INSTALLER may name a newer
@@ -91,7 +91,7 @@ def test_install_and_remove_into_a_fake_game(fake_game):
 
 
 def test_the_scaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_path, monkeypatch):
-    # the OptiScaler route: AMDLSS downloads and places HelixSR Scaler 1.0.3 (the real package, read-only);
+    # the OptiScaler route: AMDLSS downloads and places HelixSR Scaler 1.0.4 (the real package, read-only);
     # OptiScaler's own streamline DLLs and HelixSR's built DLL go in, its ini gets AMDLSS's frame generation
     # switches, and Remove puts every game file back byte for byte
     copy, game = fake_game

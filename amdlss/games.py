@@ -117,11 +117,14 @@ def parse_bridge_output(text):
 _INPUT = r'(?:DLSS|XeSS|FSR 2)'
 # The status text of one printed row (helixsr_install.Game.label and show); the name is whatever precedes it.
 # 1.9.0 prints "X only: not supported by the drop-in: use HelixSR Desktop (HelixSR Scaler)" for the games AMDLSS
-# installs Scaler into, and "HelixSR installed (OptiScaler, earlier version)" for an earlier install.
+# installs Scaler into; 1.9.1 prints "FSR 3.1: FSR drop-in (...)" or "X: HelixSR Scaler (select DLSS in the game)"
+# (and "X only, anti-cheat: ..." for a game its own installer refuses); "HelixSR installed (...)" is an existing
+# install in both.
 _ROW = re.compile(r'^\s*(?P<index>\d+)\.\s+(?P<name>.+?)\s+(?P<status>HelixSR installed.*'
-                  r'|FSR 3\.1 \(HelixSR replaces.*'
+                  r'|FSR 3\.1(?:: FSR drop-in)? \(HelixSR replaces.*'
                   r'|DLSS \(HelixSR as the game.*'
-                  r'|' + _INPUT + r'(?: / ' + _INPUT + r')*(?: \(through OptiScaler.*| only: .*))$')
+                  r'|' + _INPUT + r'(?: / ' + _INPUT + r')*(?: \(through OptiScaler.*| only: .*'
+                  r'|: HelixSR Scaler \(select DLSS in the game\)| only, anti-cheat: .*))$')
 
 
 def parse_list_output(text):
@@ -136,6 +139,8 @@ def parse_list_output(text):
         game = Game(name=match.group('name').strip(), index=int(match.group('index')))
         if status.startswith('HelixSR installed'):
             game.state = 'unknown'   # 'HelixSR installed' / 'HelixSR installed (OptiScaler, earlier version)'
+        elif status.startswith('FSR 3.1: HelixSR Scaler'):
+            game.fsr31, game.route = True, 'optiscaler'   # 1.9.1: Scaler was picked for an FSR 3.1 game
         elif status.startswith('FSR 3.1'):
             game.fsr31, game.route = True, 'direct'
         elif status.startswith('DLSS (HelixSR as'):

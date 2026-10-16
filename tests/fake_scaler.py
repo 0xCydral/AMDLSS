@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """A stand-in for an unpacked HelixSR Scaler package, so tests run AMDLSS's Scaler install path with no network
-and no 132 MB download. make() writes <root>/HelixSR-Scaler-1.0.3, exactly where scaler.locate() looks; the
+and no 132 MB download. make() writes <root>/<scaler.TOP>, exactly where scaler.locate() looks; the
 package list names the files its real HelixSR-Scaler-package.txt names, and a few files it does not, so a test can
 see that only listed files are copied."""
 from pathlib import Path
 
-TOP = 'HelixSR-Scaler-1.0.3'
+from amdlss import scaler
+
+TOP = scaler.TOP
 LIST = 'HelixSR-Scaler-package.txt'
 # The sections AMDLSS touches in the real file, with its own comment lines and CRLFs, so tests read like the real
 # ini (shipped by the package, OptiScaler 0.9.4 with HelixSR built in).

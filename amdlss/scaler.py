@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """HelixSR Scaler: OptiScaler 0.9.4 with HelixSR built in, for games without an FSR 3.1 DLL.
 
-HelixSR 1.9.0's own setup installs only the FSR drop-in and its installer reports a game without FSR 3.1 as
-'unsupported'; the OptiScaler route now lives in the separate HelixSR Scaler package. AMDLSS downloads that package
-(SHA-256 pinned), unpacks it and puts its files next to the game's .exe the way Scaler's own installers do:
+HelixSR 1.9.0's own setup installed only the FSR drop-in and its installer reported a game without FSR 3.1 as
+'unsupported'; 1.9.1's setup installs HelixSR Scaler too ('scaler', or 'blocked' with anti-cheat), with the same
+package AMDLSS downloads. AMDLSS still places the package itself: FSR 4.1.1, Luma UE and AMDLSS's own
+record/backup work the same on both systems, and Remove restores exactly what an install replaced. AMDLSS
+downloads the package (SHA-256 pinned), unpacks it and puts its files next to the game's .exe the way Scaler's own
+installers do:
 
   - every file its HelixSR-Scaler-package.txt names, with OptiScaler.dll renamed to the first free of Scaler's own
     names (dxgi.dll first);
@@ -29,11 +32,11 @@ from . import VERSION as APP_VERSION
 from . import helixsr, pe
 from .helixsr import HelixSRError
 
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 ZIP_NAME = f'HelixSR-Scaler-{VERSION}.zip'
 ZIP_URL = f'https://github.com/lonewolf0622/HelixSR/releases/download/v{helixsr.VERSION}/{ZIP_NAME}'
-ZIP_SIZE = 132504212
-ZIP_SHA256 = '974c9d62ea0e088a1e11fe8e7e3196b2d9939d39fb5d709b684c5e7c2c74c351'
+ZIP_SIZE = 132516449
+ZIP_SHA256 = '7ad033590b9a138fc524160c4c9ff105f0b20320e4120a43fb7766392e62a86f'
 TOP = f'HelixSR-Scaler-{VERSION}'          # the folder the zip extracts to
 LIST = 'HelixSR-Scaler-package.txt'        # the package's own file list: what its installer copies
 DLL = 'OptiScaler.dll'

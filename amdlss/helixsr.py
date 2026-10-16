@@ -14,11 +14,12 @@ cards. This module:
     one: find_python()) (`install N`, `uninstall N`, `--folder PATH`). The list comes from a small read-only bridge run
     in that same Python (it imports helixsr_install and prints JSON); if the bridge cannot run, the installer's printed
     `list` output is parsed instead.
-  - installs the OptiScaler route into a game that has an FSR 3.1 DLL and DLSS (HelixSR's `install N` would take the
-    FSR drop-in there) through a second small bridge that sets what the installer's "o" answer sets and calls the
-    installer's own install().
+  - installs the Scaler route (HelixSR's OptiScaler, for a game without an FSR 3.1 DLL) itself in amdlss.scaler:
+    the pinned HelixSR Scaler package next to the game's .exe, with AMDLSS's own record and backup. HelixSR's 1.9.1
+    installer installs Scaler the same way (its HelixSR-Scaler.files record); AMDLSS keeps its own path so FSR 4.1.1,
+    Luma UE and Remove behave the same on both systems, and it recognises HelixSR's own installs through that record.
 
-The pinned files are HelixSR 1.9.0. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
+The pinned files are HelixSR 1.9.1. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
 """
 import hashlib
 import http.client
@@ -38,11 +39,11 @@ from pathlib import Path
 from . import games as gamelist
 from . import host
 
-VERSION = '1.9.0'
-ZIP_NAME = 'HelixSR-1.9.0.zip'
+VERSION = '1.9.1'
+ZIP_NAME = 'HelixSR-1.9.1.zip'
 ZIP_URL = f'https://github.com/lonewolf0622/HelixSR/releases/download/v{VERSION}/{ZIP_NAME}'
-ZIP_SIZE = 3803249
-ZIP_SHA256 = '795268f60a1262cd7c8cb01a38f553751cc380fa0cbec63c8f466b6807468be4'
+ZIP_SIZE = 137494566
+ZIP_SHA256 = '9f329a8a4359bc21830b1e0b3f8211f52d851760faddc5cbde74e245cf5140ff'
 TOP = f'HelixSR-{VERSION}'  # the folder the zip extracts to
 DLL = 'amd_fidelityfx_dx12.dll'
 BUILT = 'helixsr_setup.json'  # written beside the DLL when the setup has built the network
@@ -74,8 +75,8 @@ import helixsr_install as h
 def state(g):
     if g.dlss_installed:
         return 'dlss'
-    if g.opti_installed:
-        return 'optiscaler'
+    if getattr(g, 'scaler_installed', False) or g.opti_installed:  # 1.9.1 records Scaler in HelixSR-Scaler.files,
+        return 'optiscaler'                                        # an earlier version only in its HelixSR marker
     if any(h.original(t).exists() and h.is_helixsr(t) for t in g.fsr_targets):
         return 'direct'
     return 'none'
@@ -157,18 +158,24 @@ except Exception as error:
     hidden = []
 
 
+# HelixSR's own name for the Scaler route: 1.9.0's installer called it 'unsupported' (a game with DLSS, XeSS or
+# FSR 2 and no FSR 3.1), 1.9.1 calls it 'scaler' and refuses it ('blocked') in games with anti-cheat. All map to
+# AMDLSS's 'optiscaler': a not-yet-updated 1.9.0 folder and the pinned 1.9.1 both work, and 'blocked' keeps
+# AMDLSS's behaviour (a warning the player decides on).
+SCALER_ROUTES = ('unsupported', 'scaler', 'blocked')
+
+
 def route_of(g):
-    """The route AMDLSS installs by: 'direct' (HelixSR's own drop-in) or 'optiscaler' (HelixSR Scaler). 1.9.0's
-    installer reports a game without FSR 3.1 as 'unsupported': only the Scaler route is left for it, so that is
-    the route here. '' when neither can be installed."""
-    if g.route == 'unsupported':
+    """The route AMDLSS installs by: 'direct' (HelixSR's own drop-in) or 'optiscaler' (HelixSR Scaler).
+    '' when neither can be installed."""
+    if g.route in SCALER_ROUTES:
         return 'optiscaler' if g.inputs and g.target else ''
     return g.route or ''
 
 
 def can_opti(g):
     """True when both routes work: the drop-in needs an FSR 3.1 DLL, the Scaler route needs DLSS/XeSS/FSR 2 and
-    the folder of the game's .exe. 1.9.0's installer dropped its own can_opti, so AMDLSS decides."""
+    the folder of the game's .exe. HelixSR's installer has no can_opti (1.9.0 dropped its own), so AMDLSS decides."""
     return bool(g.fsr_targets and g.inputs and g.target)
 
 
@@ -318,8 +325,8 @@ def consent_text(windows=None):
                  "uses Python 3 with numpy (your system's when it has them; otherwise it downloads a portable "
                  "Python, about 70 MB, into ~/.local/share/HelixSR) and runs the shader compiler through Proton.")
     from . import scaler   # lazy: scaler imports this module
-    return (f"AMDLSS downloads HelixSR {VERSION} (about 4 MB) and HelixSR Scaler {scaler.VERSION} (about "
-            f"{scaler.ZIP_SIZE >> 20} MB, the package with OptiScaler and AMD's FSR 4 DLL) from "
+    return (f"AMDLSS downloads HelixSR {VERSION} (about {ZIP_SIZE >> 20} MB) and HelixSR Scaler {scaler.VERSION} "
+            f"(about {scaler.ZIP_SIZE >> 20} MB, the package with OptiScaler and AMD's FSR 4 DLL) from "
             f"github.com/lonewolf0622/HelixSR, checks their SHA-256, and runs HelixSR's own setup.\n\n"
             f"The setup downloads NVIDIA's DLSS 310.7.0 DLL from NVIDIA's GitHub. That DLL is NVIDIA's, under "
             f"NVIDIA's license:\n{NVIDIA_LICENSE_URL}\n\n"

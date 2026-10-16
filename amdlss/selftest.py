@@ -21,15 +21,17 @@ def check_parsing():
                '    3. Sven Co-op                                   HelixSR installed\n'
                '    4. Other Game                                   DLSS / XeSS only: not supported by the drop-in: '
                'use HelixSR Desktop (HelixSR Scaler)\n'
+               '    5. Scaler Route Game                            DLSS: HelixSR Scaler (select DLSS in the game)\n'
                '  10. A Game With A Very Long Name That Is Past The Pad HelixSR installed (OptiScaler, earlier '
                'version)\n')
     rows = games.parse_list_output(printed)
-    assert [g.index for g in rows] == [1, 2, 3, 4, 10], rows
+    assert [g.index for g in rows] == [1, 2, 3, 4, 5, 10], rows
     assert rows[0].route == 'direct' and rows[0].fsr31
     assert rows[1].inputs == ['DLSS', 'XeSS'] and rows[1].route == 'optiscaler'
     assert rows[2].state == 'unknown' and rows[2].installed
     assert rows[3].inputs == ['DLSS', 'XeSS'] and rows[3].route == 'optiscaler'   # 1.9.0's own label
-    assert rows[4].name.endswith('Past The Pad') and rows[4].state == 'unknown'
+    assert rows[4].inputs == ['DLSS'] and rows[4].route == 'optiscaler'           # 1.9.1's own label
+    assert rows[5].name.endswith('Past The Pad') and rows[5].state == 'unknown'
     line = games.SENTINEL + json.dumps([{'index': 1, 'name': 'A', 'folder': 'C:\\g', 'state': 'direct'}])
     parsed = games.parse_bridge_output('noise\n' + line + '\n')
     assert parsed[0].state_text == 'FSR drop-in' and parsed[0].index == 1
@@ -54,10 +56,10 @@ def check_routes():
     assert not games.Game(name='x', can_opti=True, state='optiscaler').route_choice  # installed
     assert both.in_game() == 'AMD FSR' and games.Game(name='x', state='optiscaler', route='direct').in_game() == 'DLSS'
     # the OptiScaler route is HelixSR Scaler now: AMDLSS installs it itself, pinned by SHA-256, and the bridge
-    # maps 1.9.0's 'unsupported' to it
-    assert scaler.ZIP_URL.endswith(f'/v1.9.0/{scaler.ZIP_NAME}') and scaler.ZIP_SIZE > 100 << 20
+    # maps 1.9.0's 'unsupported' and 1.9.1's 'scaler'/'blocked' to it
+    assert scaler.ZIP_URL.endswith(f'/v{helixsr.VERSION}/{scaler.ZIP_NAME}') and scaler.ZIP_SIZE > 100 << 20
     assert scaler.NAMES[0] == 'dxgi.dll' and scaler.LIST == 'HelixSR-Scaler-package.txt'
-    assert "== 'unsupported'" in helixsr.BRIDGE   # 1.9.0's route for a DLSS/XeSS/FSR 2 only game
+    assert "'unsupported', 'scaler', 'blocked'" in helixsr.BRIDGE   # HelixSR's own names for the Scaler route
     plan = games.plan_text(games.Game(name='G', route='optiscaler', exe_folder='E:\\G'))
     assert 'HelixSR Scaler' in plan and 'Install into G?' in plan
 

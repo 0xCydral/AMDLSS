@@ -126,13 +126,13 @@ def test_consent_text_names_nvidia_and_its_license():
 
 
 def test_pinned_values_are_the_current_release():
-    assert helixsr.ZIP_SIZE == 3803249
-    assert helixsr.ZIP_SHA256 == '795268f60a1262cd7c8cb01a38f553751cc380fa0cbec63c8f466b6807468be4'
-    assert helixsr.ZIP_URL.endswith('/v1.9.0/HelixSR-1.9.0.zip')
-    assert helixsr.TOP == 'HelixSR-1.9.0'  # the zip extracts to the version
-    # HelixSR Scaler 1.0.3: the package the OptiScaler route installs now (amdlss.scaler)
+    assert helixsr.ZIP_SIZE == 137494566
+    assert helixsr.ZIP_SHA256 == '9f329a8a4359bc21830b1e0b3f8211f52d851760faddc5cbde74e245cf5140ff'
+    assert helixsr.ZIP_URL.endswith('/v1.9.1/HelixSR-1.9.1.zip')
+    assert helixsr.TOP == 'HelixSR-1.9.1'  # the zip extracts to the version
+    # HelixSR Scaler 1.0.4: the package the OptiScaler route installs now (amdlss.scaler)
     from amdlss import scaler
-    assert scaler.ZIP_SIZE == 132504212
-    assert scaler.ZIP_SHA256 == '974c9d62ea0e088a1e11fe8e7e3196b2d9939d39fb5d709b684c5e7c2c74c351'
-    assert scaler.ZIP_URL.endswith('/v1.9.0/HelixSR-Scaler-1.0.3.zip')
-    assert scaler.TOP == 'HelixSR-Scaler-1.0.3' and scaler.LIST == 'HelixSR-Scaler-package.txt'
+    assert scaler.ZIP_SIZE == 132516449
+    assert scaler.ZIP_SHA256 == '7ad033590b9a138fc524160c4c9ff105f0b20320e4120a43fb7766392e62a86f'
+    assert scaler.ZIP_URL.endswith('/v1.9.1/HelixSR-Scaler-1.0.4.zip')
+    assert scaler.TOP == 'HelixSR-Scaler-1.0.4' and scaler.LIST == 'HelixSR-Scaler-package.txt'
