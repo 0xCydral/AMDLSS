@@ -74,6 +74,27 @@ int main()
 	assert(parse_ini("mv_encoding = gamma\n").text("mv_encoding", "linear") == "gamma" && ini.text("missing", "linear") == "linear");
 	assert(ini.number("missing", 7) == 7 && ini.values.count("broken line") == 0);
 
+	// Render preset names: case-insensitive, unknown is -1, unknown SDK values display as Default.
+	assert(parse_render_preset("default") == 0 && parse_render_preset("K") == 11 && parse_render_preset("j") == 10);
+	assert(parse_render_preset("M") == 13 && parse_render_preset("l") == 12);
+	assert(parse_render_preset("") == -1 && parse_render_preset("A") == -1 && parse_render_preset("Defaultx") == -1);
+	assert(std::strcmp(render_preset_name(12), "L") == 0 && std::strcmp(render_preset_name(0), "Default") == 0 && std::strcmp(render_preset_name(7), "Default") == 0);
+	for (const RenderPresetInfo &p : kRenderPresets)
+		assert(parse_render_preset(p.name) == p.value && render_preset_index(p.value) >= 0);
+
+	// merge_ini: comments, blank lines, CRLF and key order survive; changed keys are rewritten, missing ones appended.
+	{
+		const std::string src = "; header\r\nenabled = 1\r\n\r\n# note\r\njitter_sign_x=1\r\nenabled=1\r\nmv_encoding=gamma";
+		const std::string out = merge_ini(src, { { "enabled", "0" }, { "render_preset", "K" }, { "mv_encoding", "linear" } });
+		assert(out == "; header\r\nenabled=0\r\n\r\n# note\r\njitter_sign_x=1\r\nenabled=0\r\nmv_encoding=linear\nrender_preset=K\n");
+		const Ini back = parse_ini(out);
+		assert(back.number("enabled", 1) == 0 && back.text("render_preset", "") == "K" && back.text("mv_encoding", "") == "linear");
+		assert(back.number("jitter_sign_x", 0) == 1);
+		assert(merge_ini(out, { { "enabled", "0" } }) == out);           // writing the same value again changes nothing
+		assert(merge_ini("", { { "a", "1" } }) == "a=1\n");
+		assert(merge_ini("; enabled=5\n", { { "enabled", "1" } }) == "; enabled=5\nenabled=1\n"); // a commented key is not the key
+	}
+
 	std::puts("dlss logic selftest ok");
 	return 0;
 }

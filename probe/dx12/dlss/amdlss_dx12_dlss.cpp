@@ -11,6 +11,9 @@
  * Known gaps, logged once: translucency u4 is not used and u2 (history metadata) is not written. u1, TSR's half-size
  * output that bloom and eye adaptation read, is filled from the DLSS output (ini fill_half_res).
  */
+// Dear ImGui 1.92.5 (docking) headers only: the widgets run in ReShade's own ImGui through its function table.
+#define ImTextureID ImU64
+#include <imgui.h>
 #include <reshade.hpp>
 
 #include <d3d12.h>
@@ -35,6 +38,9 @@
 
 using namespace reshade::api;
 using reshade::addon_event;
+
+static_assert(NVSDK_NGX_DLSS_Hint_Render_Preset_J == 10 && NVSDK_NGX_DLSS_Hint_Render_Preset_K == 11 && NVSDK_NGX_DLSS_Hint_Render_Preset_L == 12 &&
+	NVSDK_NGX_DLSS_Hint_Render_Preset_M == 13, "logic::kRenderPresets must match NVSDK_NGX_DLSS_Hint_Render_Preset");
 
 namespace
 {
@@ -110,7 +116,11 @@ struct Config
 	bool composite_translucency = true; // u4 over u3 before DLSS
 	bool mv_gamma = true;               // true: what UE's TSR shader does (e*abs(e)*0.5); false: only the linear unbias
 	bool mv_scale_from_game = true;     // pixel scale of the velocity from TSR's b0; false: mv_scale_x/y times the viewport
-} g_cfg;
+	int render_preset = 0;              // NVSDK_NGX_DLSS_Hint_Render_Preset value, set on all five per-mode hints; 0 = Default
+	bool auto_exposure = true;          // the AutoExposure create flag
+};
+// Written under g_mutex (the ini reload and the overlay); the dispatch path copies it into its Snapshot under g_mutex.
+Config g_cfg;
 std::string g_dir, g_log_path, g_ini_path;
 FILETIME g_ini_time = {};
 bool g_reset_next = false; // set when TSR ran in between or the ini changed: DLSS must not trust its history
@@ -682,6 +692,8 @@ struct NgxState
 	std::vector<NVSDK_NGX_Handle *> retired; // released at process exit by the OS; releasing mid-flight is unsafe
 	uint32_t rw = 0, rh = 0, ow = 0, oh = 0;
 	bool output_subrects = false;
+	int render_preset = 0;      // what the current feature was created with; a change recreates it
+	bool auto_exposure = true;
 	uint64_t evals = 0;
 } g_ngx;
 
@@ -797,7 +809,7 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource *r, D3D12_RESOURCE_STATES from,
 // Decodes velocity into pixels and, when `composite`, writes color with translucency composited over it.
 // Constants come from the live config, so an ini change needs no rebuild.
 void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D12Resource *color, ID3D12Resource *translucency, bool composite,
-	float scale_x, float scale_y, uint32_t min_x, uint32_t min_y, uint32_t w, uint32_t h)
+	float scale_x, float scale_y, bool mv_gamma, uint32_t min_x, uint32_t min_y, uint32_t w, uint32_t h)
 {
 	const uint32_t slot = g_native.ring++ % kDecodeRing;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_native.heap->GetCPUDescriptorHandleForHeapStart();
@@ -829,7 +841,7 @@ void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D
 
 	// Only texels inside the input viewport are written; the scale already has DLSS's current-to-previous sign.
 	struct { float sx, sy; uint32_t min_x, min_y, w, h, encoding, composite; } constants = {
-		scale_x, scale_y, min_x, min_y, w, h, g_cfg.mv_gamma ? 1u : 0u, composite ? 1u : 0u };
+		scale_x, scale_y, min_x, min_y, w, h, mv_gamma ? 1u : 0u, composite ? 1u : 0u };
 	ID3D12DescriptorHeap *heaps[] = { g_native.heap };
 	cl->SetDescriptorHeaps(1, heaps);
 	cl->SetComputeRootSignature(g_native.rs);
@@ -941,10 +953,11 @@ bool ensure_ngx(ID3D12Device *dev)
 	return true;
 }
 
-// Creates the DLSS feature for these sizes on the game's command list; the old one is parked, not released.
-bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool output_subrects, bool &reset)
+// Creates the DLSS feature for these sizes and settings on the game's command list; the old one is parked, not released.
+bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool output_subrects, const Config &cfg, bool &reset)
 {
-	if (g_ngx.feature != nullptr && g_ngx.rw == rw && g_ngx.rh == rh && g_ngx.ow == ow && g_ngx.oh == oh && g_ngx.output_subrects == output_subrects)
+	if (g_ngx.feature != nullptr && g_ngx.rw == rw && g_ngx.rh == rh && g_ngx.ow == ow && g_ngx.oh == oh && g_ngx.output_subrects == output_subrects &&
+		g_ngx.render_preset == cfg.render_preset && g_ngx.auto_exposure == cfg.auto_exposure)
 		return true;
 	if (g_ngx.feature != nullptr)
 		g_ngx.retired.push_back(g_ngx.feature);
@@ -965,12 +978,17 @@ bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uin
 	create.Feature.InTargetWidth = ow;
 	create.Feature.InTargetHeight = oh;
 	create.Feature.InPerfQualityValue = ngx_quality(preset);
-	create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-		NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+	create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted |
+		(cfg.auto_exposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0);
 	create.InEnableOutputSubrects = output_subrects;
+	// One render preset for every mode: the five per-mode hints all get the same value (0 = Default, the SDK picks).
+	for (const char *hint : { NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+		NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance })
+		NVSDK_NGX_Parameter_SetUI(g_ngx.params, hint, static_cast<unsigned>(cfg.render_preset));
 	const NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(cl, 1, 1, &g_ngx.feature, g_ngx.params, &create);
-	log_line("create DLSS feature: render viewport %ux%u -> output viewport %ux%u (output subrects %d), ratio %.3f, preset %s, flags IsHDR|AutoExposure|MVLowRes|DepthInverted: 0x%08x %s",
-		rw, rh, ow, oh, output_subrects, static_cast<double>(rw) / ow, logic::preset_name(preset), static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
+	log_line("create DLSS feature: render viewport %ux%u -> output viewport %ux%u (output subrects %d), ratio %.3f, mode %s, render preset %s, flags IsHDR|MVLowRes|DepthInverted%s: 0x%08x %s",
+		rw, rh, ow, oh, output_subrects, static_cast<double>(rw) / ow, logic::preset_name(preset), logic::render_preset_name(cfg.render_preset),
+		cfg.auto_exposure ? "|AutoExposure" : "", static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
 	if (NVSDK_NGX_FAILED(r) || g_ngx.feature == nullptr)
 	{
 		g_ngx.feature = nullptr;
@@ -981,6 +999,8 @@ bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uin
 	g_ngx.ow = ow;
 	g_ngx.oh = oh;
 	g_ngx.output_subrects = output_subrects;
+	g_ngx.render_preset = cfg.render_preset;
+	g_ngx.auto_exposure = cfg.auto_exposure;
 	reset = true;
 	return true;
 }
@@ -994,6 +1014,7 @@ struct Snapshot
 	float jitter_x = 0, jitter_y = 0;
 	logic::TsrConstants tsr;
 	bool jitter_fallback = false;
+	Config cfg; // g_cfg as it was when this dispatch started; the overlay may change g_cfg while the pass records
 };
 
 void restore_state(ID3D12GraphicsCommandList *cl, const Snapshot &s)
@@ -1064,19 +1085,18 @@ bool ini_mtime(FILETIME &out)
 	return true;
 }
 
-std::string config_summary()
+std::string config_summary(const Config &c)
 {
-	char buf[512];
+	char buf[640];
 	snprintf(buf, sizeof(buf),
-		"enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
-		g_cfg.enabled, g_cfg.jitter_sign_x, g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.mv_scale_from_game ? "game" : "ini", g_cfg.mv_gamma ? "gamma" : "linear",
-		g_cfg.composite_translucency, g_cfg.fill_half_res, g_cfg.never_fallback_after_start, g_cfg.log_every, g_cfg.jitter_cycle);
+		"enabled=%d render_preset=%s auto_exposure=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
+		c.enabled, logic::render_preset_name(c.render_preset), c.auto_exposure, c.jitter_sign_x, c.jitter_sign_y, c.mv_scale_x, c.mv_scale_y, c.mv_scale_from_game ? "game" : "ini",
+		c.mv_gamma ? "gamma" : "linear", c.composite_translucency, c.fill_half_res, c.never_fallback_after_start, c.log_every, c.jitter_cycle);
 	return buf;
 }
 
-void load_ini(bool reload)
+std::string read_ini_text()
 {
-	const std::string before = config_summary();
 	std::string text;
 	if (FILE *f = fopen(g_ini_path.c_str(), "rb"))
 	{
@@ -1086,6 +1106,13 @@ void load_ini(bool reload)
 			text.append(buf, got);
 		fclose(f);
 	}
+	return text;
+}
+
+void load_ini(bool reload)
+{
+	const std::string before = config_summary(g_cfg);
+	const std::string text = read_ini_text();
 	ini_mtime(g_ini_time);
 	const logic::Ini ini = logic::parse_ini(text);
 	g_cfg.enabled = ini.number("enabled", 1) != 0;
@@ -1108,8 +1135,16 @@ void load_ini(bool reload)
 	g_cfg.mv_gamma = encoding == "gamma";
 	if (encoding != "gamma" && encoding != "linear")
 		log_line("mv_encoding=%s is not linear or gamma; using linear", encoding.c_str());
+	const std::string preset = ini.text("render_preset", "default");
+	g_cfg.render_preset = logic::parse_render_preset(preset);
+	if (g_cfg.render_preset < 0)
+	{
+		log_line("render_preset=%s is not default, J, K, L or M; using default", preset.c_str());
+		g_cfg.render_preset = 0;
+	}
+	g_cfg.auto_exposure = ini.number("auto_exposure", 1) != 0;
 
-	const std::string after = config_summary();
+	const std::string after = config_summary(g_cfg);
 	if (!reload)
 		log_line("loaded: %s", after.c_str());
 	else if (after != before)
@@ -1126,6 +1161,63 @@ void reload_ini_if_changed()
 	FILETIME ft;
 	if (++tick % 60 == 0 && ini_mtime(ft) && CompareFileTime(&ft, &g_ini_time) != 0)
 		load_ini(true);
+}
+
+// The keys and values load_ini reads for `c`.
+std::map<std::string, std::string> ini_values(const Config &c)
+{
+	const auto flag = [](bool v) { return std::string(v ? "1" : "0"); };
+	return {
+		{ "enabled", flag(c.enabled) },
+		{ "render_preset", logic::render_preset_name(c.render_preset) },
+		{ "auto_exposure", flag(c.auto_exposure) },
+		{ "jitter_sign_x", str_format("%g", c.jitter_sign_x) },
+		{ "jitter_sign_y", str_format("%g", c.jitter_sign_y) },
+		{ "mv_scale_source", c.mv_scale_from_game ? "game" : "ini" },
+		{ "mv_scale_x", str_format("%g", c.mv_scale_x) },
+		{ "mv_scale_y", str_format("%g", c.mv_scale_y) },
+		{ "log_every_n_frames", std::to_string(c.log_every) },
+		{ "jitter_cycle", std::to_string(c.jitter_cycle) },
+		{ "fill_half_res", flag(c.fill_half_res) },
+		{ "never_fallback_after_start", flag(c.never_fallback_after_start) },
+		{ "composite_translucency", flag(c.composite_translucency) },
+		{ "mv_encoding", c.mv_gamma ? "gamma" : "linear" },
+	};
+}
+
+// Overlay edits take effect at once (g_cfg is only written under g_mutex, and the dispatch path copies it under the same
+// lock) and are then written to the ini. The file goes to a temp name and is moved over the ini, so the live reload never
+// reads half a file; its mtime is recorded so the reload does not see our own write as a change. Returns false when the
+// ini could not be written (the change is still live).
+bool commit_config(Config c)
+{
+	c.jitter_cycle = c.jitter_cycle == 0 ? 1 : c.jitter_cycle;
+	const std::string after = config_summary(c);
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (config_summary(g_cfg) == after)
+			return true;
+		g_cfg = c;
+		g_reset_next = true;
+	}
+	log_line("overlay changed: %s (DLSS resets its history on the next frame)", after.c_str());
+
+	const std::string tmp = g_ini_path + ".tmp";
+	const std::string text = logic::merge_ini(read_ini_text(), ini_values(c));
+	FILE *f = fopen(tmp.c_str(), "wb");
+	bool ok = f != nullptr && fwrite(text.data(), 1, text.size(), f) == text.size();
+	if (f != nullptr)
+		ok = fclose(f) == 0 && ok;
+	ok = ok && MoveFileExA(tmp.c_str(), g_ini_path.c_str(), MOVEFILE_REPLACE_EXISTING);
+	if (!ok)
+	{
+		DeleteFileA(tmp.c_str());
+		log_line("the ini %s could not be written; the change is live but not saved", g_ini_path.c_str());
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(g_mutex);
+	ini_mtime(g_ini_time);
+	return true;
 }
 
 // ---- the hook -----------------------------------------------------------------------------------------------
@@ -1166,10 +1258,35 @@ void stat_frame()
 	g_stats.last_mismatch.clear();
 }
 
+// What the last upscale dispatch did, for the overlay. Has its own mutex: the dispatch path writes it, the overlay reads it,
+// and neither holds it while doing anything else.
+struct Status
+{
+	enum class Path { none, dlss, fallback, disabled, kept_previous } path = Path::none;
+	std::string reason; // the fallback key
+	uint32_t rw = 0, rh = 0, ow = 0, oh = 0;
+	logic::Preset mode = logic::Preset::dlaa;
+	int render_preset = 0;
+	bool auto_exposure = true;
+	uint64_t evals = 0;
+	std::string eval_result = "not evaluated yet";
+	uint64_t seq = 0; // upscale dispatches seen; the overlay compares it between its own frames
+} g_status;
+std::mutex g_status_m;
+
+void status_path(Status::Path path, const char *reason = "")
+{
+	std::lock_guard<std::mutex> lock(g_status_m);
+	g_status.path = path;
+	g_status.reason = reason;
+	++g_status.seq;
+}
+
 // The first three times per reason are logged in full; every one is counted. A fallback means TSR runs, so DLSS
 // resets its history on its next frame.
 bool give_up(const char *key, const std::string &why)
 {
+	status_path(Status::Path::fallback, key);
 	stat_count((std::string("fallback-") + key).c_str());
 	if (g_ngx.evals > 0)
 		g_reset_next = true;
@@ -1240,6 +1357,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	device *dev = cmd_list->get_device();
 	auto *native_cl = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
 	const Bindings &b = s.b;
+	const Config &cfg = s.cfg;
 
 	std::string why;
 	ID3D12Device *pdev = nullptr;
@@ -1260,7 +1378,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 	// Translucency is composited over the scene color only when both are plain r16g16b16a16_float of the same size.
 	auto is_rgba16f = [](format f) { return f == format::r16g16b16a16_float || f == format::r16g16b16a16_typeless; };
-	bool composite = g_cfg.composite_translucency;
+	bool composite = cfg.composite_translucency;
 	if (composite && !(b.translucency.ok && is_rgba16f(b.translucency.res_format) && is_rgba16f(b.color.res_format) &&
 		b.translucency.width == b.color.width && b.translucency.height == b.color.height))
 	{
@@ -1274,7 +1392,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 	if (first_time("known-gaps"))
 		log_line("known gaps: translucency u4 (%s); u2 (history metadata) is no longer written; u1 (half-size color) is %s",
-			composite ? "composited over u3 before DLSS" : "dropped", g_cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
+			composite ? "composited over u3 before DLSS" : "dropped", cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
 
 	// DLSS works on the viewports TSR itself uses, not on the texture extents: below the viewport the texture holds garbage.
 	const logic::TsrConstants &t = s.tsr;
@@ -1287,19 +1405,19 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 	// Velocity to pixels: the game's own scale (b0 @272, UE: ScreenVelocityToInputPixelVelocity), negated because DLSS
 	// wants current to previous and UE's V is current minus previous; or the ini factors times the viewport size.
-	const float scale_x = g_cfg.mv_scale_from_game ? -t.velocity_to_pixels[0] : g_cfg.mv_scale_x * rw;
-	const float scale_y = g_cfg.mv_scale_from_game ? -t.velocity_to_pixels[1] : g_cfg.mv_scale_y * rh;
+	const float scale_x = cfg.mv_scale_from_game ? -t.velocity_to_pixels[0] : cfg.mv_scale_x * rw;
+	const float scale_y = cfg.mv_scale_from_game ? -t.velocity_to_pixels[1] : cfg.mv_scale_y * rh;
 	{
 		static uint32_t last[12] = {};
 		const uint32_t now[12] = { t.input_min[0], t.input_min[1], rw, rh, t.history_min[0], t.history_min[1], ow, oh,
-			static_cast<uint32_t>(static_cast<int32_t>(scale_x * 16)), static_cast<uint32_t>(static_cast<int32_t>(scale_y * 16)), g_cfg.mv_scale_from_game ? 1u : 0u, 0u };
+			static_cast<uint32_t>(static_cast<int32_t>(scale_x * 16)), static_cast<uint32_t>(static_cast<int32_t>(scale_y * 16)), cfg.mv_scale_from_game ? 1u : 0u, 0u };
 		if (memcmp(last, now, sizeof(now)) != 0)
 		{
 			memcpy(last, now, sizeof(now));
 			log_line("TSR viewports: input min (%u,%u) size %ux%u of color %ux%u; history min (%u,%u) size %ux%u of output %ux%u; velocity to pixels (%g, %g) from %s "
 				"(game value (%g, %g)), %s encoding", t.input_min[0], t.input_min[1], rw, rh, b.color.width, b.color.height, t.history_min[0], t.history_min[1], ow, oh,
-				b.output.width, b.output.height, scale_x, scale_y, g_cfg.mv_scale_from_game ? "the game" : "the ini", t.velocity_to_pixels[0], t.velocity_to_pixels[1],
-				g_cfg.mv_gamma ? "gamma" : "linear");
+				b.output.width, b.output.height, scale_x, scale_y, cfg.mv_scale_from_game ? "the game" : "the ini", t.velocity_to_pixels[0], t.velocity_to_pixels[1],
+				cfg.mv_gamma ? "gamma" : "linear");
 		}
 	}
 
@@ -1332,7 +1450,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!before.empty())
 		cl->ResourceBarrier(static_cast<UINT>(before.size()), before.data());
 
-	record_decode(cl, velocity, color, composite ? translucency : color, composite, scale_x, scale_y, t.input_min[0], t.input_min[1], rw, rh);
+	record_decode(cl, velocity, color, composite ? translucency : color, composite, scale_x, scale_y, cfg.mv_gamma, t.input_min[0], t.input_min[1], rw, rh);
 	// The decode pass wrote the motion vectors (and the composited color): make them readable for DLSS.
 	std::vector<D3D12_RESOURCE_BARRIER> generated;
 	std::vector<ID3D12Resource *> generated_res = { g_native.mv };
@@ -1349,7 +1467,8 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		generated.push_back(transition(g, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 	cl->ResourceBarrier(static_cast<UINT>(generated.size()), generated.data());
 
-	bool ok = ensure_feature(cl, rw, rh, ow, oh, output_subrects, reset);
+	bool ok = ensure_feature(cl, rw, rh, ow, oh, output_subrects, cfg, reset);
+	const bool feature_ok = ok;
 	if (!ok)
 		g_ngx.ok = false; // stop retrying (and logging) every frame; the original pass runs
 	NVSDK_NGX_Result r = NVSDK_NGX_Result_Fail;
@@ -1360,8 +1479,8 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		e.Feature.pInOutput = output;
 		e.pInDepth = depth;
 		e.pInMotionVectors = g_native.mv;
-		e.InJitterOffsetX = s.jitter_x * g_cfg.jitter_sign_x;
-		e.InJitterOffsetY = s.jitter_y * g_cfg.jitter_sign_y;
+		e.InJitterOffsetX = s.jitter_x * cfg.jitter_sign_x;
+		e.InJitterOffsetY = s.jitter_y * cfg.jitter_sign_y;
 		e.InRenderSubrectDimensions = { rw, rh };
 		// The decode pass and the composite write at the same texel coordinates as their sources, so every input shares the
 		// input viewport origin; the output goes to the history viewport.
@@ -1372,16 +1491,36 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		e.InReset = reset ? 1 : 0;
 		e.InMVScaleX = 1.0f;
 		e.InMVScaleY = 1.0f;
+		if (!cfg.auto_exposure) // no exposure texture is supplied: tell DLSS the exposure is neutral
+			e.InPreExposure = e.InExposureScale = 1.0f;
 		r = NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_ngx.feature, g_ngx.params, &e);
 		ok = NVSDK_NGX_SUCCEED(r);
 		stat_count(ok ? "evaluate-ok" : "evaluate-failed");
 		const uint64_t n = ++g_ngx.evals;
 		if (!ok)
 			g_ngx.ok = false; // a failing evaluate is logged once below and not retried
-		if (n <= 10 || !ok || (g_cfg.log_every != 0 && n % g_cfg.log_every == 0))
+		if (n <= 10 || !ok || (cfg.log_every != 0 && n % cfg.log_every == 0))
 			log_line("evaluate #%llu: 0x%08x %s viewport %ux%u -> %ux%u jitter (%+.4f, %+.4f)%s reset=%d%s", static_cast<unsigned long long>(n),
 				static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str(), rw, rh, ow, oh, s.jitter_x, s.jitter_y,
 				s.jitter_fallback ? " [fallback B]" : " [read from b0]", reset ? 1 : 0, ok ? (t.camera_cut != 0 ? " (camera cut)" : "") : " FAILED, original pass runs");
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_status_m);
+		g_status.path = ok ? Status::Path::dlss : Status::Path::fallback;
+		g_status.reason = ok ? "" : feature_ok ? "evaluate" : "feature-create";
+		++g_status.seq;
+		g_status.rw = rw;
+		g_status.rh = rh;
+		g_status.ow = ow;
+		g_status.oh = oh;
+		g_status.mode = logic::preset_for_ratio(static_cast<double>(rw) / ow);
+		g_status.render_preset = cfg.render_preset;
+		g_status.auto_exposure = cfg.auto_exposure;
+		if (feature_ok)
+		{
+			g_status.evals = g_ngx.evals;
+			g_status.eval_result = str_format("0x%08x %s", static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
+		}
 	}
 
 	std::vector<D3D12_RESOURCE_BARRIER> back;
@@ -1389,7 +1528,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		back.push_back(transition(g, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	cl->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
 	// Only after a successful evaluate: when it failed the original pass still runs and writes u1 itself.
-	if (ok && g_cfg.fill_half_res)
+	if (ok && cfg.fill_half_res)
 	{
 		const Tex &half = b.half;
 		if (!g_native.half_ready || !half.ok || half.res_format != format::r11g11b10_float || b.output.res_format != format::r11g11b10_float)
@@ -1432,10 +1571,12 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			// Disabled live: TSR runs, so DLSS starts over with a reset when it is enabled again.
 			if (g_ngx.evals > 0)
 				g_reset_next = true;
+			status_path(Status::Path::disabled);
 			return false;
 		}
 		device *dev = cmd_list->get_device();
 		s.st = it->second;
+		s.cfg = g_cfg;
 		if (const auto l = g_layouts.find(s.st.layout); l != g_layouts.end())
 			s.params = l->second;
 		std::string bind_why;
@@ -1463,6 +1604,7 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			else if (g_cfg.never_fallback_after_start && g_ngx.evals > 0)
 			{
 				stat_count("size-mismatch-kept-previous-output");
+				status_path(Status::Path::kept_previous);
 				if (first_n("kept-previous", 3))
 					log_line("size mismatch and no usable depth: skipping TSR without evaluating, u0 keeps the previous DLSS output: %s", sizes.c_str());
 				return true;
@@ -1504,6 +1646,115 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 	t_busy = false;
 	return replaced;
 }
+
+// ---- the "DLSS" tab of ReShade's overlay -----------------------------------------------------------------------------
+
+// The overlay draws on another call path than the dispatch hooks. It only copies g_status and g_cfg under their own short
+// locks and commits edits through commit_config, so the render path is never blocked for longer than a struct copy.
+// Read-only status of the last upscale dispatch.
+void draw_status(const Status &st, bool dispatching)
+{
+	switch (st.path)
+	{
+	case Status::Path::none: ImGui::Text("DLSS: no upscale pass seen yet"); break;
+	case Status::Path::dlss: ImGui::Text("DLSS: active"); break;
+	case Status::Path::fallback: ImGui::Text("DLSS: not active, the game's TSR ran (fallback: %s)", st.reason.c_str()); break;
+	case Status::Path::disabled: ImGui::Text("DLSS: off (Enabled is unchecked), the game's TSR runs"); break;
+	case Status::Path::kept_previous: ImGui::Text("DLSS: skipped this frame, the previous DLSS output was kept (no usable depth)"); break;
+	}
+	if (st.path != Status::Path::none && !dispatching)
+		ImGui::TextDisabled("No upscale pass ran since the last overlay frame; this is the last one seen.");
+	if (st.rw != 0)
+		ImGui::Text("Render %ux%u -> output %ux%u, ratio %.3f", st.rw, st.rh, st.ow, st.oh, static_cast<double>(st.rw) / st.ow);
+	if (st.rw != 0)
+		ImGui::Text("DLSS mode: %s", logic::preset_name(st.mode));
+	ImGui::Text("Last NGX evaluate: %s", st.eval_result.c_str());
+	ImGui::Text("Evaluate count: %llu", static_cast<unsigned long long>(st.evals));
+	if (st.rw != 0)
+		ImGui::Text("Render preset in use: %s, auto exposure %s", logic::render_preset_name(st.render_preset), st.auto_exposure ? "on" : "off");
+	ImGui::TextWrapped("Mode follows the game's Anti-Aliasing Level and resolution.");
+}
+
+void draw_overlay(reshade::api::effect_runtime *)
+{
+	static Config edit; // what the widgets show; refreshed from g_cfg whenever no widget is being edited
+	static bool saved = true;
+	static uint64_t last_seq = 0;
+
+	Status st;
+	{
+		std::lock_guard<std::mutex> lock(g_status_m);
+		st = g_status;
+	}
+	const bool dispatching = st.seq != last_seq;
+	last_seq = st.seq;
+	if (!ImGui::IsAnyItemActive())
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		edit = g_cfg;
+	}
+
+	ImGui::SeparatorText("Status");
+	draw_status(st, dispatching);
+
+	// Checkboxes and combos apply on the click; typed numbers apply when the field is left (Enter or click away).
+	bool changed = false;
+	const auto typed = [&] { changed |= ImGui::IsItemDeactivatedAfterEdit(); };
+
+	ImGui::SeparatorText("Controls");
+	changed |= ImGui::Checkbox("Enabled", &edit.enabled);
+	const char *names[logic::kRenderPresetCount];
+	for (int i = 0; i < logic::kRenderPresetCount; ++i)
+		names[i] = logic::kRenderPresets[i].name;
+	int preset = logic::render_preset_index(edit.render_preset);
+	if (ImGui::Combo("Render preset", &preset, names, logic::kRenderPresetCount))
+	{
+		edit.render_preset = logic::kRenderPresets[preset].value;
+		changed = true;
+	}
+	changed |= ImGui::Checkbox("Auto exposure", &edit.auto_exposure);
+	ImGui::TextWrapped("Render preset and auto exposure recreate the DLSS feature and reset its history. Default lets the SDK pick per mode; "
+		"K is the transformer model at best quality; J has slightly less ghosting and more flicker; L and M are the SDK defaults for Ultra Performance and Performance.");
+	ImGui::TextWrapped("Not offered: sharpness (deprecated in DLSS since 2.5.1, no effect), frame generation and Reflex (not possible from this add-on).");
+
+	if (ImGui::CollapsingHeader("Advanced"))
+	{
+		ImGui::InputFloat("jitter_sign_x", &edit.jitter_sign_x, 0.0f, 0.0f, "%g");
+		typed();
+		ImGui::InputFloat("jitter_sign_y", &edit.jitter_sign_y, 0.0f, 0.0f, "%g");
+		typed();
+		int source = edit.mv_scale_from_game ? 0 : 1;
+		if (ImGui::Combo("mv_scale_source", &source, "game\0ini\0"))
+		{
+			edit.mv_scale_from_game = source == 0;
+			changed = true;
+		}
+		ImGui::BeginDisabled(edit.mv_scale_from_game); // only used with mv_scale_source=ini
+		ImGui::InputFloat("mv_scale_x", &edit.mv_scale_x, 0.0f, 0.0f, "%g");
+		typed();
+		ImGui::InputFloat("mv_scale_y", &edit.mv_scale_y, 0.0f, 0.0f, "%g");
+		typed();
+		ImGui::EndDisabled();
+		int encoding = edit.mv_gamma ? 0 : 1;
+		if (ImGui::Combo("mv_encoding", &encoding, "gamma\0linear\0"))
+		{
+			edit.mv_gamma = encoding == 0;
+			changed = true;
+		}
+		changed |= ImGui::Checkbox("composite_translucency", &edit.composite_translucency);
+		changed |= ImGui::Checkbox("fill_half_res", &edit.fill_half_res);
+		changed |= ImGui::Checkbox("never_fallback_after_start", &edit.never_fallback_after_start);
+		ImGui::InputScalar("log_every_n_frames", ImGuiDataType_U32, &edit.log_every);
+		typed();
+		ImGui::InputScalar("jitter_cycle", ImGuiDataType_U32, &edit.jitter_cycle);
+		typed();
+	}
+
+	if (changed)
+		saved = commit_config(edit);
+	if (!saved)
+		ImGui::TextWrapped("The ini file could not be written: the changes are live but will be lost when the game restarts.");
+}
 } // namespace
 
 extern "C"
@@ -1530,6 +1781,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		g_ini_path = g_dir + "amdlss_dx12_dlss.ini";
 		load_ini(false);
 
+		reshade::register_overlay("DLSS", draw_overlay);
+
 		reshade::register_event<addon_event::init_pipeline>(on_init_pipeline);
 		reshade::register_event<addon_event::destroy_pipeline>(on_destroy_pipeline);
 		reshade::register_event<addon_event::init_pipeline_layout>(on_init_pipeline_layout);
@@ -1551,6 +1804,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		break;
 	}
 	case DLL_PROCESS_DETACH:
+		reshade::unregister_overlay("DLSS", draw_overlay);
 		reshade::unregister_addon(module);
 		break;
 	}

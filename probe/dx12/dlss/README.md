@@ -39,9 +39,10 @@ Stage 3b of the DX12 spike (`odd/tasks/dx12-spike.md`): a ReShade add-on that re
      DLSS gets u3 raw and the log says why.
    The scales, encoding and composite flag are root constants, so an ini change needs no shader rebuild.
 4. Evaluates DLSS on the game's own command list (`get_native()`), flags `IsHDR | AutoExposure | MVLowRes |
-   DepthInverted`, output written straight into u0, preset chosen from the render/output width ratio (nearest of
-   DLAA, MaxQuality, Balanced, MaxPerf, UltraPerformance; DLSS 3.10 rejects UltraQuality). `InReset` is set on the first frame and
-   whenever the feature is recreated, which happens when the render or output size changes.
+   DepthInverted` (`AutoExposure` follows `auto_exposure`), output written straight into u0, mode chosen from the
+   render/output width ratio (nearest of DLAA, MaxQuality, Balanced, MaxPerf, UltraPerformance; DLSS 3.10 rejects
+   UltraQuality). `InReset` is set on the first frame and whenever the feature is recreated, which happens when the
+   render or output size, `render_preset` or `auto_exposure` changes.
 5. Returns true from the `dispatch` event so ReShade skips the original dispatch.
 6. If NGX, the feature, a binding or the jitter is missing, or the evaluation fails, it does not skip: the game
    renders normally and the reason is logged once.
@@ -75,8 +76,12 @@ It runs the probe build once if the ReShade headers or the MSVC toolchain (clang
   `nvngx_dlss.dll`; both binaries are checked against pinned sha256 values;
 - compiles `velocity_decode.hlsl` to DXIL (`cs_6_0`, 4092 bytes, signed) with DirectXShaderCompiler v1.9.2609
   (`dxc` 1.9.2609.5, pinned tarball with sha256) and embeds it as a byte array;
-- compiles and runs `selftest.cpp` (Halton, phase matching, preset choice, velocity decode, ini parsing) on the
-  Linux side of the container;
+- fetches `ocornut/imgui` tag **v1.92.5-docking** (commit `3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c`, the version
+  ReShade 6.8.0's `reshade_overlay.hpp` requires) into `probe/dx12/third_party/imgui/` (gitignored): only `imgui.h` and
+  `imconfig.h`, checked against pinned sha256 values. The widgets run in ReShade's own ImGui through its function table;
+  the add-on does not load without an ImGui-enabled ReShade;
+- compiles and runs `selftest.cpp` (Halton, phase matching, preset choice, velocity decode, ini parsing and merging,
+  render preset names) on the Linux side of the container;
 - compiles and links the add-on with clang-cl `/MT`, as for the probe.
 
 `nvngx_dlss.dll` sha256: `d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e`
@@ -107,6 +112,8 @@ succeeds in the log.
 | key | default | meaning |
 |---|---|---|
 | `enabled` | 1 | 0 leaves the game's upscaler alone |
+| `render_preset` | default | DLSS render preset hint for every mode: `default`, `J`, `K`, `L` or `M` (the presets NGX 310.9.16 still documents as usable); a change recreates the feature |
+| `auto_exposure` | 1 | the `AutoExposure` create flag; 0 supplies no exposure texture and a neutral exposure of 1; a change recreates the feature |
 | `jitter_sign_x`, `jitter_sign_y` | 1 | multiplied into the jitter sent to DLSS |
 | `mv_scale_source` | game | `game`: TSR's ScreenVelocityToInputPixelVelocity from b0, negated; `ini`: the two keys below |
 | `mv_scale_x`, `mv_scale_y` | -0.5, 0.5 | with `mv_scale_source=ini`: velocity to pixels is `(mv_scale_x * viewport width, mv_scale_y * viewport height)` |
@@ -127,6 +134,26 @@ succeeds in the log.
   disassembles it with the pinned dxc in the build container (`dxc -dumpbin`, output next to the file as `.txt`, or the
   second argument). Read how the shader decodes velocity (linear `* 0.2495 + 0.49999` or a signed square) and how it
   uses the jitter in b0.
+
+## Overlay tab
+
+ReShade's overlay gets a **DLSS** tab (`reshade::register_overlay`, removed again on detach).
+
+- **Status** (read-only): whether DLSS ran on the last upscale dispatch or the game's TSR did (with the fallback reason,
+  `Enabled` off, or "previous output kept"), render -> output resolution and ratio, the DLSS mode chosen from that ratio,
+  the last NGX evaluate result and the evaluate count, the render preset and auto exposure in use. The mode follows the
+  game's Anti-Aliasing Level and resolution; the add-on cannot change it.
+- **Controls:** `Enabled`, `Render preset` (Default, J, K, L, M: every other enum value of
+  `NVSDK_NGX_DLSS_Hint_Render_Preset` in 310.9.16 is removed, deprecated or "reverts to default") and `Auto exposure`.
+  A preset or auto exposure change recreates the DLSS feature and resets its history on the next frame. Not offered:
+  sharpness (deprecated in DLSS since 2.5.1, no effect), frame generation and Reflex (not possible from this add-on).
+- **Advanced:** `jitter_sign_x/y`, `mv_scale_source`, `mv_scale_x/y`, `mv_encoding`, `composite_translucency`,
+  `fill_half_res`, `never_fallback_after_start`, `log_every_n_frames`, `jitter_cycle`.
+- **How edits apply:** checkboxes and combos on the click, typed numbers when the field is left. The change goes into the
+  live config at once (under the mutex the dispatch hook copies it with, so a frame in flight keeps the values it started
+  with) and is written to the ini with the same keys, keeping comments and unknown lines; the file is written to
+  `amdlss_dx12_dlss.ini.tmp` and moved over the ini, and the hot reload ignores that write. An external edit of the ini is
+  shown in the tab as soon as no field is being edited. If the ini cannot be written the tab says so.
 
 ## Half-size fill, depth substitution and accounting
 
@@ -155,7 +182,9 @@ fire, and the game's compute state is restored on the real list.
 
 ## Limits
 
-- Not run in game. The unverified parts are the guessed resource states, whether DLSS accepts an
+- Not run in game, so the overlay tab has not been seen either (it compiled and links, and the ini merge is selftested).
+  Feature handles replaced by a preset or auto exposure change are parked like the ones from a size change.
+- The unverified parts are the guessed resource states, whether DLSS accepts an
   `r11g11b10_float` output, and whether the root descriptors that get restored match what UE set.
 - Feature and motion-vector texture replaced on a size change are parked, not released, because frames in flight may
   still use them.

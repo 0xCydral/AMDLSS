@@ -1,14 +1,17 @@
 /*
  * Pure logic of the DLSS add-on (no Windows, no ReShade, no NGX), so selftest.cpp can check it on the Linux host
- * inside the build container: Halton jitter, jitter phase matching, preset choice, UE5 velocity decode, ini parsing.
+ * inside the build container: Halton jitter, jitter phase matching, preset choice, UE5 velocity decode, ini parsing
+ * and merging, DLSS render preset names.
  */
 #pragma once
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 
 namespace logic
@@ -145,6 +148,40 @@ inline const char *preset_name(Preset p)
 	}
 }
 
+// DLSS render preset hint (NVSDK_NGX_DLSS_Hint_Render_Preset in NGX v310.9.16). Only the presets the SDK documents as
+// usable: A-D are removed, E/F deprecated, G/H/I/N/O "revert to default". `value` is the SDK enum value; the add-on
+// static_asserts them against the SDK header.
+struct RenderPresetInfo { int value; const char *name; };
+constexpr RenderPresetInfo kRenderPresets[] = { { 0, "Default" }, { 10, "J" }, { 11, "K" }, { 12, "L" }, { 13, "M" } };
+constexpr int kRenderPresetCount = static_cast<int>(sizeof(kRenderPresets) / sizeof(kRenderPresets[0]));
+
+// Index into kRenderPresets of an SDK value; unknown values map to Default (index 0).
+inline int render_preset_index(int value)
+{
+	for (int i = 0; i < kRenderPresetCount; ++i)
+		if (kRenderPresets[i].value == value)
+			return i;
+	return 0;
+}
+
+inline const char *render_preset_name(int value) { return kRenderPresets[render_preset_index(value)].name; }
+
+// "default", "j", "k", "l", "m" in any case -> SDK value; -1 for anything else.
+inline int parse_render_preset(const std::string &text)
+{
+	for (const RenderPresetInfo &p : kRenderPresets)
+	{
+		if (text.size() != std::strlen(p.name))
+			continue;
+		bool same = true;
+		for (size_t i = 0; i < text.size(); ++i)
+			same = same && std::tolower(static_cast<unsigned char>(text[i])) == std::tolower(static_cast<unsigned char>(p.name[i]));
+		if (same)
+			return p.value;
+	}
+	return -1;
+}
+
 // UE5 Engine/Shaders/Private/VelocityCommon.ush: EncodeVelocityToTexture stores V * (0.499 * 0.5) + 32767/65535.
 constexpr float kVelocityBias = 32767.0f / 65535.0f;
 constexpr float kVelocityScale = 0.499f * 0.5f;
@@ -204,5 +241,47 @@ inline Ini parse_ini(const std::string &text)
 		pos = end + 1;
 	}
 	return ini;
+}
+
+// Rewrites `text` so every key in `updates` has the given value, keeping comments, blank lines, line endings and the
+// order of everything else. A key that appears more than once is rewritten each time; keys the file lacks are appended.
+inline std::string merge_ini(const std::string &text, const std::map<std::string, std::string> &updates)
+{
+	std::string out;
+	std::set<std::string> done;
+	size_t pos = 0;
+	while (pos < text.size())
+	{
+		size_t end = text.find('\n', pos);
+		const bool has_newline = end != std::string::npos;
+		if (!has_newline)
+			end = text.size();
+		std::string line = text.substr(pos, end - pos);
+		const std::string t = trim(line);
+		const size_t eq = t.find('=');
+		if (!t.empty() && t[0] != ';' && t[0] != '#' && eq != std::string::npos)
+		{
+			const std::string key = trim(t.substr(0, eq));
+			const auto it = updates.find(key);
+			if (it != updates.end())
+			{
+				const bool cr = line.back() == '\r';
+				line = key + "=" + it->second + (cr ? "\r" : "");
+				done.insert(key);
+			}
+		}
+		out += line;
+		if (has_newline)
+			out += '\n';
+		pos = end + 1;
+	}
+	for (const auto &[key, value] : updates)
+		if (done.count(key) == 0)
+		{
+			if (!out.empty() && out.back() != '\n')
+				out += '\n';
+			out += key + "=" + value + "\n";
+		}
+	return out;
 }
 } // namespace logic
