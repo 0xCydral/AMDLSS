@@ -88,7 +88,7 @@ def fetch(target, progress=None):
     if part.stat().st_size != ZIP_SIZE or helixsr.sha256_of(part) != ZIP_SHA256:
         part.unlink(missing_ok=True)
         raise HelixSRError('the downloaded Luma UE zip does not match the pinned SHA-256; it was deleted')
-    helixsr.unpack(part, target)
+    helixsr.unpack(part, install_folder(target))  # the zip has no top folder, so it gets one here
     part.unlink(missing_ok=True)
     try:
         work.rmdir()

@@ -41,7 +41,7 @@ def serve(monkeypatch, data, size=None, sha_value=None):
 
 
 def package_bytes():
-    return zip_bytes({f'{TOP}/{name}': f'zip {name}'.encode() for name in FILES})
+    return zip_bytes({name: f'zip {name}'.encode() for name in FILES})  # the real zip has no top folder
 
 
 def save_record(game_folder, record_data):
@@ -78,15 +78,15 @@ def test_fetch_rejects_a_bad_hash(tmp_path, monkeypatch):
 
 
 def test_fetch_rejects_zip_slip(tmp_path, monkeypatch):
-    serve(monkeypatch, zip_bytes({f'{TOP}/{luma.ADDON}': 'x', '../evil.txt': 'x'}))
+    serve(monkeypatch, zip_bytes({luma.ADDON: 'x', '../evil.txt': 'x'}))
     target = tmp_path / 'target'
     with pytest.raises(helixsr.HelixSRError, match='outside the folder'):
         luma.fetch(target)
-    assert not (tmp_path / 'evil.txt').exists() and not (target / TOP).exists()
+    assert not (target / 'evil.txt').exists() and not (target / TOP / luma.ADDON).exists()
 
 
 def test_fetch_rejects_a_zip_that_is_not_luma(tmp_path, monkeypatch):
-    serve(monkeypatch, zip_bytes({f'{TOP}/README.txt': 'x'}))
+    serve(monkeypatch, zip_bytes({'README.txt': 'x'}))
     with pytest.raises(helixsr.HelixSRError, match='does not hold'):
         luma.fetch(tmp_path)
 
