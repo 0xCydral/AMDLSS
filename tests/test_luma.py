@@ -173,8 +173,11 @@ def test_the_texts_say_what_will_happen_and_what_to_check(tmp_path, game):
     plan = luma.plan_text(entry)
     assert luma.FULL_NAME in plan and luma.BUILD in plan and 'DirectX 11' in plan
     assert 'SHA-256' in plan and 'MIT' in plan and scaler.BACKUP in plan and games.WARNINGS in plan
+    assert '-dx11' in plan                      # how to get the game onto DirectX 11, before anything is installed
     after = luma.after_text(entry)
-    assert 'Home' in after and 'DLSS' in after and 'DontCreateD3D12DeviceForLuma' in after
+    assert 'Home' in after and 'DLSS' in after and 'CreateD3D12DeviceForLuma=false' in after
+    assert 'DontCreateD3D12DeviceForLuma' not in after   # HelixSR Scaler 1.0.3 (OptiScaler 0.9.4) reads the positive name
+    assert 'no settings' in after and 'DirectX 12' in after and '-dx11' in after   # the empty tab, and what to do
     assert 'experimental' in after and 'original files' in after
     assert luma.FULL_NAME in luma.ROW_NOTE and 'no upscaler' in luma.ROW_NOTE
     assert luma.NAME in luma.download_text(0, luma.ZIP_SIZE)
