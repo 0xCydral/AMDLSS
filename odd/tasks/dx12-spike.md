@@ -172,3 +172,20 @@ Not proven yet, and owed to stage 2:
   `sign(e)*e*e` after dividing by 2/1.4142) plus `mv_scale_x/y` and `jitter_sign_x/y`, all root constants so a reload
   needs no shader rebuild. Build: velocity_decode.dxil 5048 bytes, half_fill.dxil 4240 bytes, selftest ok, imports
   KERNEL32, ADVAPI32, USER32.
+- 2026-10-16: T8 ground truth from the disassembly of UE's own TSR shader (dumped by the add-on, read with `disasm.sh`).
+  Root CBV b0 (`_RootShaderParameters`, root param 2) offsets: InputInfo_Extent @0, InputInfo_ViewportMin uint2 @32,
+  InputInfo_ViewportMax uint2 @40, InputInfo_ViewportSize float2 @48, HistoryInfo_ViewportMin uint2 @144,
+  HistoryInfo_ViewportSize float2 @160, InputJitter float2 @256, bCameraCut uint @264,
+  ScreenVelocityToInputPixelVelocity float2 @272 (live (776, -436.5) = (+0.5 W, -0.5 H)). Live Extent is 1552x876 but the
+  ViewportSize is 1552x873: the 3 rows below the viewport are garbage, and feeding all 876 rows to DLSS smeared a line at
+  the bottom of the output that bloom turned into a glow in the bottom-left. Velocity decode in TSR:
+  `e = 4.008016*enc - 2.003992; V = e*abs(e)*0.5`, which equals the gamma form, and `PrevScreenPos = ScreenPos - V`, so V is
+  current minus previous; pixel velocity = V * ScreenVelocityToInputPixelVelocity. Jitter sign sweep with gamma: (1,1),
+  (-1,1) and (1,-1) look alike, (-1,-1) is clearly blurred; (1,1) stays. Changes (built, not yet run): `mv_encoding`
+  defaults to gamma; the velocity scale comes from b0 @272 each frame, negated for DLSS (`mv_scale_source=game|ini`, the
+  ini keys stay as manual override); b0 is read in one map of its first 280 bytes and parsed by `parse_tsr_constants`
+  (selftest on a synthetic 512-byte buffer); DLSS is created with the input and history viewport sizes (1552x873, not the
+  texture extents), recreated when they change, the input origin is the subrect base of color, depth and motion vectors,
+  the history origin is the output subrect base, and the decode pass writes only inside the input viewport;
+  `bCameraCut != 0` forces InReset=1 that frame and is counted as `camera-cut`; the viewports and the scale are logged
+  when they change. decode shader 5112 bytes.

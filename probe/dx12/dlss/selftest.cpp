@@ -1,5 +1,6 @@
 // Self-check of logic.hpp. build.sh compiles and runs it on the Linux host inside the build container.
 #include <cassert>
+#include <cstring>
 #include <cstdio>
 
 #include "logic.hpp"
@@ -35,6 +36,37 @@ int main()
 	assert(decode_velocity_gamma(0.0f) == 0.0f);
 	assert(std::fabs(decode_velocity_gamma(kGammaVelocityDivisor) - 1.0f) < 1e-6);
 	assert(std::fabs(decode_velocity_gamma(-kGammaVelocityDivisor / 2) + 0.25f) < 1e-6);
+
+	// TSR's b0 as seen live: a 512-byte buffer with the fields at the offsets from the shader disassembly.
+	{
+		uint8_t buf[512] = {};
+		const auto put_u = [&](size_t at, uint32_t v) { std::memcpy(buf + at, &v, 4); };
+		const auto put_f = [&](size_t at, float v) { std::memcpy(buf + at, &v, 4); };
+		put_u(32, 2); put_u(36, 3);                    // InputInfo_ViewportMin
+		put_u(40, 1554); put_u(44, 876);               // InputInfo_ViewportMax
+		put_f(48, 1552.0f); put_f(52, 873.0f);         // InputInfo_ViewportSize
+		put_u(144, 4); put_u(148, 5);                  // HistoryInfo_ViewportMin
+		put_f(160, 2560.0f); put_f(164, 1440.0f);      // HistoryInfo_ViewportSize
+		put_f(256, 0.375f); put_f(260, 0.055556f);     // InputJitter
+		put_u(264, 1);                                 // bCameraCut
+		put_f(272, 776.0f); put_f(276, -436.5f);       // ScreenVelocityToInputPixelVelocity
+		TsrConstants c;
+		assert(parse_tsr_constants(buf, sizeof(buf), c));
+		assert(c.input_min[0] == 2 && c.input_min[1] == 3 && c.history_min[0] == 4 && c.history_min[1] == 5);
+		assert(c.input_size[0] == 1552.0f && c.input_size[1] == 873.0f && c.history_size[0] == 2560.0f && c.history_size[1] == 1440.0f);
+		assert(c.jitter[0] == 0.375f && std::fabs(c.jitter[1] - 0.055556f) < 1e-7);
+		assert(c.camera_cut == 1 && c.velocity_to_pixels[0] == 776.0f && c.velocity_to_pixels[1] == -436.5f);
+
+		assert(!parse_tsr_constants(buf, kTsrConstantsBytes - 1, c));   // too short
+		put_f(256, 0.9f);                                               // jitter outside +-0.5
+		assert(!parse_tsr_constants(buf, sizeof(buf), c));
+		put_f(256, 0.375f);
+		put_f(48, 0.0f);                                                // an empty viewport is not a TSR frame
+		assert(!parse_tsr_constants(buf, sizeof(buf), c));
+		put_f(48, 1552.0f);
+		put_f(272, 0.0f);                                               // velocity scale of zero
+		assert(!parse_tsr_constants(buf, sizeof(buf), c));
+	}
 
 	const Ini ini = parse_ini("; comment\nenabled = 1\n# other\njitter_sign_y=-1\r\nmv_scale_x=-0.5 \nbroken line\n\nlog_every_n_frames=300");
 	assert(ini.number("enabled", 0) == 1 && ini.number("jitter_sign_y", 1) == -1);

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 
@@ -48,6 +49,67 @@ inline int match_phase(float x, float y, uint32_t cycle, float eps = 2e-3f)
 inline void predict_jitter(int phase, uint32_t frames_since_lock, uint32_t cycle, float &x, float &y)
 {
 	jitter_at((static_cast<uint32_t>(phase) + frames_since_lock) % cycle + 1, x, y);
+}
+
+// The fields of TSR's root constant buffer b0 (_RootShaderParameters) that the DLSS add-on needs. The byte offsets
+// come from the disassembly of UE's own shader (T8, tsr_1ff10c3ce95d3bcb.dxil).
+constexpr size_t kTsrInputViewportMin = 32;      // uint2, then InputInfo_ViewportMax uint2 @40
+constexpr size_t kTsrInputViewportSize = 48;     // float2
+constexpr size_t kTsrHistoryViewportMin = 144;   // uint2
+constexpr size_t kTsrHistoryViewportSize = 160;  // float2
+constexpr size_t kTsrJitter = 256;               // float2, render pixels
+constexpr size_t kTsrCameraCut = 264;            // uint
+constexpr size_t kTsrVelocityToPixels = 272;     // float2, ScreenVelocityToInputPixelVelocity
+constexpr size_t kTsrConstantsBytes = 280;       // bytes of b0 the add-on reads
+
+struct TsrConstants
+{
+	uint32_t input_min[2] = {}, history_min[2] = {};
+	float input_size[2] = {}, history_size[2] = {};
+	float jitter[2] = {}, velocity_to_pixels[2] = {};
+	uint32_t camera_cut = 0;
+};
+
+inline uint32_t read_u32(const uint8_t *p, size_t at)
+{
+	uint32_t v;
+	std::memcpy(&v, p + at, sizeof(v));
+	return v;
+}
+inline float read_f32(const uint8_t *p, size_t at)
+{
+	float v;
+	std::memcpy(&v, p + at, sizeof(v));
+	return v;
+}
+
+// Parses the fields above; false when the buffer is short or the values cannot be a real TSR frame (non-positive
+// viewport, jitter outside +-0.5 pixels, non-finite velocity scale), so a mapped buffer holding something else is never used.
+inline bool parse_tsr_constants(const uint8_t *buf, size_t size, TsrConstants &out)
+{
+	if (buf == nullptr || size < kTsrConstantsBytes)
+		return false;
+	TsrConstants c;
+	for (int i = 0; i < 2; ++i)
+	{
+		c.input_min[i] = read_u32(buf, kTsrInputViewportMin + 4 * i);
+		c.history_min[i] = read_u32(buf, kTsrHistoryViewportMin + 4 * i);
+		c.input_size[i] = read_f32(buf, kTsrInputViewportSize + 4 * i);
+		c.history_size[i] = read_f32(buf, kTsrHistoryViewportSize + 4 * i);
+		c.jitter[i] = read_f32(buf, kTsrJitter + 4 * i);
+		c.velocity_to_pixels[i] = read_f32(buf, kTsrVelocityToPixels + 4 * i);
+	}
+	c.camera_cut = read_u32(buf, kTsrCameraCut);
+	const auto sane_size = [](float v) { return v >= 1.0f && v <= 16384.0f; };
+	const auto sane_scale = [](float v) { return std::isfinite(v) && std::fabs(v) > 0.0f && std::fabs(v) < 65536.0f; };
+	if (!sane_size(c.input_size[0]) || !sane_size(c.input_size[1]) || !sane_size(c.history_size[0]) || !sane_size(c.history_size[1]))
+		return false;
+	if (!(std::fabs(c.jitter[0]) <= 0.5f && std::fabs(c.jitter[1]) <= 0.5f))
+		return false;
+	if (!sane_scale(c.velocity_to_pixels[0]) || !sane_scale(c.velocity_to_pixels[1]))
+		return false;
+	out = c;
+	return true;
 }
 
 enum class Preset { dlaa, ultra_quality, quality, balanced, performance, ultra_performance };

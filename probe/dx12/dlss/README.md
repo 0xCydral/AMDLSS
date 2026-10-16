@@ -10,17 +10,29 @@ Stage 3b of the DX12 spike (`odd/tasks/dx12-spike.md`): a ReShade add-on that re
    output u1, scene color u3, translucency u4, velocity u6. **Depth is not u14**: that slot is an unrelated one UE
    refills every frame (live: empty, 1x1, a 5712x5712 shadow map, an 8192x1024 UAV), and the final TSR pass reads no
    depth. DLSS gets the newest depth buffer bound for rendering whose size equals the render size.
-2. Reads the camera jitter, a float2 in render pixels at byte 256 of the root CBV b0 at root param 2 (found in T7).
+2. Reads TSR's own constants, the root CBV b0 at root param 2. Offsets from the disassembly of UE's shader (`logic.hpp`):
+   InputInfo_ViewportMin @32 and ViewportSize @48, HistoryInfo_ViewportMin @144 and ViewportSize @160, InputJitter
+   @256 (float2, render pixels, found in T7), bCameraCut @264, ScreenVelocityToInputPixelVelocity @272.
    - **Option A (used first):** the CBV lives in an upload heap and UE wrote it on the CPU before recording, so
-     `device::map_buffer_region` reads the 8 bytes at record time. The value must lie within +-0.5.
+     `device::map_buffer_region` reads the first 280 bytes at record time, and `parse_tsr_constants` rejects values
+     that cannot be a real TSR frame (empty viewport, jitter outside +-0.5, zero velocity scale).
    - **Option B (fallback):** each good read is matched to Halton(2,3)-0.5 (`jitter_cycle`, default 8) to lock the
-     phase; if a later read fails the jitter is predicted from the evaluation count. If A never worked, nothing is
-     replaced.
+     phase; if a later read fails the jitter is predicted from the evaluation count and the last viewport and scale
+     are reused. If A never worked, nothing is replaced.
+   - **Viewports:** DLSS works on the input viewport (live 1552x873 inside a 1552x876 texture; the rows below the
+     viewport are garbage) and the history viewport, never on the texture extents. The feature is created with the
+     viewport sizes and recreated when they change; color, depth and motion vectors get the input viewport origin as
+     subrect base, the output the history viewport origin, and the decode pass writes only inside the input viewport.
+   - **Camera cut:** `bCameraCut != 0` makes that frame an `InReset=1` frame and is counted as `camera-cut` in the
+     accounting line.
 3. One small compute pass (`velocity_decode.hlsl`, DXIL embedded at build time) does two jobs:
-   - Decodes UE's velocity into DLSS motion vectors: `v = (enc - 32767/65535) / (0.499 * 0.5)` (`mv_encoding=linear`,
-     the inverse of UE5's `EncodeVelocityToTexture`) or the UE4 gamma form (`mv_encoding=gamma`: that value divided
-     by 2/1.4142, then `sign(e) * e * e`), times `(mv_scale_x * width, mv_scale_y * height)` = `(-0.5 w, +0.5 h)` so
-     the result is "previous minus current" in render pixels, y down. It writes an `r16g16_float` texture.
+   - Decodes UE's velocity into DLSS motion vectors the way UE's TSR shader does (`mv_encoding=gamma`, the default):
+     `e = 4.008016 * enc - 2.003992; V = e * abs(e) * 0.5`, which is the unbias `(enc - 32767/65535) / (0.499 * 0.5)`,
+     divided by 2/1.4142, then `sign(e) * e * e`. TSR computes `PrevScreenPos = ScreenPos - V`, so V is current minus
+     previous; the pixel velocity is V times ScreenVelocityToInputPixelVelocity, live (+0.5 W, -0.5 H) = (776, -436.5).
+     DLSS wants current to previous, so the add-on multiplies by the negated game value (`mv_scale_source=game`,
+     default) or by `(mv_scale_x * width, mv_scale_y * height)` from the ini (`mv_scale_source=ini`). `mv_encoding=linear`
+     applies the unbias alone. It writes an `r16g16_float` texture.
    - With `composite_translucency=1`, composites the separate translucency u4 over the scene color u3 into an
      `r16g16b16a16_float` texture: `rgb = scene.rgb * trans.a + trans.rgb` (premultiplied, alpha = transmittance).
      DLSS then gets that texture as its color input. If u4 is missing, not `r16g16b16a16_float` or not render size,
@@ -96,11 +108,12 @@ succeeds in the log.
 |---|---|---|
 | `enabled` | 1 | 0 leaves the game's upscaler alone |
 | `jitter_sign_x`, `jitter_sign_y` | 1 | multiplied into the jitter sent to DLSS |
-| `mv_scale_x`, `mv_scale_y` | -0.5, 0.5 | NDC delta to pixels is `(mv_scale_x * width, mv_scale_y * height)` |
+| `mv_scale_source` | game | `game`: TSR's ScreenVelocityToInputPixelVelocity from b0, negated; `ini`: the two keys below |
+| `mv_scale_x`, `mv_scale_y` | -0.5, 0.5 | with `mv_scale_source=ini`: velocity to pixels is `(mv_scale_x * viewport width, mv_scale_y * viewport height)` |
 | `log_every_n_frames` | 300 | log cadence after the first 10 evaluations |
 | `jitter_cycle` | 8 | Halton cycle length for the fallback |
 | `composite_translucency` | 1 | composite u4 over u3 before DLSS; 0 feeds u3 raw |
-| `mv_encoding` | linear | `linear` (UE5) or `gamma` (UE4 style) velocity decode |
+| `mv_encoding` | gamma | `gamma` (what UE's TSR shader does) or `linear` (the unbias alone) |
 | `fill_half_res` | 1 | fill u1 (TSR's half-size output, read by bloom and eye adaptation) from u0 after the evaluate |
 | `never_fallback_after_start` | 1 | after DLSS started, skip TSR even when no evaluate is possible and keep the previous u0 |
 

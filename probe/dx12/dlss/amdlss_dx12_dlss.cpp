@@ -43,9 +43,9 @@ constexpr uint64_t kUpscaleHash = 0x1ff10c3ce95d3bcbull;
 // Root parameter 1 is the pass's descriptor table; the registers below are the slots found in stage 2.
 constexpr uint32_t kBindingsParam = 1;
 constexpr uint32_t kRegOutput = 0, kRegHalf = 1, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6;
-// Stage 3a (T7): the jitter is a float2 in render pixels at byte 256 of the root CBV b0 at root parameter 2.
+// Stage 3a (T7): TSR's constants (jitter at byte 256, viewports, camera cut, velocity scale) are the root CBV b0 at root
+// parameter 2; the field offsets are in logic.hpp.
 constexpr uint32_t kJitterParam = 2;
-constexpr uint64_t kJitterByteOffset = 256;
 // Fixed NGX project id for this engine-custom integration.
 constexpr const char *kProjectId = "5d0c1e7a-3f24-4b88-9a51-7c2e6d0b4f93";
 constexpr uint32_t kUnboundedCap = 64;
@@ -108,7 +108,8 @@ struct Config
 	// Once DLSS has run, never let TSR run on history that DLSS frames wrote: skip it even when no evaluate is possible.
 	bool never_fallback_after_start = true;
 	bool composite_translucency = true; // u4 over u3 before DLSS
-	bool mv_gamma = false;              // false: UE5 linear velocity, true: UE4-style gamma velocity
+	bool mv_gamma = true;               // true: what UE's TSR shader does (e*abs(e)*0.5); false: only the linear unbias
+	bool mv_scale_from_game = true;     // pixel scale of the velocity from TSR's b0; false: mv_scale_x/y times the viewport
 } g_cfg;
 std::string g_dir, g_log_path, g_ini_path;
 FILETIME g_ini_time = {};
@@ -141,6 +142,16 @@ bool first_n(const char *key, int limit)
 bool first_time(const char *key)
 {
 	return first_n(key, 1);
+}
+
+std::string str_format(const char *fmt, ...)
+{
+	char buf[1024];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	return buf;
 }
 
 std::string narrow(const wchar_t *w)
@@ -592,55 +603,56 @@ bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &wh
 // ---- jitter -------------------------------------------------------------------------------------------------------
 
 // Option A: the root CBV lives in an upload heap and UE wrote it on the CPU before recording this dispatch, so the
-// 8 bytes can be read now. Option B (fallback): once a read has been matched to the Halton sequence, predict it.
+// fields the add-on needs (jitter, viewports, camera cut, velocity scale) can be read now, in one map of the first
+// logic::kTsrConstantsBytes bytes of b0. Option B (fallback): once a read has been matched to the Halton sequence,
+// predict the jitter and reuse the last viewport and scale.
 struct JitterState
 {
 	int phase = -1;
 	uint64_t phase_eval = 0;
 	bool using_fallback = false;
 } g_jitter;
+logic::TsrConstants g_tsr_last;
+bool g_tsr_last_valid = false;
 
-bool read_jitter_a(device *dev, const CmdState &st, float &x, float &y, std::string &why)
+bool read_tsr_constants(device *dev, const CmdState &st, logic::TsrConstants &out, std::string &why)
 {
 	const auto it = st.pushes.find(kJitterParam);
 	if (it == st.pushes.end() || it->second.empty() || it->second[0].info == nullptr || !it->second[0].info->buffer_range)
 	{
-		why = "no root CBV at the jitter root parameter";
+		why = "no root CBV at the TSR constants root parameter";
 		return false;
 	}
 	const Info &info = *it->second[0].info;
 	if (info.resource == 0 || g_live_buffers.count(info.resource) == 0)
 	{
-		why = "jitter buffer unresolved or destroyed";
+		why = "constant buffer unresolved or destroyed";
 		return false;
 	}
 	if (info.desc.heap != memory_heap::upload)
 	{
-		why = "jitter buffer is not in an upload heap";
+		why = "constant buffer is not in an upload heap";
 		return false;
 	}
-	const uint64_t at = info.offset + kJitterByteOffset;
-	if (at + 8 > info.desc.buffer.size)
+	if (info.offset + logic::kTsrConstantsBytes > info.desc.buffer.size)
 	{
-		why = "jitter offset is past the end of the buffer";
+		why = "the TSR constants are past the end of the buffer";
 		return false;
 	}
 	void *data = nullptr;
-	if (!dev->map_buffer_region({ info.resource }, at, 8, map_access::read_only, &data) || data == nullptr)
+	if (!dev->map_buffer_region({ info.resource }, info.offset, logic::kTsrConstantsBytes, map_access::read_only, &data) || data == nullptr)
 	{
 		why = "map_buffer_region failed";
 		return false;
 	}
-	float v[2];
-	memcpy(v, data, sizeof(v));
+	uint8_t copy[logic::kTsrConstantsBytes];
+	memcpy(copy, data, sizeof(copy));
 	dev->unmap_buffer_region({ info.resource });
-	if (!(std::fabs(v[0]) <= 0.5f && std::fabs(v[1]) <= 0.5f))
+	if (!logic::parse_tsr_constants(copy, sizeof(copy), out))
 	{
-		why = "value read is outside +-0.5 pixels";
+		why = "the bytes read are not plausible TSR constants (viewport, jitter or velocity scale out of range)";
 		return false;
 	}
-	x = v[0];
-	y = v[1];
 	return true;
 }
 
@@ -669,6 +681,7 @@ struct NgxState
 	NVSDK_NGX_Handle *feature = nullptr;
 	std::vector<NVSDK_NGX_Handle *> retired; // released at process exit by the OS; releasing mid-flight is unsafe
 	uint32_t rw = 0, rh = 0, ow = 0, oh = 0;
+	bool output_subrects = false;
 	uint64_t evals = 0;
 } g_ngx;
 
@@ -783,7 +796,8 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource *r, D3D12_RESOURCE_STATES from,
 
 // Decodes velocity into pixels and, when `composite`, writes color with translucency composited over it.
 // Constants come from the live config, so an ini change needs no rebuild.
-void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D12Resource *color, ID3D12Resource *translucency, bool composite, uint32_t w, uint32_t h)
+void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D12Resource *color, ID3D12Resource *translucency, bool composite,
+	float scale_x, float scale_y, uint32_t min_x, uint32_t min_y, uint32_t w, uint32_t h)
 {
 	const uint32_t slot = g_native.ring++ % kDecodeRing;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_native.heap->GetCPUDescriptorHandleForHeapStart();
@@ -813,13 +827,14 @@ void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D
 	make_uav(g_native.mv, DXGI_FORMAT_R16G16_FLOAT);
 	make_uav(g_native.comp, DXGI_FORMAT_R16G16B16A16_FLOAT);
 
-	struct { float sx, sy; uint32_t w, h, encoding, composite; } constants = {
-		g_cfg.mv_scale_x * w, g_cfg.mv_scale_y * h, w, h, g_cfg.mv_gamma ? 1u : 0u, composite ? 1u : 0u };
+	// Only texels inside the input viewport are written; the scale already has DLSS's current-to-previous sign.
+	struct { float sx, sy; uint32_t min_x, min_y, w, h, encoding, composite; } constants = {
+		scale_x, scale_y, min_x, min_y, w, h, g_cfg.mv_gamma ? 1u : 0u, composite ? 1u : 0u };
 	ID3D12DescriptorHeap *heaps[] = { g_native.heap };
 	cl->SetDescriptorHeaps(1, heaps);
 	cl->SetComputeRootSignature(g_native.rs);
 	cl->SetPipelineState(g_native.pso);
-	cl->SetComputeRoot32BitConstants(0, 6, &constants, 0);
+	cl->SetComputeRoot32BitConstants(0, 8, &constants, 0);
 	cl->SetComputeRootDescriptorTable(1, gpu);
 	cl->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
 }
@@ -928,9 +943,9 @@ bool ensure_ngx(ID3D12Device *dev)
 }
 
 // Creates the DLSS feature for these sizes on the game's command list; the old one is parked, not released.
-bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool &reset)
+bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool output_subrects, bool &reset)
 {
-	if (g_ngx.feature != nullptr && g_ngx.rw == rw && g_ngx.rh == rh && g_ngx.ow == ow && g_ngx.oh == oh)
+	if (g_ngx.feature != nullptr && g_ngx.rw == rw && g_ngx.rh == rh && g_ngx.ow == ow && g_ngx.oh == oh && g_ngx.output_subrects == output_subrects)
 		return true;
 	if (g_ngx.feature != nullptr)
 		g_ngx.retired.push_back(g_ngx.feature);
@@ -953,9 +968,10 @@ bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uin
 	create.Feature.InPerfQualityValue = ngx_quality(preset);
 	create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
 		NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+	create.InEnableOutputSubrects = output_subrects;
 	const NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(cl, 1, 1, &g_ngx.feature, g_ngx.params, &create);
-	log_line("create DLSS feature: render %ux%u -> output %ux%u, ratio %.3f, preset %s, flags IsHDR|AutoExposure|MVLowRes|DepthInverted: 0x%08x %s",
-		rw, rh, ow, oh, static_cast<double>(rw) / ow, logic::preset_name(preset), static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
+	log_line("create DLSS feature: render viewport %ux%u -> output viewport %ux%u (output subrects %d), ratio %.3f, preset %s, flags IsHDR|AutoExposure|MVLowRes|DepthInverted: 0x%08x %s",
+		rw, rh, ow, oh, output_subrects, static_cast<double>(rw) / ow, logic::preset_name(preset), static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
 	if (NVSDK_NGX_FAILED(r) || g_ngx.feature == nullptr)
 	{
 		g_ngx.feature = nullptr;
@@ -965,6 +981,7 @@ bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uin
 	g_ngx.rh = rh;
 	g_ngx.ow = ow;
 	g_ngx.oh = oh;
+	g_ngx.output_subrects = output_subrects;
 	reset = true;
 	return true;
 }
@@ -976,6 +993,7 @@ struct Snapshot
 	std::vector<LayoutParam> params;
 	Bindings b;
 	float jitter_x = 0, jitter_y = 0;
+	logic::TsrConstants tsr;
 	bool jitter_fallback = false;
 };
 
@@ -1051,8 +1069,8 @@ std::string config_summary()
 {
 	char buf[512];
 	snprintf(buf, sizeof(buf),
-		"enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
-		g_cfg.enabled, g_cfg.jitter_sign_x, g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.mv_gamma ? "gamma" : "linear",
+		"enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
+		g_cfg.enabled, g_cfg.jitter_sign_x, g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.mv_scale_from_game ? "game" : "ini", g_cfg.mv_gamma ? "gamma" : "linear",
 		g_cfg.composite_translucency, g_cfg.fill_half_res, g_cfg.never_fallback_after_start, g_cfg.log_every, g_cfg.jitter_cycle);
 	return buf;
 }
@@ -1083,7 +1101,11 @@ void load_ini(bool reload)
 	g_cfg.fill_half_res = ini.number("fill_half_res", 1) != 0;
 	g_cfg.never_fallback_after_start = ini.number("never_fallback_after_start", 1) != 0;
 	g_cfg.composite_translucency = ini.number("composite_translucency", 1) != 0;
-	const std::string encoding = ini.text("mv_encoding", "linear");
+	const std::string source = ini.text("mv_scale_source", "game");
+	g_cfg.mv_scale_from_game = source != "ini";
+	if (source != "ini" && source != "game")
+		log_line("mv_scale_source=%s is not game or ini; using game", source.c_str());
+	const std::string encoding = ini.text("mv_encoding", "gamma");
 	g_cfg.mv_gamma = encoding == "gamma";
 	if (encoding != "gamma" && encoding != "linear")
 		log_line("mv_encoding=%s is not linear or gamma; using linear", encoding.c_str());
@@ -1255,9 +1277,40 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		log_line("known gaps: translucency u4 (%s); u2 (history metadata) is no longer written; u1 (half-size color) is %s",
 			composite ? "composited over u3 before DLSS" : "dropped", g_cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
 
-	const uint32_t rw = b.color.width, rh = b.color.height, ow = b.output.width, oh = b.output.height;
+	// DLSS works on the viewports TSR itself uses, not on the texture extents: below the viewport the texture holds garbage.
+	const logic::TsrConstants &t = s.tsr;
+	const uint32_t rw = static_cast<uint32_t>(t.input_size[0] + 0.5f), rh = static_cast<uint32_t>(t.input_size[1] + 0.5f);
+	const uint32_t ow = static_cast<uint32_t>(t.history_size[0] + 0.5f), oh = static_cast<uint32_t>(t.history_size[1] + 0.5f);
+	if (t.input_min[0] + rw > b.color.width || t.input_min[1] + rh > b.color.height || t.history_min[0] + ow > b.output.width || t.history_min[1] + oh > b.output.height)
+		return give_up("viewport", str_format("a TSR viewport lies outside its texture: input min (%u,%u) size %ux%u in color %ux%u, history min (%u,%u) size %ux%u in output %ux%u",
+			t.input_min[0], t.input_min[1], rw, rh, b.color.width, b.color.height, t.history_min[0], t.history_min[1], ow, oh, b.output.width, b.output.height));
+	const bool output_subrects = t.history_min[0] != 0 || t.history_min[1] != 0;
+
+	// Velocity to pixels: the game's own scale (b0 @272, UE: ScreenVelocityToInputPixelVelocity), negated because DLSS
+	// wants current to previous and UE's V is current minus previous; or the ini factors times the viewport size.
+	const float scale_x = g_cfg.mv_scale_from_game ? -t.velocity_to_pixels[0] : g_cfg.mv_scale_x * rw;
+	const float scale_y = g_cfg.mv_scale_from_game ? -t.velocity_to_pixels[1] : g_cfg.mv_scale_y * rh;
+	{
+		static uint32_t last[12] = {};
+		const uint32_t now[12] = { t.input_min[0], t.input_min[1], rw, rh, t.history_min[0], t.history_min[1], ow, oh,
+			static_cast<uint32_t>(static_cast<int32_t>(scale_x * 16)), static_cast<uint32_t>(static_cast<int32_t>(scale_y * 16)), g_cfg.mv_scale_from_game ? 1u : 0u, 0u };
+		if (memcmp(last, now, sizeof(now)) != 0)
+		{
+			memcpy(last, now, sizeof(now));
+			log_line("TSR viewports: input min (%u,%u) size %ux%u of color %ux%u; history min (%u,%u) size %ux%u of output %ux%u; velocity to pixels (%g, %g) from %s "
+				"(game value (%g, %g)), %s encoding", t.input_min[0], t.input_min[1], rw, rh, b.color.width, b.color.height, t.history_min[0], t.history_min[1], ow, oh,
+				b.output.width, b.output.height, scale_x, scale_y, g_cfg.mv_scale_from_game ? "the game" : "the ini", t.velocity_to_pixels[0], t.velocity_to_pixels[1],
+				g_cfg.mv_gamma ? "gamma" : "linear");
+		}
+	}
+
 	bool reset = g_ngx.evals == 0 || g_reset_next;
 	g_reset_next = false;
+	if (t.camera_cut != 0)
+	{
+		reset = true;
+		stat_count("camera-cut");
+	}
 
 	auto *color = reinterpret_cast<ID3D12Resource *>(b.color.res.handle);
 	auto *translucency = reinterpret_cast<ID3D12Resource *>(b.translucency.res.handle);
@@ -1280,7 +1333,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!before.empty())
 		cl->ResourceBarrier(static_cast<UINT>(before.size()), before.data());
 
-	record_decode(cl, velocity, color, composite ? translucency : color, composite, rw, rh);
+	record_decode(cl, velocity, color, composite ? translucency : color, composite, scale_x, scale_y, t.input_min[0], t.input_min[1], rw, rh);
 	// The decode pass wrote the motion vectors (and the composited color): make them readable for DLSS.
 	std::vector<D3D12_RESOURCE_BARRIER> generated;
 	std::vector<ID3D12Resource *> generated_res = { g_native.mv };
@@ -1297,7 +1350,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		generated.push_back(transition(g, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 	cl->ResourceBarrier(static_cast<UINT>(generated.size()), generated.data());
 
-	bool ok = ensure_feature(cl, rw, rh, ow, oh, reset);
+	bool ok = ensure_feature(cl, rw, rh, ow, oh, output_subrects, reset);
 	if (!ok)
 		g_ngx.ok = false; // stop retrying (and logging) every frame; the original pass runs
 	NVSDK_NGX_Result r = NVSDK_NGX_Result_Fail;
@@ -1311,6 +1364,12 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		e.InJitterOffsetX = s.jitter_x * g_cfg.jitter_sign_x;
 		e.InJitterOffsetY = s.jitter_y * g_cfg.jitter_sign_y;
 		e.InRenderSubrectDimensions = { rw, rh };
+		// The decode pass and the composite write at the same texel coordinates as their sources, so every input shares the
+		// input viewport origin; the output goes to the history viewport.
+		e.InColorSubrectBase = { t.input_min[0], t.input_min[1] };
+		e.InDepthSubrectBase = { t.input_min[0], t.input_min[1] };
+		e.InMVSubrectBase = { t.input_min[0], t.input_min[1] };
+		e.InOutputSubrectBase = { t.history_min[0], t.history_min[1] };
 		e.InReset = reset ? 1 : 0;
 		e.InMVScaleX = 1.0f;
 		e.InMVScaleY = 1.0f;
@@ -1321,9 +1380,9 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		if (!ok)
 			g_ngx.ok = false; // a failing evaluate is logged once below and not retried
 		if (n <= 10 || !ok || (g_cfg.log_every != 0 && n % g_cfg.log_every == 0))
-			log_line("evaluate #%llu: 0x%08x %s render %ux%u -> %ux%u jitter (%+.4f, %+.4f)%s reset=%d%s", static_cast<unsigned long long>(n),
+			log_line("evaluate #%llu: 0x%08x %s viewport %ux%u -> %ux%u jitter (%+.4f, %+.4f)%s reset=%d%s", static_cast<unsigned long long>(n),
 				static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str(), rw, rh, ow, oh, s.jitter_x, s.jitter_y,
-				s.jitter_fallback ? " [fallback B]" : " [read from b0]", reset ? 1 : 0, ok ? "" : " FAILED, original pass runs");
+				s.jitter_fallback ? " [fallback B]" : " [read from b0]", reset ? 1 : 0, ok ? (t.camera_cut != 0 ? " (camera cut)" : "") : " FAILED, original pass runs");
 	}
 
 	std::vector<D3D12_RESOURCE_BARRIER> back;
@@ -1414,8 +1473,12 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 		}
 
 		std::string why;
-		if (read_jitter_a(dev, s.st, s.jitter_x, s.jitter_y, why))
+		if (read_tsr_constants(dev, s.st, s.tsr, why))
 		{
+			g_tsr_last = s.tsr;
+			g_tsr_last_valid = true;
+			s.jitter_x = s.tsr.jitter[0];
+			s.jitter_y = s.tsr.jitter[1];
 			const int phase = logic::match_phase(s.jitter_x, s.jitter_y, g_cfg.jitter_cycle);
 			if (phase >= 0)
 			{
@@ -1424,15 +1487,17 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			}
 			g_jitter.using_fallback = false;
 		}
-		else if (g_jitter.phase >= 0)
+		else if (g_jitter.phase >= 0 && g_tsr_last_valid)
 		{
+			s.tsr = g_tsr_last; // last viewport and velocity scale; no camera cut can be known
+			s.tsr.camera_cut = 0;
 			logic::predict_jitter(g_jitter.phase, static_cast<uint32_t>(g_ngx.evals - g_jitter.phase_eval), g_cfg.jitter_cycle, s.jitter_x, s.jitter_y);
 			s.jitter_fallback = true;
 			if (first_time("jitter-b"))
-				log_line("jitter option A failed (%s); using option B, the Halton sequence locked from an earlier read", why.c_str());
+				log_line("TSR constants option A failed (%s); using option B, the Halton sequence locked from an earlier read and the last viewport and scale", why.c_str());
 		}
 		else
-			return give_up("jitter", "jitter could not be read (" + why + ") and no earlier read locked the Halton phase");
+			return give_up("jitter", "the TSR constants could not be read (" + why + ") and no earlier read locked the Halton phase");
 	}
 
 	t_busy = true;
