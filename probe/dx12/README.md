@@ -54,6 +54,48 @@ MinGW cannot be used: ReShade is built with MSVC, and the two ABIs swap `this` a
 functions that return a struct by value (`get_resource_desc`, `get_resource_view_desc`), so a MinGW add-on corrupts the
 device object on the first call.
 
+## F11 dump mode (stage 2)
+
+Press F11 in game. The add-on waits for the first dispatch whose compute shader hash is `1ff10c3ce95d3bcb`
+(`kUpscaleHash`, found in stage 1), copies its textures, then disarms. F10 logging is unchanged.
+
+- **Before the dispatch** (`pre`): every plain 2D texture in the shader's own table, root param 1 (`kUpscaleRootParam`),
+  SRVs and UAVs, plus the most recent depth buffer bound with `bind_render_targets_and_depth_stencil` whose size equals
+  the render size. The render size is the most common size among the SRV textures, so it is not hard-coded.
+- **After the dispatch** (`post`): the root param 1 UAVs u0-u2 (`kMaxPostUavRegister`), the pass outputs.
+- **Where the post copies are recorded:** at the first event on the same command list after the target dispatch:
+  `dispatch`, `draw`, `draw_indexed`, `draw_or_dispatch_indirect`, `barrier` or `close_command_list`. ReShade fires
+  `barrier` after `ResourceBarrier`, so for a barrier the copy starts from the new state the event reports. This is the
+  earliest point after the dispatch and before UE reuses the outputs.
+- **Copy:** per texture, a transition to `copy_source`, `copy_texture_to_buffer` into a `memory_heap::readback` buffer
+  (mip 0, slice 0), and a transition back. "Before" states are guessed: UAV -> `unordered_access`, SRV and depth ->
+  `shader_resource_non_pixel` (`kSrvState`, `kDepthState`; UE reads in compute with NON_PIXEL_SHADER_RESOURCE). The
+  guess is exact only if UE left the resource there. vkd3d-proton (Proton) tolerates a wrong state, native D3D12 may not.
+- **Write:** once the command list was submitted (`execute_command_list`) and a later present has passed, the add-on
+  calls `wait_idle` on that queue, maps the buffers and writes the files. Nothing is written inline in the render path.
+- **Depth:** a depth-stencil texture is copied as plane 0 only, so the stencil is dropped and the file is written as
+  `r32_float` (`r24_unorm_x8_uint` for 24-bit depth, `r16_unorm` for 16-bit). If a depth copy of a typeless
+  `r32_g8_typeless` resource turns out to lose the device on some driver, remove the depth lookup in `dump_begin`.
+- **Failures never abort the game:** an unsupported format (block compressed, multisampled, 3D, buffers), a failed
+  buffer or a failed map writes a `DUMP skip ...` line to `amdlss_dx12_probe.log` and skips that texture. If the command
+  list is reset before submission, or never submitted within 600 presents, the dump is abandoned with a log line.
+
+Files go to `dump/` next to the add-on, named `<capture>_<pre|post>_<slot>_<WxH>_<format>_<resourcehandle>.dds`
+(a DDS file with a DX10 header carrying the real DXGI format), plus `<capture>_index.txt` listing every file with its
+slots (`t3+u2` when one resource is bound twice), view type, format, size and resource handle.
+
+View them on Linux with the converter (Python 3 standard library only, no numpy needed):
+
+```
+python3 -I probe/dx12/dds2png.py dump/001_*.dds        # writes a .png next to each .dds
+python3 -I probe/dx12/dds2png.py --selftest
+```
+
+Colour formats (`r16g16b16a16_float`, `r11g11b10_float`) get a Reinhard tonemap and sRGB. `r16g16_unorm` maps to R/G
+with B=0 as stored (UE encodes velocity centred at 0.5, so 128 is no motion). `r16g16_float`, `r16`, `r8` and `r8g8`
+are stretched min..max to the full range. `r32_float` depth is stretched with near = bright; `--z auto` (default) picks
+reversed-Z or standard-Z from the median, `--z reversed|standard` forces it.
+
 ## Install for a test
 
 1. Use an add-on-enabled ReShade (the 6.8.0.1 build from Luma's release) as `dxgi.dll` next to the game exe.
@@ -69,4 +111,4 @@ device object on the first call.
   the present thread, so the captured window holds one frame's worth of recorded work, offset by about a frame.
 - Unbounded descriptor ranges print at most the first 64 entries. Root constants are not logged.
 - Descriptor heaps are never freed from the shadow, which is fine for a short test session.
-- Untested against a live ReShade: this was built and checked as a PE only.
+- The F10 logger ran live in stage 1; the F11 dump (stage 2) has only been built and its converter self-checked, not run in game.

@@ -7,6 +7,9 @@
  *
  * Bindings are resolved by shadowing the descriptor heaps from update/copy_descriptor_tables, because
  * a D3D12 descriptor table is only a heap offset and ReShade cannot read a descriptor back.
+ *
+ * Press F11 (stage 2) to copy the textures around the upscale dispatch (shader hash kUpscaleHash) to dump/ as .dds files:
+ * the inputs just before the dispatch and the outputs right after it, on the same command list.
  */
 #include <reshade.hpp>
 
@@ -482,10 +485,420 @@ bool on_copy_descriptor_tables(device *dev, uint32_t count, const descriptor_tab
 	return false;
 }
 
+// ---- Stage 2: F11 dumps the textures around the upscale dispatch to dump/*.dds ----------------------------
+
+// Compute shader found in stage 1 ("Stage 1 result" in odd/tasks/dx12-spike.md): one thread per output pixel.
+constexpr uint64_t kUpscaleHash = 0x1ff10c3ce95d3bcbull;
+constexpr uint32_t kDumpHotkey = VK_F11;
+// The shader's own descriptor table; root param 0 lists resources it never reads.
+constexpr uint32_t kUpscaleRootParam = 1;
+// u0-u2 are the pass outputs, the other UAVs are inputs or scratch and are only dumped before the dispatch.
+constexpr uint32_t kMaxPostUavRegister = 2;
+// Guesses from how UE5 leaves resources (compute reads use NON_PIXEL_SHADER_RESOURCE). vkd3d-proton tolerates a wrong
+// "before" state; native D3D12 may not. The depth state is the weakest guess: that depth is not bound to the dispatch.
+constexpr resource_usage kSrvState = resource_usage::shader_resource_non_pixel;
+constexpr resource_usage kDepthState = resource_usage::shader_resource_non_pixel;
+constexpr size_t kDsvHistory = 32;
+// If the recorded command list is never submitted (reset, dropped), stop waiting after this many presents.
+constexpr uint32_t kGiveUpPresents = 600;
+
+struct DumpItem
+{
+	std::string phase, slots, view;
+	resource res = { 0 };
+	resource_desc desc;
+	resource_usage state = resource_usage::undefined;
+	format fmt = format::unknown; // what the bytes in the file are
+	uint32_t texel = 0, width = 0, height = 0, row_length = 0, stride = 0;
+	bool uav = false;
+	uint32_t reg = 0;
+	resource readback = { 0 };
+	uint64_t size = 0;
+};
+enum class DumpMode { idle, armed, recording, waiting };
+struct DumpRun
+{
+	command_list *cmd_list = nullptr;
+	device *dev = nullptr;
+	command_queue *queue = nullptr;
+	uint32_t number = 0, started = 0, submitted_at = 0;
+	bool submitted = false;
+	std::vector<DumpItem> pre, post;
+};
+
+std::atomic<DumpMode> g_dump_mode { DumpMode::idle };
+std::atomic<uint32_t> g_presents { 0 };
+std::atomic<uint64_t> g_last_dsv { 0 };
+DumpRun g_run;
+uint32_t g_dump_count = 0;
+std::vector<uint64_t> g_dsv_history;
+std::string g_dir; // add-on directory, with trailing separator
+
+void note(const std::string &line)
+{
+	reshade::log::message(reshade::log::level::info, ("amdlss_dx12_probe: " + line).c_str());
+	if (FILE *f = fopen(g_log_path.c_str(), "ab"))
+	{
+		fputs(("DUMP " + line + "\n").c_str(), f);
+		fclose(f);
+	}
+}
+
+void dump_release()
+{
+	for (std::vector<DumpItem> *items : { &g_run.pre, &g_run.post })
+		for (DumpItem &it : *items)
+			if (it.readback.handle != 0 && g_run.dev != nullptr)
+				g_run.dev->destroy_resource(it.readback);
+	g_run = DumpRun();
+	g_dump_mode = DumpMode::idle;
+}
+
+// Plane 0 of a depth resource is what a copy returns, so a depth-stencil texture is written as its depth-only twin.
+bool pick_format(const resource_desc &d, format view_fmt, DumpItem &it)
+{
+	const format rf = d.texture.format;
+	if ((d.usage & resource_usage::depth_stencil) != static_cast<resource_usage>(0))
+	{
+		switch (rf)
+		{
+		case format::r32_g8_typeless: case format::d32_float_s8_uint: case format::r32_float_x8_uint:
+		case format::x32_float_g8_uint: case format::r32_typeless: case format::d32_float:
+			it.fmt = format::r32_float; it.texel = 4; return true;
+		case format::r24_g8_typeless: case format::d24_unorm_s8_uint: case format::r24_unorm_x8_uint: case format::x24_unorm_g8_uint:
+			it.fmt = format::r24_unorm_x8_uint; it.texel = 4; return true;
+		case format::r16_typeless: case format::d16_unorm:
+			it.fmt = format::r16_unorm; it.texel = 2; return true;
+		default:
+			return false;
+		}
+	}
+	const bool view_ok = view_fmt != format::unknown && !format_is_typeless(view_fmt) && format_row_pitch(view_fmt, 1) == format_row_pitch(rf, 1);
+	const format f = view_ok ? view_fmt : format_to_default_typed(rf);
+	if (f == format::unknown || format_is_typeless(f) || format_is_block_compressed(f) || format_row_pitch(f, 1) == 0)
+		return false;
+	it.fmt = f;
+	it.texel = format_row_pitch(f, 1);
+	return true;
+}
+
+bool make_item(const Info &info, const char *phase, const std::string &slot, bool uav, uint32_t reg, DumpItem &it)
+{
+	const resource_desc &d = info.desc;
+	if (info.resource == 0 || d.type != resource_type::texture_2d || d.texture.samples > 1 || d.texture.width == 0 || d.texture.height == 0)
+		return false;
+	it.phase = phase;
+	it.slots = slot;
+	it.view = view_type_name(info.view_type);
+	it.res = { info.resource };
+	it.desc = d;
+	it.uav = uav;
+	it.reg = reg;
+	it.state = uav ? resource_usage::unordered_access : kSrvState;
+	it.width = d.texture.width;
+	it.height = d.texture.height;
+	if (!pick_format(d, info.view_format, it))
+		return false;
+	// Whole rows padded to 256 texels keep the pitch 256-byte aligned for every texel size, as D3D12 requires.
+	it.row_length = (it.width + 255) & ~255u;
+	it.stride = format_row_pitch(d.texture.format, it.row_length);
+	it.size = static_cast<uint64_t>(it.stride) * it.height;
+	return it.stride != 0;
+}
+
+void add_item(std::vector<DumpItem> &items, DumpItem &&it)
+{
+	for (DumpItem &other : items)
+		if (other.res.handle == it.res.handle)
+		{
+			other.slots += "+" + it.slots;
+			return;
+		}
+	items.push_back(std::move(it));
+}
+
+void collect_upscale_bindings(device *dev, CmdState &st, std::vector<DumpItem> &out)
+{
+	const auto layout = g_layouts.find(st.layout);
+	const auto table = st.tables.find(kUpscaleRootParam);
+	if (layout == g_layouts.end() || table == st.tables.end() || kUpscaleRootParam >= layout->second.size())
+		return;
+	for (const descriptor_range &r : layout->second[kUpscaleRootParam].ranges)
+	{
+		const bool uav = r.type == descriptor_type::unordered_access_view;
+		if (!uav && r.type != descriptor_type::shader_resource_view)
+			continue;
+		uint64_t heap;
+		uint32_t base;
+		if (!heap_offset(dev, table->second, r.binding, 0, heap, base))
+			continue;
+		const auto h = g_heaps.find(heap);
+		if (h == g_heaps.end())
+			continue;
+		const uint32_t n = r.count == UINT32_MAX ? kUnboundedCap : r.count;
+		for (uint32_t j = 0; j < n && base + j < h->second.size(); ++j)
+		{
+			Entry &e = h->second[base + j];
+			if (!e.set)
+				continue;
+			resolve(e);
+			const std::string slot = std::string(1, uav ? 'u' : 't') + std::to_string(r.dx_register_index + j);
+			DumpItem it;
+			if (e.info == nullptr || e.info->buffer_range || !make_item(*e.info, "pre", slot, uav, r.dx_register_index + j, it))
+			{
+				if (e.handle != 0)
+					note("skip " + slot + ": not a plain 2D texture or format not supported");
+				continue;
+			}
+			add_item(out, std::move(it));
+		}
+	}
+}
+
+// The most recent depth buffer bound this session that has the render-size dimensions of the SRV inputs.
+void add_render_size_depth(std::vector<DumpItem> &items)
+{
+	std::map<std::pair<uint32_t, uint32_t>, int> sizes;
+	for (const DumpItem &it : items)
+		if (!it.uav)
+			++sizes[{ it.width, it.height }];
+	std::pair<uint32_t, uint32_t> best { 0, 0 };
+	int best_count = 0;
+	for (const auto &[size, count] : sizes)
+		if (count > best_count)
+		{
+			best = size;
+			best_count = count;
+		}
+	for (auto h = g_dsv_history.rbegin(); h != g_dsv_history.rend(); ++h)
+	{
+		const auto v = g_views.find(*h);
+		if (v == g_views.end() || v->second->desc.type != resource_type::texture_2d ||
+			v->second->desc.texture.width != best.first || v->second->desc.texture.height != best.second)
+			continue;
+		DumpItem it;
+		if (make_item(*v->second, "pre", "depth", false, 0, it))
+		{
+			it.state = kDepthState;
+			add_item(items, std::move(it));
+			return;
+		}
+	}
+	note(str("no depth buffer of render size %ux%u seen", best.first, best.second));
+}
+
+// Drops items whose readback buffer cannot be created, so one bad texture never costs the rest.
+void allocate_readbacks(device *dev, std::vector<DumpItem> &items)
+{
+	for (size_t i = 0; i < items.size();)
+	{
+		DumpItem &it = items[i];
+		if (dev->create_resource(resource_desc(it.size, memory_heap::readback, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &it.readback) && it.readback.handle != 0)
+			++i;
+		else
+		{
+			note("skip " + it.slots + ": cannot create readback buffer");
+			items.erase(items.begin() + i);
+		}
+	}
+}
+
+void record_copies(command_list *cmd_list, const std::vector<DumpItem> &items)
+{
+	if (items.empty())
+		return;
+	std::vector<resource> res;
+	std::vector<resource_usage> from, to;
+	for (const DumpItem &it : items)
+	{
+		res.push_back(it.res);
+		from.push_back(it.state);
+		to.push_back(resource_usage::copy_source);
+	}
+	const uint32_t n = static_cast<uint32_t>(res.size());
+	cmd_list->barrier(n, res.data(), from.data(), to.data());
+	for (const DumpItem &it : items)
+		cmd_list->copy_texture_to_buffer(it.res, 0, nullptr, it.readback, 0, it.row_length, 0);
+	cmd_list->barrier(n, res.data(), to.data(), from.data());
+}
+
+void dump_begin(command_list *cmd_list, CmdState &st)
+{
+	device *dev = cmd_list->get_device();
+	std::vector<DumpItem> pre;
+	collect_upscale_bindings(dev, st, pre);
+	if (pre.empty())
+	{
+		note("target dispatch has nothing bound at root param 1; disarmed");
+		g_dump_mode = DumpMode::idle;
+		return;
+	}
+	add_render_size_depth(pre);
+	allocate_readbacks(dev, pre);
+	record_copies(cmd_list, pre);
+
+	g_run = DumpRun();
+	g_run.cmd_list = cmd_list;
+	g_run.dev = dev;
+	g_run.number = ++g_dump_count;
+	g_run.started = g_presents;
+	for (const DumpItem &it : pre)
+		if (it.uav && it.reg <= kMaxPostUavRegister)
+		{
+			DumpItem post = it;
+			post.phase = "post";
+			post.readback = { 0 };
+			g_run.post.push_back(std::move(post));
+		}
+	g_run.pre = std::move(pre);
+	g_dump_mode = DumpMode::recording;
+	note(str("dump #%u: recorded %zu pre copies on cl=%p, waiting for the next event on that list", g_run.number, g_run.pre.size(), (const void *)cmd_list));
+}
+
+// ReShade only offers barrier "after" ResourceBarrier, so a barrier on the outputs reports the state they were just
+// moved to; that state is what the copy must start from.
+void dump_post(command_list *cmd_list, uint32_t count, const resource *res, const resource_usage *new_states)
+{
+	for (uint32_t i = 0; i < count; ++i)
+		for (DumpItem &it : g_run.post)
+			if (it.res.handle == res[i].handle && new_states[i] != resource_usage::undefined)
+				it.state = new_states[i];
+	allocate_readbacks(g_run.dev, g_run.post);
+	record_copies(cmd_list, g_run.post);
+	g_dump_mode = DumpMode::waiting;
+	note(str("dump #%u: recorded %zu post copies", g_run.number, g_run.post.size()));
+}
+
+// Called before dispatch/draw/indirect and after barrier/close. The first call after the target dispatch on its
+// own command list records the post copies: the outputs have been written and UE has not reused them yet.
+void dump_event(command_list *cmd_list, bool is_dispatch, uint32_t count = 0, const resource *res = nullptr, const resource_usage *new_states = nullptr)
+{
+	const DumpMode m = g_dump_mode;
+	if (m != DumpMode::armed && m != DumpMode::recording)
+		return;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	if (g_dump_mode == DumpMode::armed)
+	{
+		if (!is_dispatch)
+			return;
+		CmdState &st = g_cmds[cmd_list];
+		const auto pipe = g_pipelines.find(st.pipeline);
+		if (pipe != g_pipelines.end() && pipe->second.hash == kUpscaleHash)
+			dump_begin(cmd_list, st);
+	}
+	else if (g_dump_mode == DumpMode::recording && g_run.cmd_list == cmd_list)
+		dump_post(cmd_list, count, res, new_states);
+}
+
+bool write_dds(const std::string &path, const DumpItem &it, const uint8_t *data)
+{
+	FILE *f = fopen(path.c_str(), "wb");
+	if (f == nullptr)
+		return false;
+	const uint32_t header[37] = {
+		0x20534444, 124, 0x100F, it.height, it.width, it.width * it.texel, 0, 1,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // reserved1[11]
+		32, 0x4, 0x30315844, 0, 0, 0, 0, 0, // pixel format: fourCC 'DX10'
+		0x1000, 0, 0, 0, 0, // caps, caps2-4, reserved2
+		static_cast<uint32_t>(it.fmt), 3, 0, 1, 0, // DX10 header: DXGI format, TEXTURE2D, misc, array size, misc2
+	};
+	bool ok = fwrite(header, sizeof(header), 1, f) == 1;
+	for (uint32_t y = 0; ok && y < it.height; ++y)
+		ok = fwrite(data + static_cast<size_t>(y) * it.stride, 1, static_cast<size_t>(it.width) * it.texel, f) == static_cast<size_t>(it.width) * it.texel;
+	return fclose(f) == 0 && ok;
+}
+
+void dump_write()
+{
+	CreateDirectoryA((g_dir + "dump").c_str(), nullptr);
+	const std::string base = str("%sdump\\%03u_", g_dir.c_str(), g_run.number);
+	std::string index = "file | slots | view | format | size | resource\n";
+	for (std::vector<DumpItem> *items : { &g_run.pre, &g_run.post })
+		for (DumpItem &it : *items)
+		{
+			void *data = nullptr;
+			if (!g_run.dev->map_buffer_region(it.readback, 0, it.size, map_access::read_only, &data) || data == nullptr)
+			{
+				note("skip " + it.slots + ": cannot map readback buffer");
+				continue;
+			}
+			const std::string name = str("%s_%s_%ux%u_%s_%llx.dds", it.phase.c_str(), it.slots.substr(0, it.slots.find('+')).c_str(),
+				it.width, it.height, format_name(it.fmt), (unsigned long long)it.res.handle);
+			const bool ok = write_dds(base + name, it, static_cast<const uint8_t *>(data));
+			g_run.dev->unmap_buffer_region(it.readback);
+			if (!ok)
+			{
+				note("skip " + it.slots + ": cannot write " + name);
+				continue;
+			}
+			index += str("%03u_%s | %s | %s | %s | %ux%u | %llx\n", g_run.number, name.c_str(), it.slots.c_str(), it.view.c_str(),
+				format_name(it.fmt), it.width, it.height, (unsigned long long)it.res.handle);
+		}
+	if (FILE *f = fopen((base + "index.txt").c_str(), "wb"))
+	{
+		fwrite(index.data(), 1, index.size(), f);
+		fclose(f);
+	}
+	note(str("dump #%u written to %sdump", g_run.number, g_dir.c_str()));
+}
+
+// Frame boundary for the dump: once the list was submitted and a present has passed, wait for the GPU and write.
+void dump_present()
+{
+	const uint32_t now = ++g_presents;
+	if (g_dump_mode == DumpMode::idle || g_dump_mode == DumpMode::armed)
+		return;
+	command_queue *queue = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (now - g_run.started > kGiveUpPresents)
+		{
+			note(str("dump #%u abandoned: command list never submitted", g_run.number));
+			dump_release();
+			return;
+		}
+		if (g_dump_mode != DumpMode::waiting || !g_run.submitted || now <= g_run.submitted_at)
+			return;
+		queue = g_run.queue;
+	}
+	// Outside the lock: the GPU may be waiting on work that other threads still have to record.
+	queue->wait_idle();
+	std::lock_guard<std::mutex> lock(g_mutex);
+	dump_write();
+	dump_release();
+}
+
+void on_execute_command_list(command_queue *queue, command_list *cmd_list)
+{
+	if (g_dump_mode != DumpMode::waiting)
+		return;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	if (g_dump_mode == DumpMode::waiting && g_run.cmd_list == cmd_list && !g_run.submitted)
+	{
+		g_run.submitted = true;
+		g_run.queue = queue;
+		g_run.submitted_at = g_presents;
+	}
+}
+
+void on_barrier(command_list *cmd_list, uint32_t count, const resource *res, const resource_usage *, const resource_usage *new_states)
+{
+	dump_event(cmd_list, false, count, res, new_states);
+}
+void on_close_command_list(command_list *cmd_list)
+{
+	dump_event(cmd_list, false);
+}
+
 void on_reset_command_list(command_list *cmd_list)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_cmds.erase(cmd_list);
+	if (g_dump_mode != DumpMode::idle && g_dump_mode != DumpMode::armed && g_run.cmd_list == cmd_list && !g_run.submitted)
+	{
+		note(str("dump #%u abandoned: command list was reset before submission", g_run.number));
+		dump_release();
+	}
 }
 
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
@@ -529,6 +942,13 @@ std::string view_brief(resource_view view)
 
 void on_bind_render_targets(command_list *cmd_list, uint32_t count, const resource_view *rtvs, resource_view dsv)
 {
+	if (dsv.handle != 0 && g_last_dsv.exchange(dsv.handle) != dsv.handle)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		g_dsv_history.push_back(dsv.handle);
+		if (g_dsv_history.size() > kDsvHistory)
+			g_dsv_history.erase(g_dsv_history.begin());
+	}
 	if (g_mode != Mode::capturing)
 		return;
 	std::lock_guard<std::mutex> lock(g_mutex);
@@ -550,6 +970,7 @@ void on_bind_render_targets(command_list *cmd_list, uint32_t count, const resour
 
 bool on_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
 {
+	dump_event(cmd_list, true);
 	log_dispatch(cmd_list, str("%ux%ux%u", x, y, z));
 	return false;
 }
@@ -565,14 +986,16 @@ bool on_dispatch_rays(command_list *, resource, uint64_t, uint64_t, resource, ui
 		++g_rays;
 	return false;
 }
-bool on_draw(command_list *, uint32_t, uint32_t, uint32_t, uint32_t)
+bool on_draw(command_list *cmd_list, uint32_t, uint32_t, uint32_t, uint32_t)
 {
+	dump_event(cmd_list, false);
 	if (g_mode == Mode::capturing)
 		++g_draws;
 	return false;
 }
-bool on_draw_indexed(command_list *, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+bool on_draw_indexed(command_list *cmd_list, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
 {
+	dump_event(cmd_list, false);
 	if (g_mode == Mode::capturing)
 		++g_draws;
 	return false;
@@ -580,6 +1003,7 @@ bool on_draw_indexed(command_list *, uint32_t, uint32_t, uint32_t, int32_t, uint
 // ExecuteIndirect: UE5 issues its GPU-driven passes this way, so the group counts are unknown here.
 bool on_indirect(command_list *cmd_list, indirect_command type, resource buffer, uint64_t offset, uint32_t draw_count, uint32_t)
 {
+	dump_event(cmd_list, type == indirect_command::dispatch);
 	if (g_mode != Mode::capturing)
 		return false;
 	switch (type)
@@ -626,6 +1050,7 @@ void finish_capture()
 // Frame boundary: armed -> record the frame that starts now -> write it at the next present.
 void on_present(command_queue *, swapchain *swap, const rect *, const rect *, uint32_t, const rect *)
 {
+	dump_present();
 	if (g_mode == Mode::capturing)
 		finish_capture();
 	else if (g_mode == Mode::armed)
@@ -639,13 +1064,20 @@ void on_reshade_present(effect_runtime *runtime)
 	if (down && !was_down && g_mode == Mode::idle)
 		g_mode = Mode::armed;
 	was_down = down;
+
+	static bool dump_was_down = false;
+	const bool dump_down = runtime->is_key_pressed(kDumpHotkey) || (GetAsyncKeyState(kDumpHotkey) & 0x8000) != 0;
+	DumpMode idle = DumpMode::idle;
+	if (dump_down && !dump_was_down && g_dump_mode.compare_exchange_strong(idle, DumpMode::armed))
+		note("dump armed: waiting for the upscale dispatch");
+	dump_was_down = dump_down;
 }
 } // namespace
 
 extern "C"
 {
 __declspec(dllexport) const char *NAME = "AMDLSS DX12 probe";
-__declspec(dllexport) const char *DESCRIPTION = "Press F10 to log one frame of compute dispatches and their bound resources to amdlss_dx12_probe.log.";
+__declspec(dllexport) const char *DESCRIPTION = "F10 logs one frame of compute dispatches and their bound resources to amdlss_dx12_probe.log; F11 dumps the upscale pass textures to dump/*.dds.";
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
@@ -661,6 +1093,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		const DWORD n = GetModuleFileNameA(module, path, MAX_PATH);
 		g_log_path.assign(path, n);
 		g_log_path.erase(g_log_path.find_last_of("\\/") + 1);
+		g_dir = g_log_path;
 		g_log_path += "amdlss_dx12_probe.log";
 
 		reshade::register_event<addon_event::init_pipeline>(on_init_pipeline);
@@ -671,6 +1104,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		reshade::register_event<addon_event::destroy_resource_view>(on_destroy_resource_view);
 		reshade::register_event<addon_event::update_descriptor_tables>(on_update_descriptor_tables);
 		reshade::register_event<addon_event::copy_descriptor_tables>(on_copy_descriptor_tables);
+		reshade::register_event<addon_event::barrier>(on_barrier);
+		reshade::register_event<addon_event::close_command_list>(on_close_command_list);
+		reshade::register_event<addon_event::execute_command_list>(on_execute_command_list);
 		reshade::register_event<addon_event::reset_command_list>(on_reset_command_list);
 		reshade::register_event<addon_event::destroy_command_list>(on_reset_command_list);
 		reshade::register_event<addon_event::bind_pipeline>(on_bind_pipeline);

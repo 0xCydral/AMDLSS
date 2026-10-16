@@ -32,6 +32,9 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
 - [x] T2 Run the probe in Echoes of Aincrad under Proton and identify the TAA/TSR dispatch. Done with 2 captures in
       one launch; a second launch is still owed (see Progress).
 - [x] T3 Verdict for stage 1, recorded here: pass, see "Stage 1 result".
+- [x] T4 Stage 2 dump tool: F11 in `probe/dx12` copies the upscale pass textures to `dump/*.dds` and `probe/dx12/dds2png.py`
+      converts them. Check: `build.sh` exits 0, imports only KERNEL32 and USER32, `dds2png.py --selftest` passes.
+- [ ] T5 Run the F11 dump in game, convert it, and identify scene color and motion vectors from the pixels.
 
 ## Stage 1 result (2026-10-16): pass
 
@@ -70,3 +73,9 @@ Not proven yet, and owed to stage 2:
   builds with clang-cl (`--target=x86_64-pc-windows-msvc`, lld) against the MSVC CRT and Windows SDK from xwin 0.10.0,
   static CRT. Checked in the disassembly: `get_resource_desc` is called with rcx = device, rdx = return buffer,
   r8 = resource. DLL imports only KERNEL32 and USER32. Re-run T2 with the new `.addon64`.
+- 2026-10-16: T4 done. F11 arms a dump of the first dispatch with hash `1ff10c3ce95d3bcb`: root param 1 textures
+  and the render-size depth before it, u0-u2 after it, recorded on the same command list and written after the
+  list is submitted and a present has passed. `bash probe/dx12/build.sh` exit 0, 238592 bytes, PE32+ DLL, imports
+  only KERNEL32 and USER32. `python3 -I probe/dx12/dds2png.py --selftest` prints `dds2png selftest ok`. Not run in
+  game yet (T5). Unverified guesses to check on the first run: the "before" resource states (NON_PIXEL_SHADER_RESOURCE
+  for SRVs and depth) and how ReShade lays out the depth footprint of `r32_g8_typeless`.
