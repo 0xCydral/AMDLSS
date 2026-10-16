@@ -51,6 +51,9 @@ docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e DXC_URL="$DXC_U
     /opt/dxc/bin/dxc -T cs_6_0 -E main -Fo out/velocity_decode.dxil velocity_decode.hlsl
     echo "velocity_decode.dxil: $(stat -c %s out/velocity_decode.dxil) bytes"
     xxd -i -n g_decode_dxil out/velocity_decode.dxil > out/decode_dxil.h
+    /opt/dxc/bin/dxc -T cs_6_0 -E main -Fo out/half_fill.dxil half_fill.hlsl
+    echo "half_fill.dxil: $(stat -c %s out/half_fill.dxil) bytes"
+    xxd -i -n g_half_dxil out/half_fill.dxil > out/half_dxil.h
 
     clang++ -std=c++17 -Wall -Wextra selftest.cpp -o /tmp/selftest
     /tmp/selftest

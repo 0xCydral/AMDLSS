@@ -8,7 +8,8 @@
  * decode pass change the compute root signature, pipeline, descriptor heaps and root arguments of the list, so all of
  * it is set back afterwards from the shadowed state. If anything is missing the game renders normally.
  *
- * Known gaps, logged once: translucency u4 is not used, u1 (half-size copy) and u2 (history metadata) are not written.
+ * Known gaps, logged once: translucency u4 is not used and u2 (history metadata) is not written. u1, TSR's half-size
+ * output that bloom and eye adaptation read, is filled from the DLSS output (ini fill_half_res).
  */
 #include <reshade.hpp>
 
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include "decode_dxil.h"
+#include "half_dxil.h"
 #include "logic.hpp"
 
 using namespace reshade::api;
@@ -40,7 +42,7 @@ namespace
 constexpr uint64_t kUpscaleHash = 0x1ff10c3ce95d3bcbull;
 // Root parameter 1 is the pass's descriptor table; the registers below are the slots found in stage 2.
 constexpr uint32_t kBindingsParam = 1;
-constexpr uint32_t kRegOutput = 0, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6, kRegDepth = 14;
+constexpr uint32_t kRegOutput = 0, kRegHalf = 1, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6, kRegDepth = 14;
 // Stage 3a (T7): the jitter is a float2 in render pixels at byte 256 of the root CBV b0 at root parameter 2.
 constexpr uint32_t kJitterParam = 2;
 constexpr uint64_t kJitterByteOffset = 256;
@@ -101,12 +103,15 @@ struct Config
 	// y up, DLSS wants previous minus current with y down, hence the signs.
 	float mv_scale_x = -0.5f, mv_scale_y = 0.5f;
 	uint32_t log_every = 300, jitter_cycle = 8;
+	bool fill_half_res = true; // u1 is written by TSR and read by bloom and eye adaptation
+	// Once DLSS has run, never let TSR run on history that DLSS frames wrote: skip it even when no evaluate is possible.
+	bool never_fallback_after_start = true;
 } g_cfg;
 std::string g_dir, g_log_path;
 
 void log_line(const char *fmt, ...)
 {
-	char buf[1024];
+	char buf[4096];
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
@@ -424,10 +429,11 @@ struct Tex
 	resource res = { 0 };
 	uint32_t width = 0, height = 0;
 	format view_format = format::unknown, res_format = format::unknown;
+	resource_view_type view_type = resource_view_type::unknown;
 };
 struct Bindings
 {
-	Tex output, color, translucency, velocity, depth;
+	Tex output, half, color, translucency, velocity, depth;
 };
 
 Tex tex_from(const Entry &e)
@@ -452,26 +458,66 @@ Tex tex_from(const Entry &e)
 	t.height = e.info->desc.texture.height;
 	t.view_format = e.info->view_format;
 	t.res_format = e.info->desc.texture.format;
+	t.view_type = e.info->view_type;
 	return t;
 }
 
 std::string describe(const char *slot, const Tex &t)
 {
-	char buf[256];
+	char buf[384];
 	if (!t.seen)
 		snprintf(buf, sizeof(buf), "%s: no descriptor written in that slot of the table", slot);
 	else if (!t.ok)
 		snprintf(buf, sizeof(buf), "%s: view %llx unusable, %s", slot, static_cast<unsigned long long>(t.view_handle), t.why.c_str());
 	else
-		snprintf(buf, sizeof(buf), "%s: resource %llx %ux%u dxgi format %u (view format %u, %s descriptor)", slot, static_cast<unsigned long long>(t.res.handle),
-			t.width, t.height, static_cast<unsigned>(t.res_format), static_cast<unsigned>(t.view_format), t.uav_view ? "UAV" : "SRV");
+		snprintf(buf, sizeof(buf), "%s: resource %llx %ux%u dxgi format %u (view format %u, view type %u, %s descriptor)", slot, static_cast<unsigned long long>(t.res.handle),
+			t.width, t.height, static_cast<unsigned>(t.res_format), static_cast<unsigned>(t.view_format), static_cast<unsigned>(t.view_type), t.uav_view ? "UAV" : "SRV");
 	return buf;
 }
 
 std::string describe_all(const Bindings &b)
 {
-	return describe("u0 output", b.output) + "; " + describe("u3 color", b.color) + "; " + describe("u4 translucency", b.translucency) + "; " +
+	return describe("u0 output", b.output) + "; " + describe("u1 half-size", b.half) + "; " + describe("u3 color", b.color) + "; " + describe("u4 translucency", b.translucency) + "; " +
 		describe("u6 velocity", b.velocity) + "; " + describe("u14 depth", b.depth);
+}
+
+// Depth buffers bound for rendering this session, newest last. Used when the pass's own depth slot is the wrong size.
+constexpr size_t kDsvHistory = 32;
+std::vector<uint64_t> g_dsv_history;
+std::atomic<uint64_t> g_last_dsv { 0 };
+
+void on_bind_render_targets(command_list *, uint32_t, const resource_view *, resource_view dsv)
+{
+	if (t_busy || dsv.handle == 0 || g_last_dsv.exchange(dsv.handle) == dsv.handle)
+		return;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	g_dsv_history.push_back(dsv.handle);
+	if (g_dsv_history.size() > kDsvHistory)
+		g_dsv_history.erase(g_dsv_history.begin());
+}
+
+// The most recent depth buffer whose size is the render size (the probe's render-size depth lookup).
+bool find_depth_of_size(uint32_t w, uint32_t h, Tex &out)
+{
+	for (auto it = g_dsv_history.rbegin(); it != g_dsv_history.rend(); ++it)
+	{
+		const auto v = g_views.find(*it);
+		if (v == g_views.end() || v->second->resource == 0 || v->second->desc.type != resource_type::texture_2d ||
+			v->second->desc.texture.width != w || v->second->desc.texture.height != h)
+			continue;
+		out = Tex();
+		out.seen = out.ok = true;
+		out.view_handle = *it;
+		out.res = { v->second->resource };
+		out.width = w;
+		out.height = h;
+		out.view_format = v->second->view_format;
+		out.res_format = v->second->desc.texture.format;
+		out.view_type = v->second->view_type;
+		out.uav_view = false; // its real state is unknown; NON_PIXEL_SHADER_RESOURCE is assumed
+		return true;
+	}
+	return false;
 }
 
 bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &why)
@@ -507,7 +553,7 @@ bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &wh
 				continue;
 			resolve(e);
 			const uint32_t reg = r.dx_register_index + j;
-			Tex *target = reg == kRegOutput ? &b.output : reg == kRegColor ? &b.color : reg == kRegTranslucency ? &b.translucency :
+			Tex *target = reg == kRegOutput ? &b.output : reg == kRegHalf ? &b.half : reg == kRegColor ? &b.color : reg == kRegTranslucency ? &b.translucency :
 				reg == kRegVelocity ? &b.velocity : reg == kRegDepth ? &b.depth : nullptr;
 			if (target != nullptr)
 				*target = tex_from(e);
@@ -581,8 +627,9 @@ bool read_jitter_a(device *dev, const CmdState &st, float &x, float &y, std::str
 struct Native
 {
 	ID3D12Device *dev = nullptr;
-	ID3D12RootSignature *rs = nullptr;
-	ID3D12PipelineState *pso = nullptr;
+	ID3D12RootSignature *rs = nullptr, *half_rs = nullptr;
+	ID3D12PipelineState *pso = nullptr, *half_pso = nullptr;
+	bool half_ready = false;
 	ID3D12DescriptorHeap *heap = nullptr;
 	UINT inc = 0;
 	uint32_t ring = 0;
@@ -644,6 +691,16 @@ bool ensure_native(ID3D12Device *dev)
 		return false;
 	}
 	g_native.inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	// The half-size fill is optional: if its shader is refused, only that fill is skipped.
+	D3D12_COMPUTE_PIPELINE_STATE_DESC half = {};
+	if (SUCCEEDED(dev->CreateRootSignature(0, g_half_dxil, g_half_dxil_len, IID_PPV_ARGS(&g_native.half_rs))))
+	{
+		half.pRootSignature = g_native.half_rs;
+		half.CS = { g_half_dxil, g_half_dxil_len };
+		g_native.half_ready = SUCCEEDED(dev->CreateComputePipelineState(&half, IID_PPV_ARGS(&g_native.half_pso)));
+	}
+	if (!g_native.half_ready)
+		log_line("half-res fill: its shader could not be created, u1 will not be filled");
 	g_native.failed = false;
 	g_native.ready = true;
 	log_line("decode pass ready (%zu bytes of DXIL)", static_cast<size_t>(g_decode_dxil_len));
@@ -719,6 +776,58 @@ void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, uint
 	cl->SetComputeRoot32BitConstants(0, 4, &constants, 0);
 	cl->SetComputeRootDescriptorTable(1, gpu);
 	cl->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+}
+
+// Averages 2x2 blocks of the DLSS output u0 into TSR's half-size output u1 (see half_fill.hlsl). u0 is in the UAV state
+// after the evaluate, so it is moved to NON_PIXEL_SHADER_RESOURCE for the read and back; u1 is the pass's UAV output.
+void record_half_fill(ID3D12GraphicsCommandList *cl, const Tex &src, const Tex &dst)
+{
+	auto *src_res = reinterpret_cast<ID3D12Resource *>(src.res.handle);
+	auto *dst_res = reinterpret_cast<ID3D12Resource *>(dst.res.handle);
+	const uint32_t slot = g_native.ring++ % kDecodeRing;
+	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_native.heap->GetCPUDescriptorHandleForHeapStart();
+	D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_native.heap->GetGPUDescriptorHandleForHeapStart();
+	cpu.ptr += static_cast<SIZE_T>(slot) * 2 * g_native.inc;
+	gpu.ptr += static_cast<UINT64>(slot) * 2 * g_native.inc;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+	srv.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srv.Texture2D.MipLevels = 1;
+	g_native.dev->CreateShaderResourceView(src_res, &srv, cpu);
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+	uav.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+	uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	cpu.ptr += g_native.inc;
+	g_native.dev->CreateUnorderedAccessView(dst_res, nullptr, &uav, cpu);
+
+	D3D12_RESOURCE_BARRIER before[2] = {
+		transition(src_res, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+		transition(dst_res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+	};
+	D3D12_RESOURCE_BARRIER after[2] = {
+		transition(src_res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+		transition(dst_res, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+	};
+	// u1 is a UAV descriptor in the game's table, so it already sits in the UAV state and only u0 changes.
+	const UINT n = dst.uav_view ? 1 : 2;
+	cl->ResourceBarrier(n, before);
+
+	const uint32_t constants[4] = { dst.width, dst.height, src.width, src.height };
+	ID3D12DescriptorHeap *heaps[] = { g_native.heap };
+	cl->SetDescriptorHeaps(1, heaps);
+	cl->SetComputeRootSignature(g_native.half_rs);
+	cl->SetPipelineState(g_native.half_pso);
+	cl->SetComputeRoot32BitConstants(0, 4, constants, 0);
+	cl->SetComputeRootDescriptorTable(1, gpu);
+	cl->Dispatch((dst.width + 7) / 8, (dst.height + 7) / 8, 1);
+
+	D3D12_RESOURCE_BARRIER uav_barrier = {};
+	uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	uav_barrier.UAV.pResource = dst_res;
+	cl->ResourceBarrier(1, &uav_barrier);
+	cl->ResourceBarrier(n, after);
 }
 
 NVSDK_NGX_PerfQuality_Value ngx_quality(logic::Preset p)
@@ -883,9 +992,50 @@ void restore_state(ID3D12GraphicsCommandList *cl, const Snapshot &s)
 
 // ---- the hook -----------------------------------------------------------------------------------------------
 
-// The first three times per reason are logged, with the details that name what was wrong.
+// Counts since the last report, so a reason that keeps firing is visible even after its first three detailed lines.
+struct Stats
+{
+	std::mutex m;
+	uint64_t frames = 0;
+	std::map<std::string, uint64_t> counts;
+	std::string last_mismatch;
+} g_stats;
+bool g_reset_next = false; // set when TSR ran in between: DLSS must not trust its history
+
+void stat_count(const char *key)
+{
+	std::lock_guard<std::mutex> lock(g_stats.m);
+	++g_stats.counts[key];
+}
+void stat_mismatch(const std::string &sizes)
+{
+	std::lock_guard<std::mutex> lock(g_stats.m);
+	g_stats.last_mismatch = sizes;
+}
+// Called once per upscale dispatch; every log_every_n_frames of them it reports and starts over.
+void stat_frame()
+{
+	std::lock_guard<std::mutex> lock(g_stats.m);
+	if (++g_stats.frames < g_cfg.log_every || g_cfg.log_every == 0)
+		return;
+	std::string line = "accounting over " + std::to_string(g_stats.frames) + " upscale dispatches:";
+	for (const auto &[key, n] : g_stats.counts)
+		line += " " + key + "=" + std::to_string(n);
+	if (!g_stats.last_mismatch.empty())
+		line += " | latest size mismatch: " + g_stats.last_mismatch;
+	log_line("%s", line.c_str());
+	g_stats.frames = 0;
+	g_stats.counts.clear();
+	g_stats.last_mismatch.clear();
+}
+
+// The first three times per reason are logged in full; every one is counted. A fallback means TSR runs, so DLSS
+// resets its history on its next frame.
 bool give_up(const char *key, const std::string &why)
 {
+	stat_count((std::string("fallback-") + key).c_str());
+	if (g_ngx.evals > 0)
+		g_reset_next = true;
 	if (first_n(key, 3))
 		log_line("not replacing the upscale pass: %s (the game renders normally)", why.c_str());
 	return false;
@@ -960,9 +1110,6 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!proxy_device(dev, pdev, why) || !proxy_list(cmd_list, cl, why))
 		return give_up("proxy", why);
 
-	if (b.color.width != b.velocity.width || b.color.height != b.velocity.height || b.color.width != b.depth.width || b.color.height != b.depth.height)
-		return give_up("size-mismatch", "color, velocity and depth differ in size: " + describe("u3 color", b.color) + "; " + describe("u6 velocity", b.velocity) +
-			"; " + describe("u14 depth", b.depth));
 	if (b.output.width < b.color.width || b.output.height < b.color.height)
 		return give_up("output-smaller", "output is smaller than the render size: " + describe("u0 output", b.output) + "; " + describe("u3 color", b.color));
 	if (b.velocity.res_format != format::r16g16_unorm && b.velocity.res_format != format::r16g16_typeless)
@@ -975,11 +1122,12 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		return give_up("mv-texture", "motion vector texture creation failed");
 
 	if (first_time("known-gaps"))
-		log_line("known gaps: translucency u4 (%s) is dropped; u1 (half-size color) and u2 (history metadata) are no longer written",
-			b.translucency.ok ? "bound" : "not bound");
+		log_line("known gaps: translucency u4 (%s) is dropped; u2 (history metadata) is no longer written; u1 (half-size color) is %s",
+			b.translucency.ok ? "bound" : "not bound", g_cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
 
 	const uint32_t rw = b.color.width, rh = b.color.height, ow = b.output.width, oh = b.output.height;
-	bool reset = g_ngx.evals == 0;
+	bool reset = g_ngx.evals == 0 || g_reset_next;
+	g_reset_next = false;
 
 	auto *color = reinterpret_cast<ID3D12Resource *>(b.color.res.handle);
 	auto *depth = reinterpret_cast<ID3D12Resource *>(b.depth.res.handle);
@@ -1023,6 +1171,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		e.InMVScaleY = 1.0f;
 		r = NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_ngx.feature, g_ngx.params, &e);
 		ok = NVSDK_NGX_SUCCEED(r);
+		stat_count(ok ? "evaluate-ok" : "evaluate-failed");
 		const uint64_t n = ++g_ngx.evals;
 		if (!ok)
 			g_ngx.ok = false; // a failing evaluate is logged once below and not retried
@@ -1034,6 +1183,22 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 	D3D12_RESOURCE_BARRIER back = transition(g_native.mv, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	cl->ResourceBarrier(1, &back);
+	// Only after a successful evaluate: when it failed the original pass still runs and writes u1 itself.
+	if (ok && g_cfg.fill_half_res)
+	{
+		const Tex &half = b.half;
+		if (!g_native.half_ready || !half.ok || half.res_format != format::r11g11b10_float || b.output.res_format != format::r11g11b10_float)
+		{
+			if (first_time("half-skipped"))
+				log_line("half-res fill skipped: %s", g_native.half_ready ? (describe("u1", half) + "; " + describe("u0", b.output)).c_str() : "the fill shader is unavailable");
+		}
+		else
+		{
+			if (first_time("half-fill"))
+				log_line("half-res fill: u1 %ux%u from u0 %ux%u", half.width, half.height, b.output.width, b.output.height);
+			record_half_fill(cl, b.output, half);
+		}
+	}
 	if (!after.empty())
 		cl->ResourceBarrier(static_cast<UINT>(after.size()), after.data());
 	// Everything the decode pass and NGX set is put back on the real list, with the real heap and root signature objects.
@@ -1055,6 +1220,7 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 		if (pipe == g_pipelines.end() || pipe->second != kUpscaleHash)
 			return false;
 
+		stat_frame();
 		device *dev = cmd_list->get_device();
 		s.st = it->second;
 		if (const auto l = g_layouts.find(s.st.layout); l != g_layouts.end())
@@ -1062,6 +1228,32 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 		std::string bind_why;
 		if (!find_bindings(dev, s.st, s.b, bind_why))
 			return give_up("bindings", bind_why + " [" + describe_all(s.b) + "]");
+
+		Bindings &b = s.b;
+		if (b.color.width != b.velocity.width || b.color.height != b.velocity.height || b.color.width != b.depth.width || b.color.height != b.depth.height)
+		{
+			const std::string sizes = describe("u3 color", b.color) + "; " + describe("u6 velocity", b.velocity) + "; " + describe("u14 depth", b.depth);
+			stat_mismatch(sizes);
+			Tex alt;
+			const bool depth_only = b.color.width == b.velocity.width && b.color.height == b.velocity.height;
+			if (depth_only && find_depth_of_size(b.color.width, b.color.height, alt))
+			{
+				stat_count("size-mismatch-depth-substituted");
+				if (first_n("depth-substituted", 3))
+					log_line("size mismatch, using the latest depth buffer of render size %ux%u instead of u14: %s; substitute: %s", b.color.width, b.color.height,
+						sizes.c_str(), describe("depth", alt).c_str());
+				b.depth = alt;
+			}
+			else if (g_cfg.never_fallback_after_start && g_ngx.evals > 0)
+			{
+				stat_count("size-mismatch-kept-previous-output");
+				if (first_n("kept-previous", 3))
+					log_line("size mismatch and no usable depth: skipping TSR without evaluating, u0 keeps the previous DLSS output: %s", sizes.c_str());
+				return true;
+			}
+			else
+				return give_up("size-mismatch", "color, velocity and depth differ in size and no depth of render size was seen: " + sizes);
+		}
 
 		std::string why;
 		if (read_jitter_a(dev, s.st, s.jitter_x, s.jitter_y, why))
@@ -1130,10 +1322,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		g_cfg.mv_scale_y = static_cast<float>(ini.number("mv_scale_y", g_cfg.mv_scale_y));
 		g_cfg.log_every = static_cast<uint32_t>(ini.number("log_every_n_frames", 300));
 		g_cfg.jitter_cycle = static_cast<uint32_t>(ini.number("jitter_cycle", 8));
+		g_cfg.fill_half_res = ini.number("fill_half_res", 1) != 0;
+		g_cfg.never_fallback_after_start = ini.number("never_fallback_after_start", 1) != 0;
 		if (g_cfg.jitter_cycle == 0)
 			g_cfg.jitter_cycle = 8;
-		log_line("loaded: enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) log_every_n_frames=%u jitter_cycle=%u", g_cfg.enabled, g_cfg.jitter_sign_x,
-			g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.log_every, g_cfg.jitter_cycle);
+		log_line("loaded: enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) log_every_n_frames=%u jitter_cycle=%u fill_half_res=%d never_fallback_after_start=%d", g_cfg.enabled, g_cfg.jitter_sign_x,
+			g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.log_every, g_cfg.jitter_cycle, g_cfg.fill_half_res, g_cfg.never_fallback_after_start);
 
 		reshade::register_event<addon_event::init_pipeline>(on_init_pipeline);
 		reshade::register_event<addon_event::destroy_pipeline>(on_destroy_pipeline);
@@ -1151,6 +1345,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		reshade::register_event<addon_event::push_descriptors>(on_push_descriptors);
 		reshade::register_event<addon_event::push_constants>(on_push_constants);
 		reshade::register_event<addon_event::bind_descriptor_tables>(on_bind_descriptor_tables);
+		reshade::register_event<addon_event::bind_render_targets_and_depth_stencil>(on_bind_render_targets);
 		reshade::register_event<addon_event::dispatch>(on_dispatch);
 		break;
 	}

@@ -143,3 +143,16 @@ Not proven yet, and owed to stage 2:
   and the game's compute state is put back on the real list afterwards. The log now names each unusable binding (slot,
   view or resource handle, size, reason) and the sizes in a mismatch, the first three times per reason. Rebuilt, not yet
   re-run. The earlier "textures not all found" and "differ in size" lines are expected to be explained by this logging.
+- 2026-10-16: T8 live result with the proxies (cec9aaa): DLSS runs, 600+ evaluates succeed, no crash, jitter read from b0
+  every frame, first screenshots clean. Then single bad frames appear between good ones (the owner sees a blink): exposure
+  jumps toward white and large saturated blocks of cyan, green and blue. Not a steady-state failure in the log. Two
+  suspects, both addressed in one change. (1) u1, TSR's half-size output that bloom and eye adaptation read, is never
+  written and its memory is aliased: now filled from u0 after the evaluate (`fill_half_res=1`, 2x2 average, own
+  compute pass on the proxy list). (2) Frames whose u14 is not render size fell back to TSR, which then ran on history
+  that DLSS frames wrote and produced the garbage frame: now the newest depth buffer of render size is substituted,
+  and if none exists with DLSS already running the TSR dispatch is skipped anyway and u0 keeps the previous output
+  (`never_fallback_after_start=1`); other fallbacks after the start make the next DLSS frame run with `InReset=1`. The log
+  line was also cut off at u14 (1 KB buffer); it is 4 KB now and carries u14 size, formats and view type. New per-report
+  accounting (every `log_every_n_frames` dispatches): evaluates, each fallback reason, substitutions, kept-previous
+  skips and the latest mismatch, so a reason that keeps firing is visible. Built (half_fill 4240 bytes of DXIL), not yet
+  re-run: A/B with `fill_half_res` and `never_fallback_after_start`.
