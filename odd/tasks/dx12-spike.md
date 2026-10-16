@@ -35,8 +35,15 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
 - [x] T4 Stage 2 dump tool: F11 in `probe/dx12` copies the upscale pass textures to `dump/*.dds` and `probe/dx12/dds2png.py`
       converts them. Check: `build.sh` exits 0, imports only KERNEL32 and USER32, `dds2png.py --selftest` passes.
 - [x] T5 Run the F11 dump in game, convert it, and identify scene color and motion vectors from the pixels.
-- [ ] T6 Re-run the F11 dump with the depth fix and confirm the depth buffer image (fresh launch, also confirms the
-      shader hash survives a restart).
+- [x] T6 Re-run the F11 dump with the depth fix and confirm the depth buffer image (fresh launch, also confirms the
+      shader hash survives a restart). Done on the title screen, dump in `~/Downloads/dx12-spike/dump2/`:
+      - Same hash, same slot layout, at a different size: 1400x788 to 1920x1080 (stage 3 must read sizes per frame).
+      - Depth is u14 (`r32_float` view), the same resource the depth lookup found, so the pass binds its own depth.
+      - Reversed-Z: near geometry is bright, sky is 0, and the shapes match the color in u3.
+      - The PNG showed only the even rows, squashed into the top half. Cause: the readback pitch came from the 8-byte
+        `r32_g8_typeless` resource format while the copy holds the 4-byte depth plane. Fixed (pitch = copied texel
+        size x row length), rebuilt and installed. A clean depth image is not yet re-dumped. Not blocking: depth is
+        proven present and valid.
 
 ## Stage 2 result (2026-10-16): pass for color, motion vectors and output; depth pending
 

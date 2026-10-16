@@ -601,7 +601,8 @@ bool make_item(const Info &info, const char *phase, const std::string &slot, boo
 		return false;
 	// Whole rows padded to 256 texels keep the pitch 256-byte aligned for every texel size, as D3D12 requires.
 	it.row_length = (it.width + 255) & ~255u;
-	it.stride = format_row_pitch(d.texture.format, it.row_length);
+	// Pitch from the copied texel size: a depth copy holds plane 0 only, half of an r32_g8 texel.
+	it.stride = it.texel * it.row_length;
 	it.size = static_cast<uint64_t>(it.stride) * it.height;
 	return it.stride != 0;
 }
