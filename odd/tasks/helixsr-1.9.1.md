@@ -114,5 +114,11 @@ Evidence (observed):
   `AMDLSS_TEST_SCALER=/tmp/helixsr-191-data/HelixSR-Scaler-1.0.4`): `tests/test_real_helixsr.py tests/test_pe.py`
   -> 16 passed.
 - `node --test receiver/`: 23 passed. `python AMDLSS.pyw --selftest`: "selftest passed".
+- Commits: `70dd525` (pins, bridge, labels, tests, README, selftest), `50198cc` (`chore(release): 1.3.0`),
+  `63d3500` (`fix(release)`: release.sh builds the checkout it lives in instead of a hard-coded main path, so a
+  worktree build no longer packages the main checkout; a run from the main checkout is unchanged).
 - Build (`bash packaging/release.sh`, after the owner's 1.2.1 marker; its `/tmp/amdlss-rel` output copied to
-  `/tmp/amdlss-rel130/`): (fill in with artifact SHA-256s)
+  `/tmp/amdlss-rel130/`): `pyinstaller-win exit=0`, `build-linux exit=0`, both `check_build.py` runs print
+  `VERSION 1.3.0` + `modules True`, `exe selftest exit=0`, `linux selftest exit=0`.
+  - AMDLSS.exe 18979609 bytes, SHA-256 `49da5e70b27fa8c903f3f90774c82d3ae6fc9a9814eda37772d3b09f8a04b74e`
+  - AMDLSS-linux-x86_64 24390456 bytes, SHA-256 `2b983578a78ef62f9add768f40b8f14803f6b7c4c8036d328f8bf27eee425865`
