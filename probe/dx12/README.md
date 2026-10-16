@@ -50,6 +50,8 @@ clang-cl (`--target=x86_64-pc-windows-msvc`, lld-link) against the MSVC CRT and 
 0.10.0 into `probe/dx12/third_party/xwin` (gitignored, about 630 MB, first build only), with the static CRT (`/MT`).
 Output: `probe/dx12/out/amdlss_dx12_probe.addon64`, a PE32+ x64 DLL importing only KERNEL32 and USER32.
 
+The DLSS replacement add-on (stage 3b) lives in `probe/dx12/dlss/` with its own build script and README.
+
 MinGW cannot be used: ReShade is built with MSVC, and the two ABIs swap `this` and the hidden return pointer for member
 functions that return a struct by value (`get_resource_desc`, `get_resource_view_desc`), so a MinGW add-on corrupts the
 device object on the first call.

@@ -55,6 +55,7 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
       - Capture copied to `~/Downloads/dx12-spike/cb1/` (not in repo).
 - [ ] T8 Stage 3b: replace the pass with DLSS (RTX 4070 on this machine) fed by u3+u4, u14 depth, decoded u6 and the
       T7 jitter; write u0. Pass: a stable upscaled image. Route and design decided after T7.
+      Built, not yet run: `probe/dx12/dlss/` (`bash probe/dx12/dlss/build.sh` -> `amdlss_dx12_dlss.addon64` + `nvngx_dlss.dll`).
 
 ## Stage 2 result (2026-10-16): pass for color, motion vectors and output; depth pending
 
@@ -120,3 +121,12 @@ Not proven yet, and owed to stage 2:
   `python3 -I probe/dx12/find_jitter.py cbcapture` ranks the float pairs that look like Halton(2,3) jitter.
   `bash probe/dx12/build.sh` exit 0, 264704 bytes, PE32+ DLL, imports only KERNEL32 and USER32;
   `find_jitter.py --selftest` passes (planted pair at offset 64 ranks first, pixel and NDC scale).
+- 2026-10-16: T8 built, not yet run. `probe/dx12/dlss/` is a separate add-on that skips the `1ff10c3ce95d3bcb` dispatch and
+  evaluates DLSS (NGX SDK `NVIDIA/DLSS` v310.9.16) on the game's list: color u3, depth u14 (inverted), velocity u6
+  decoded to render-pixel motion vectors by an embedded DXIL pass, jitter read from b0 offset 256 (option A, upload
+  heap map at record time; option B Halton fallback), output u0. NGX and the decode pass change compute root state,
+  so heaps, root signature, pipeline and root arguments are restored from the shadow. Gaps: u4 translucency dropped,
+  u1 and u2 not written. `bash probe/dx12/dlss/build.sh` exit 0, add-on imports only KERNEL32, ADVAPI32 and USER32,
+  decode shader 4092 bytes of signed DXIL (dxc 1.9.2609.5), logic selftest passes. To check on the first run: NGX init
+  and `SuperSampling.Available` in `amdlss_dx12_dlss.log`, whether DLSS accepts an `r11g11b10_float` output, whether
+  the guessed resource states and restored root descriptors hold, and the sign of jitter and velocity (ini).
