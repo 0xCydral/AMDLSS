@@ -659,9 +659,9 @@ void collect_upscale_bindings(device *dev, CmdState &st, std::vector<DumpItem> &
 void add_render_size_depth(std::vector<DumpItem> &items)
 {
 	std::map<std::pair<uint32_t, uint32_t>, int> sizes;
+	// Count every binding: UE declares this table as UAV ranges even for the slots it only reads.
 	for (const DumpItem &it : items)
-		if (!it.uav)
-			++sizes[{ it.width, it.height }];
+		++sizes[{ it.width, it.height }];
 	std::pair<uint32_t, uint32_t> best { 0, 0 };
 	int best_count = 0;
 	for (const auto &[size, count] : sizes)

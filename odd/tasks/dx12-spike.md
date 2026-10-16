@@ -34,7 +34,24 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
 - [x] T3 Verdict for stage 1, recorded here: pass, see "Stage 1 result".
 - [x] T4 Stage 2 dump tool: F11 in `probe/dx12` copies the upscale pass textures to `dump/*.dds` and `probe/dx12/dds2png.py`
       converts them. Check: `build.sh` exits 0, imports only KERNEL32 and USER32, `dds2png.py --selftest` passes.
-- [ ] T5 Run the F11 dump in game, convert it, and identify scene color and motion vectors from the pixels.
+- [x] T5 Run the F11 dump in game, convert it, and identify scene color and motion vectors from the pixels.
+- [ ] T6 Re-run the F11 dump with the depth fix and confirm the depth buffer image (fresh launch, also confirms the
+      shader hash survives a restart).
+
+## Stage 2 result (2026-10-16): pass for color, motion vectors and output; depth pending
+
+F11 dump #1 in a fresh launch: the hash `1ff10c3ce95d3bcb` matched again, the game did not crash or hang, and 16 of
+19 bindings were written (u13-u15 are not plain 2D textures). PNGs in `~/Downloads/dx12-spike/dump1/` (not in repo).
+
+- **Scene color is u3** (1552x876 `r16g16b16a16_float`): the full lit scene at render resolution, pre-upscale.
+- **u4 (1552x876 `r16g16b16a16_float`) is a separate translucency layer**: black except candle particles and fog. An
+  upscaler fed only u3 would drop these, so stage 3 must composite u4 over u3 first or feed it as a reactive mask.
+- **Motion vectors are u6** (1552x876 `r16g16_unorm`): smooth camera-motion gradient with the running character as a
+  distinct silhouette, values centred at 0.5. UE encoding, so stage 3 needs a decode to pixel offsets.
+- **Output is u0** (2560x1440 `r11g11b10_float`): the clean upscaled frame, same scene as u3.
+- **Depth was not dumped**: `DUMP no depth buffer of render size 0x0 seen`. Cause: UE declares root param 1 as UAV
+  ranges even for read-only slots, and the render-size vote counted only SRVs, so it counted nothing. Fixed by counting
+  every binding (1552x876 wins 8 to 4); rebuilt, not yet re-run (T6).
 
 ## Stage 1 result (2026-10-16): pass
 
