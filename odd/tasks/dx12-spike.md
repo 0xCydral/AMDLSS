@@ -29,8 +29,32 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
 
 - [x] T1 Stage 1 probe addon: `probe/dx12/` (C++ ReShade addon, MinGW build in Docker), build script, README.
       Route: delegated (writer trigger: new multi-file C++ project). Check: the addon builds to a PE32+ DLL.
-- [ ] T2 Run the probe in Echoes of Aincrad under Proton, capture 2 launches, identify the TAA/TSR dispatch.
-- [ ] T3 Verdict for stage 1, recorded here.
+- [x] T2 Run the probe in Echoes of Aincrad under Proton and identify the TAA/TSR dispatch. Done with 2 captures in
+      one launch; a second launch is still owed (see Progress).
+- [x] T3 Verdict for stage 1, recorded here: pass, see "Stage 1 result".
+
+## Stage 1 result (2026-10-16): pass
+
+Two F10 captures in one launch, 2560x1440 back buffer, 723 and 722 dispatches. Analysis script:
+`~/Downloads/dx12-spike/analyze.py` (not in the repo).
+
+- **Render resolution is 1552x876** (about 61% of 2560x1440): the game already upscales itself.
+- **The upscale pass is `cs=1ff10c3ce95d3bcb`** (51724-byte DXIL), groups 320x180 = 2560/8 x 1440/8. It is the only
+  dispatch with that hash and the only one-thread-per-output-pixel dispatch, in both captures (D715, D714). The four
+  passes before it on the same command list run at render size (194x110 = 1552/8 x 876/8), which fits UE5 TSR.
+- **Its real bindings (root param 1):** UAV u0 2560x1440 `r11g11b10_float` (history and output), u1 1280x720
+  `r11g11b10_float` (half-size output), u2 2560x1440 `r8_unorm`; SRVs at 1552x876: two `r16g16b16a16_float`,
+  `r8g8_unorm`, `r16g16_unorm`, `r8_unorm`, `r8_uint`, `r8_unorm`, `r8g8_unorm`; plus last frame's 2560x1440
+  `r11g11b10_float` and `r8_unorm`.
+- **History ping-pongs:** capture 1 reads `125f0e160` and writes `dd2f2270`; capture 2 reads `dd2f2270`.
+- **Depth** is `3c7b1a70` (1552x876 `r32_g8_typeless`, viewed `r32_float_x8_uint`), the same handle in both captures.
+  It is bound to earlier passes, not to `1ff10c3c`.
+
+Not proven yet, and owed to stage 2:
+- Which 1552x876 `r16g16b16a16_float` input is pre-upscale scene color, and whether `r16g16_unorm` (`e22b0920`) is
+  motion vectors. Formats fit; only a dump of the pixels proves it.
+- The hash across a second launch. It hashes the shader bytecode, so it should be stable, but this was not run.
+- The descriptor log lists whole tables (up to 64 entries), so root param 0 shows resources the shader may not read.
 
 ## Progress
 
