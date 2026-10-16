@@ -46,8 +46,13 @@ bash probe/dx12/build.sh
 
 It fetches the ReShade add-on headers (git tag **v6.8.0**, add-on API version 20, the release the 6.8.0.1 runtime
 is built from) into `probe/dx12/third_party/reshade/include` (gitignored), then compiles inside `ubuntu:24.04` with
-`g++-mingw-w64-x86-64` (posix threads, statically linked libstdc++, libgcc and winpthread). Output:
-`probe/dx12/out/amdlss_dx12_probe.addon64`, a PE32+ x64 DLL importing only KERNEL32, USER32 and msvcrt.
+clang-cl (`--target=x86_64-pc-windows-msvc`, lld-link) against the MSVC CRT and Windows SDK fetched once by `xwin`
+0.10.0 into `probe/dx12/third_party/xwin` (gitignored, about 630 MB, first build only), with the static CRT (`/MT`).
+Output: `probe/dx12/out/amdlss_dx12_probe.addon64`, a PE32+ x64 DLL importing only KERNEL32 and USER32.
+
+MinGW cannot be used: ReShade is built with MSVC, and the two ABIs swap `this` and the hidden return pointer for member
+functions that return a struct by value (`get_resource_desc`, `get_resource_view_desc`), so a MinGW add-on corrupts the
+device object on the first call.
 
 ## Install for a test
 

@@ -8,9 +8,6 @@
  * Bindings are resolved by shadowing the descriptor heaps from update/copy_descriptor_tables, because
  * a D3D12 descriptor table is only a heap offset and ReShade cannot read a descriptor back.
  */
-// MinGW declares the __uuidof helper that ReShade's private-data templates need only in guiddef.h.
-#include <windows.h>
-#include <guiddef.h>
 #include <reshade.hpp>
 
 #include <atomic>

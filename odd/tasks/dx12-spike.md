@@ -39,3 +39,10 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
   (248320 bytes, ReShade headers v6.8.0, API 20). `file`: PE32+ executable (DLL) x86-64. Imports only KERNEL32,
   msvcrt and USER32 (libstdc++, libgcc, winpthread are static). Exports NAME and DESCRIPTION. Not yet run against a
   live ReShade; that is T2.
+- 2026-10-16: T2 attempt 1 crashed the game: `EXCEPTION_ACCESS_VIOLATION` in `amdlss_dx12_probe+0x84ac`, a virtual call on the
+  `device*` whose vtable pointer had been overwritten. Cause: the MinGW build. ReShade is MSVC-built, and for member
+  functions returning a struct by value (`get_resource_desc` etc.) MSVC passes this=rcx, return pointer=rdx while
+  MinGW GCC swaps them, so ReShade wrote a `resource_desc` over the device object. Fix: `probe/dx12/build.sh` now
+  builds with clang-cl (`--target=x86_64-pc-windows-msvc`, lld) against the MSVC CRT and Windows SDK from xwin 0.10.0,
+  static CRT. Checked in the disassembly: `get_resource_desc` is called with rcx = device, rdx = return buffer,
+  r8 = resource. DLL imports only KERNEL32 and USER32. Re-run T2 with the new `.addon64`.
