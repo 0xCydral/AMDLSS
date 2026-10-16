@@ -120,13 +120,17 @@ void log_line(const char *fmt, ...)
 	reshade::log::message(reshade::log::level::info, (std::string("amdlss_dx12_dlss: ") + buf).c_str());
 }
 
-// Log a condition once per process, keyed by a short name; a failing frame would otherwise flood the log.
-bool first_time(const char *key)
+// True for the first `limit` calls with this key; a failing frame would otherwise flood the log.
+bool first_n(const char *key, int limit)
 {
-	static std::unordered_set<std::string> seen;
+	static std::unordered_map<std::string, int> seen;
 	static std::mutex m;
 	std::lock_guard<std::mutex> lock(m);
-	return seen.insert(key).second;
+	return ++seen[key] <= limit;
+}
+bool first_time(const char *key)
+{
+	return first_n(key, 1);
 }
 
 std::string narrow(const wchar_t *w)
@@ -414,6 +418,9 @@ void on_bind_descriptor_tables(command_list *cmd_list, shader_stage stages, pipe
 struct Tex
 {
 	bool ok = false, uav_view = false; // uav_view: the descriptor is a UAV, so the resource sits in the UAV state
+	bool seen = false;                 // a descriptor was found in that slot (it may still not be a usable texture)
+	std::string why;                   // why a seen descriptor is not usable
+	uint64_t view_handle = 0;
 	resource res = { 0 };
 	uint32_t width = 0, height = 0;
 	format view_format = format::unknown, res_format = format::unknown;
@@ -426,7 +433,17 @@ struct Bindings
 Tex tex_from(const Entry &e)
 {
 	Tex t;
-	if (e.info == nullptr || e.info->buffer_range || e.info->resource == 0 || e.info->desc.type != resource_type::texture_2d)
+	t.seen = true;
+	t.view_handle = e.handle;
+	if (e.info == nullptr)
+		t.why = "descriptor has no creation snapshot (a view made before the add-on loaded?)";
+	else if (e.info->buffer_range)
+		t.why = "a buffer range, not a texture";
+	else if (e.info->resource == 0)
+		t.why = "a view of a null resource";
+	else if (e.info->desc.type != resource_type::texture_2d)
+		t.why = "not a 2D texture";
+	if (!t.why.empty())
 		return t;
 	t.ok = true;
 	t.uav_view = e.type == descriptor_type::unordered_access_view || e.type == descriptor_type::buffer_unordered_access_view;
@@ -438,12 +455,39 @@ Tex tex_from(const Entry &e)
 	return t;
 }
 
-bool find_bindings(device *dev, const CmdState &st, Bindings &b)
+std::string describe(const char *slot, const Tex &t)
+{
+	char buf[256];
+	if (!t.seen)
+		snprintf(buf, sizeof(buf), "%s: no descriptor written in that slot of the table", slot);
+	else if (!t.ok)
+		snprintf(buf, sizeof(buf), "%s: view %llx unusable, %s", slot, static_cast<unsigned long long>(t.view_handle), t.why.c_str());
+	else
+		snprintf(buf, sizeof(buf), "%s: resource %llx %ux%u dxgi format %u (view format %u, %s descriptor)", slot, static_cast<unsigned long long>(t.res.handle),
+			t.width, t.height, static_cast<unsigned>(t.res_format), static_cast<unsigned>(t.view_format), t.uav_view ? "UAV" : "SRV");
+	return buf;
+}
+
+std::string describe_all(const Bindings &b)
+{
+	return describe("u0 output", b.output) + "; " + describe("u3 color", b.color) + "; " + describe("u4 translucency", b.translucency) + "; " +
+		describe("u6 velocity", b.velocity) + "; " + describe("u14 depth", b.depth);
+}
+
+bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &why)
 {
 	const auto layout = g_layouts.find(st.layout);
 	const auto table = st.tables.find(kBindingsParam);
-	if (layout == g_layouts.end() || table == st.tables.end() || kBindingsParam >= layout->second.size())
+	if (layout == g_layouts.end() || kBindingsParam >= layout->second.size())
+	{
+		why = "the bound root signature is unknown or has no parameter 1";
 		return false;
+	}
+	if (table == st.tables.end())
+	{
+		why = "no descriptor table was bound at root parameter 1";
+		return false;
+	}
 	for (const descriptor_range &r : layout->second[kBindingsParam].ranges)
 	{
 		if (r.type != descriptor_type::unordered_access_view && r.type != descriptor_type::shader_resource_view)
@@ -469,7 +513,12 @@ bool find_bindings(device *dev, const CmdState &st, Bindings &b)
 				*target = tex_from(e);
 		}
 	}
-	return b.output.ok && b.color.ok && b.velocity.ok && b.depth.ok;
+	if (!(b.output.ok && b.color.ok && b.velocity.ok && b.depth.ok))
+	{
+		why = "not all of u0, u3, u6 and u14 are usable textures";
+		return false;
+	}
+	return true;
 }
 
 // ---- jitter -------------------------------------------------------------------------------------------------------
@@ -834,29 +883,93 @@ void restore_state(ID3D12GraphicsCommandList *cl, const Snapshot &s)
 
 // ---- the hook -----------------------------------------------------------------------------------------------
 
+// The first three times per reason are logged, with the details that name what was wrong.
 bool give_up(const char *key, const std::string &why)
 {
-	if (first_time(key))
+	if (first_n(key, 3))
 		log_line("not replacing the upscale pass: %s (the game renders normally)", why.c_str());
 	return false;
+}
+
+// ReShade proxies the D3D12 device and command list. NGX has to see the proxies: they convert descriptor handles that
+// the real objects (what get_native() returns) do not, and NGX's NVAPI calls pass through ReShade's dxgi.
+// Proxy device: ReShade stores a pointer to it as private data on the real device.
+const GUID kReShadeProxyDeviceId = { 0x2523AFF4, 0x978B, 0x4939, { 0xBA, 0x16, 0x8E, 0xE8, 0x76, 0xA4, 0xCB, 0x2A } };
+
+struct ProxyDevice
+{
+	bool checked = false, rule_confirmed = false;
+	ID3D12Device *device = nullptr;
+} g_proxy;
+
+bool proxy_device(device *dev, ID3D12Device *&out, std::string &why)
+{
+	if (!g_proxy.checked)
+	{
+		g_proxy.checked = true;
+		auto *real = reinterpret_cast<ID3D12Device *>(dev->get_native());
+		void *stored = nullptr;
+		UINT size = sizeof(stored);
+		const HRESULT hr = real->GetPrivateData(kReShadeProxyDeviceId, &size, &stored);
+		// The proxy derives from the device interface (one vptr, 8 bytes) and then from the add-on API object.
+		void *guess = reinterpret_cast<char *>(dev) - 8;
+		g_proxy.rule_confirmed = SUCCEEDED(hr) && stored != nullptr && stored == guess;
+		if (SUCCEEDED(hr) && stored != nullptr)
+			g_proxy.device = static_cast<ID3D12Device *>(stored);
+		log_line("ReShade proxy device: private data %p (hr 0x%08x), api object minus 8 = %p, %s; real device %p", stored, static_cast<unsigned>(hr), guess,
+			g_proxy.rule_confirmed ? "both agree, the layout rule holds" : "they DISAGREE, the proxy command list cannot be derived", static_cast<void *>(real));
+	}
+	out = g_proxy.device;
+	if (out == nullptr)
+		why = "no ReShade proxy device is registered on the real device";
+	return out != nullptr;
+}
+
+// No private-data link exists for the list. Only trusted when the device rule held, and when the candidate answers a
+// QueryInterface for ID3D12GraphicsCommandList with itself, as a ReShade proxy does.
+bool proxy_list(command_list *cmd_list, ID3D12GraphicsCommandList *&out, std::string &why)
+{
+	if (!g_proxy.rule_confirmed)
+	{
+		why = "the proxy device layout rule was not confirmed, so the proxy command list cannot be derived";
+		return false;
+	}
+	auto *candidate = reinterpret_cast<ID3D12GraphicsCommandList *>(reinterpret_cast<char *>(cmd_list) - 8);
+	void *answer = nullptr;
+	const HRESULT hr = candidate->QueryInterface(__uuidof(ID3D12GraphicsCommandList), &answer);
+	if (answer != nullptr)
+		static_cast<IUnknown *>(answer)->Release();
+	if (FAILED(hr) || answer != static_cast<void *>(candidate))
+	{
+		why = "the derived proxy command list did not answer QueryInterface with itself";
+		return false;
+	}
+	out = candidate;
+	return true;
 }
 
 bool replace_upscale(command_list *cmd_list, Snapshot &s)
 {
 	device *dev = cmd_list->get_device();
-	auto *native_dev = reinterpret_cast<ID3D12Device *>(dev->get_native());
-	auto *cl = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
+	auto *native_cl = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
 	const Bindings &b = s.b;
 
+	std::string why;
+	ID3D12Device *pdev = nullptr;
+	ID3D12GraphicsCommandList *cl = nullptr; // the proxy list; native_cl only restores state
+	if (!proxy_device(dev, pdev, why) || !proxy_list(cmd_list, cl, why))
+		return give_up("proxy", why);
+
 	if (b.color.width != b.velocity.width || b.color.height != b.velocity.height || b.color.width != b.depth.width || b.color.height != b.depth.height)
-		return give_up("size-mismatch", "color, velocity and depth differ in size");
+		return give_up("size-mismatch", "color, velocity and depth differ in size: " + describe("u3 color", b.color) + "; " + describe("u6 velocity", b.velocity) +
+			"; " + describe("u14 depth", b.depth));
 	if (b.output.width < b.color.width || b.output.height < b.color.height)
-		return give_up("output-smaller", "output is smaller than the render size");
+		return give_up("output-smaller", "output is smaller than the render size: " + describe("u0 output", b.output) + "; " + describe("u3 color", b.color));
 	if (b.velocity.res_format != format::r16g16_unorm && b.velocity.res_format != format::r16g16_typeless)
-		return give_up("velocity-format", "u6 is not r16g16_unorm");
-	if (!ensure_native(native_dev))
+		return give_up("velocity-format", "u6 is not r16g16_unorm: " + describe("u6 velocity", b.velocity));
+	if (!ensure_native(pdev))
 		return give_up("native", "the decode pass could not be created");
-	if (!ensure_ngx(native_dev))
+	if (!ensure_ngx(pdev))
 		return give_up("ngx", "NGX or DLSS is unavailable (see the NGX lines above)");
 	if (!ensure_mv_texture(b.color.width, b.color.height))
 		return give_up("mv-texture", "motion vector texture creation failed");
@@ -923,7 +1036,8 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	cl->ResourceBarrier(1, &back);
 	if (!after.empty())
 		cl->ResourceBarrier(static_cast<UINT>(after.size()), after.data());
-	restore_state(cl, s);
+	// Everything the decode pass and NGX set is put back on the real list, with the real heap and root signature objects.
+	restore_state(native_cl, s);
 	return ok;
 }
 
@@ -945,8 +1059,9 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 		s.st = it->second;
 		if (const auto l = g_layouts.find(s.st.layout); l != g_layouts.end())
 			s.params = l->second;
-		if (!find_bindings(dev, s.st, s.b))
-			return give_up("bindings", "the pass's textures at root param 1 (u0, u3, u6, u14) were not all found");
+		std::string bind_why;
+		if (!find_bindings(dev, s.st, s.b, bind_why))
+			return give_up("bindings", bind_why + " [" + describe_all(s.b) + "]");
 
 		std::string why;
 		if (read_jitter_a(dev, s.st, s.jitter_x, s.jitter_y, why))

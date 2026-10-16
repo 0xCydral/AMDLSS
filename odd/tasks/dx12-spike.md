@@ -130,3 +130,16 @@ Not proven yet, and owed to stage 2:
   decode shader 4092 bytes of signed DXIL (dxc 1.9.2609.5), logic selftest passes. To check on the first run: NGX init
   and `SuperSampling.Available` in `amdlss_dx12_dlss.log`, whether DLSS accepts an `r11g11b10_float` output, whether
   the guessed resource states and restored root descriptors hold, and the sign of jitter and velocity (ini).
+- 2026-10-16: T8 first live run (Proton Experimental 11.0, RTX 4070, driver 595.99): NGX init succeeded (`available=1`,
+  snippet 310.9.16 loaded, MV texture created), then the game crashed during DLSS feature creation: NGX logged
+  `NvAPI_D3D12_GetCudaIndependentDescriptorObject failed - nvapi status -5` (invalid argument) twice, followed by an
+  access violation in `nvapi64` reached through ReShade's dxgi. Cause: `get_native()` returns the real D3D12 device and
+  command list, but ReShade proxies both and its device proxy converts descriptor handles, so NGX was given objects
+  the proxy path does not know. Fix: NGX, the decode pass and every barrier now use the proxies. The proxy device is
+  read from the private data ReShade stores on the real device (GUID `2523AFF4-978B-4939-BA16-8EE876A4CB2A`) and
+  cross-checked against `api device - 8`; the proxy command list is `api list - 8`, used only when that device rule
+  held and a `QueryInterface(ID3D12GraphicsCommandList)` on the candidate returns the candidate itself, otherwise the
+  game renders normally. Our handlers ignore the events the proxy list fires for NGX's and the decode pass's commands,
+  and the game's compute state is put back on the real list afterwards. The log now names each unusable binding (slot,
+  view or resource handle, size, reason) and the sizes in a mismatch, the first three times per reason. Rebuilt, not yet
+  re-run. The earlier "textures not all found" and "differ in size" lines are expected to be explained by this logging.

@@ -91,6 +91,14 @@ succeeds in the log.
 | `log_every_n_frames` | 300 | log cadence after the first 10 evaluations |
 | `jitter_cycle` | 8 | Halton cycle length for the fallback |
 
+## Proxies
+
+ReShade proxies the D3D12 device and command list, and `get_native()` returns the real ones. NGX, the decode pass and
+the barriers around them therefore use the proxies: the device from the private data ReShade stores on the real device
+(checked against `api device - 8`), the command list as `api list - 8` after a `QueryInterface` check. If either is
+not confirmed the game renders normally and the log says why. Our event handlers ignore the events those commands
+fire, and the game's compute state is restored on the real list.
+
 ## Limits
 
 - Not run in game. The unverified parts are the guessed resource states, whether DLSS accepts an
