@@ -89,9 +89,23 @@ constexpr float kVelocityScale = 0.499f * 0.5f;
 inline float decode_velocity(float encoded) { return (encoded - kVelocityBias) / kVelocityScale; }
 inline float encode_velocity(float v) { return v * kVelocityScale + kVelocityBias; }
 
+// UE4-style gamma velocity: after the linear unbias the value is a signed square root of the motion scaled by
+// 2/1.4142; this undoes it. Mirrors DecodeVelocityGammaUE4 in velocity_decode.hlsl.
+constexpr float kGammaVelocityDivisor = 2.0f / 1.4142f;
+inline float decode_velocity_gamma(float e)
+{
+	e /= kGammaVelocityDivisor;
+	return (e < 0 ? -1.0f : 1.0f) * e * e;
+}
+
 struct Ini
 {
 	std::map<std::string, std::string> values;
+	std::string text(const std::string &key, const std::string &fallback) const
+	{
+		const auto it = values.find(key);
+		return it == values.end() || it->second.empty() ? fallback : it->second;
+	}
 	double number(const std::string &key, double fallback) const
 	{
 		const auto it = values.find(key);

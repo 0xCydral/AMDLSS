@@ -11,10 +11,9 @@ NGX_TAG=v310.9.16
 NGX_COMMIT=9981c6350dc58c0ce21f024fd65e31e851c31689
 NGX_DLL_SHA256=d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e
 NGX_LIB_SHA256=7b9a5239c1145af5f645ab472aa066f9ea79db36ac819562312aae69d65f3765
-DXC_URL=https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/linux_dxc_2026_09_28.x86_x64.tar.gz
-DXC_SHA256=96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/dxc.env"
 PROBE=$(cd "$HERE/.." && pwd)
 NGX="$HERE/third_party/ngx"
 

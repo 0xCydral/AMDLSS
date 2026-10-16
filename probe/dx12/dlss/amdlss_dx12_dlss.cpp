@@ -42,7 +42,7 @@ namespace
 constexpr uint64_t kUpscaleHash = 0x1ff10c3ce95d3bcbull;
 // Root parameter 1 is the pass's descriptor table; the registers below are the slots found in stage 2.
 constexpr uint32_t kBindingsParam = 1;
-constexpr uint32_t kRegOutput = 0, kRegHalf = 1, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6, kRegDepth = 14;
+constexpr uint32_t kRegOutput = 0, kRegHalf = 1, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6;
 // Stage 3a (T7): the jitter is a float2 in render pixels at byte 256 of the root CBV b0 at root parameter 2.
 constexpr uint32_t kJitterParam = 2;
 constexpr uint64_t kJitterByteOffset = 256;
@@ -51,6 +51,7 @@ constexpr const char *kProjectId = "5d0c1e7a-3f24-4b88-9a51-7c2e6d0b4f93";
 constexpr uint32_t kUnboundedCap = 64;
 constexpr uint32_t kMaxHeapDescriptors = 4000000;
 constexpr uint32_t kDecodeRing = 64; // descriptor sets for the decode pass, reused round robin across frames in flight
+constexpr uint32_t kDescriptorsPerSet = 5; // decode: 3 SRVs + 2 UAVs; the half-size fill uses the first two
 
 // ---- descriptor shadow (same approach as the probe add-on) --------------------------------------------------
 
@@ -106,8 +107,12 @@ struct Config
 	bool fill_half_res = true; // u1 is written by TSR and read by bloom and eye adaptation
 	// Once DLSS has run, never let TSR run on history that DLSS frames wrote: skip it even when no evaluate is possible.
 	bool never_fallback_after_start = true;
+	bool composite_translucency = true; // u4 over u3 before DLSS
+	bool mv_gamma = false;              // false: UE5 linear velocity, true: UE4-style gamma velocity
 } g_cfg;
-std::string g_dir, g_log_path;
+std::string g_dir, g_log_path, g_ini_path;
+FILETIME g_ini_time = {};
+bool g_reset_next = false; // set when TSR ran in between or the ini changed: DLSS must not trust its history
 
 void log_line(const char *fmt, ...)
 {
@@ -223,6 +228,21 @@ CmdState &compute_state(command_list *cmd_list, pipeline_layout layout)
 	return st;
 }
 
+// The game's own TSR shader, written once so its DXIL can be disassembled (disasm.sh): how it decodes velocity and how
+// it uses the jitter is then read from UE's code instead of guessed.
+void dump_tsr_bytecode(const void *code, size_t size)
+{
+	static std::atomic<bool> dumped { false };
+	if (dumped.exchange(true))
+		return;
+	const std::string path = g_dir + "tsr_1ff10c3ce95d3bcb.dxil";
+	FILE *f = fopen(path.c_str(), "wb");
+	const bool ok = f != nullptr && fwrite(code, 1, size, f) == size;
+	if (f != nullptr)
+		fclose(f);
+	log_line("TSR bytecode (%zu bytes) %s %s", size, ok ? "written to" : "could not be written to", path.c_str());
+}
+
 void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_subobject *subobjects, pipeline pipe)
 {
 	for (uint32_t i = 0; i < count; ++i)
@@ -231,6 +251,8 @@ void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_
 			continue;
 		const auto *shader = static_cast<const shader_desc *>(subobjects[i].data);
 		const uint64_t hash = shader->code != nullptr ? fnv1a(shader->code, shader->code_size) : 0;
+		if (hash == kUpscaleHash)
+			dump_tsr_bytecode(shader->code, shader->code_size);
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_pipelines[pipe.handle] = hash;
 	}
@@ -478,7 +500,7 @@ std::string describe(const char *slot, const Tex &t)
 std::string describe_all(const Bindings &b)
 {
 	return describe("u0 output", b.output) + "; " + describe("u1 half-size", b.half) + "; " + describe("u3 color", b.color) + "; " + describe("u4 translucency", b.translucency) + "; " +
-		describe("u6 velocity", b.velocity) + "; " + describe("u14 depth", b.depth);
+		describe("u6 velocity", b.velocity) + "; " + describe("depth", b.depth);
 }
 
 // Depth buffers bound for rendering this session, newest last. Used when the pass's own depth slot is the wrong size.
@@ -554,14 +576,14 @@ bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &wh
 			resolve(e);
 			const uint32_t reg = r.dx_register_index + j;
 			Tex *target = reg == kRegOutput ? &b.output : reg == kRegHalf ? &b.half : reg == kRegColor ? &b.color : reg == kRegTranslucency ? &b.translucency :
-				reg == kRegVelocity ? &b.velocity : reg == kRegDepth ? &b.depth : nullptr;
+				reg == kRegVelocity ? &b.velocity : nullptr;
 			if (target != nullptr)
 				*target = tex_from(e);
 		}
 	}
-	if (!(b.output.ok && b.color.ok && b.velocity.ok && b.depth.ok))
+	if (!(b.output.ok && b.color.ok && b.velocity.ok))
 	{
-		why = "not all of u0, u3, u6 and u14 are usable textures";
+		why = "not all of u0, u3 and u6 are usable textures";
 		return false;
 	}
 	return true;
@@ -633,8 +655,9 @@ struct Native
 	ID3D12DescriptorHeap *heap = nullptr;
 	UINT inc = 0;
 	uint32_t ring = 0;
-	ID3D12Resource *mv = nullptr; // r16g16_float, render size; always left in the UAV state between frames
-	uint32_t mv_w = 0, mv_h = 0;
+	ID3D12Resource *mv = nullptr;   // r16g16_float, render size; always left in the UAV state between frames
+	ID3D12Resource *comp = nullptr; // r16g16b16a16_float, render size: u3 with translucency u4 composited over it
+	uint32_t mv_w = 0, mv_h = 0, comp_w = 0, comp_h = 0;
 	std::vector<ID3D12Resource *> retired; // replaced on a size change; may still be read by frames in flight
 	bool ready = false, failed = false;
 } g_native;
@@ -683,7 +706,7 @@ bool ensure_native(ID3D12Device *dev)
 	}
 	D3D12_DESCRIPTOR_HEAP_DESC hd = {};
 	hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-	hd.NumDescriptors = 2 * kDecodeRing;
+	hd.NumDescriptors = kDescriptorsPerSet * kDecodeRing;
 	hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_native.heap))))
 	{
@@ -707,13 +730,14 @@ bool ensure_native(ID3D12Device *dev)
 	return true;
 }
 
-bool ensure_mv_texture(uint32_t w, uint32_t h)
+// A default-heap UAV texture of the render size that is always left in the UAV state between frames.
+bool ensure_texture(ID3D12Resource *&res, uint32_t &cur_w, uint32_t &cur_h, DXGI_FORMAT fmt, uint32_t w, uint32_t h, const char *what)
 {
-	if (g_native.mv != nullptr && g_native.mv_w == w && g_native.mv_h == h)
+	if (res != nullptr && cur_w == w && cur_h == h)
 		return true;
-	if (g_native.mv != nullptr)
-		g_native.retired.push_back(g_native.mv);
-	g_native.mv = nullptr;
+	if (res != nullptr)
+		g_native.retired.push_back(res);
+	res = nullptr;
 	D3D12_HEAP_PROPERTIES hp = {};
 	hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 	D3D12_RESOURCE_DESC rd = {};
@@ -722,19 +746,28 @@ bool ensure_mv_texture(uint32_t w, uint32_t h)
 	rd.Height = h;
 	rd.DepthOrArraySize = 1;
 	rd.MipLevels = 1;
-	rd.Format = DXGI_FORMAT_R16G16_FLOAT;
+	rd.Format = fmt;
 	rd.SampleDesc.Count = 1;
 	rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 	rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-	if (FAILED(g_native.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&g_native.mv))))
+	if (FAILED(g_native.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&res))))
 	{
-		log_line("motion vector texture %ux%u: CreateCommittedResource failed", w, h);
+		log_line("%s texture %ux%u: CreateCommittedResource failed", what, w, h);
 		return false;
 	}
-	g_native.mv_w = w;
-	g_native.mv_h = h;
-	log_line("motion vector texture created: %ux%u r16g16_float", w, h);
+	cur_w = w;
+	cur_h = h;
+	log_line("%s texture created: %ux%u", what, w, h);
 	return true;
+}
+
+bool ensure_mv_texture(uint32_t w, uint32_t h)
+{
+	return ensure_texture(g_native.mv, g_native.mv_w, g_native.mv_h, DXGI_FORMAT_R16G16_FLOAT, w, h, "motion vector (r16g16_float)");
+}
+bool ensure_comp_texture(uint32_t w, uint32_t h)
+{
+	return ensure_texture(g_native.comp, g_native.comp_w, g_native.comp_h, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, "composited color (r16g16b16a16_float)");
 }
 
 D3D12_RESOURCE_BARRIER transition(ID3D12Resource *r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
@@ -748,32 +781,45 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource *r, D3D12_RESOURCE_STATES from,
 	return b;
 }
 
-void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, uint32_t w, uint32_t h)
+// Decodes velocity into pixels and, when `composite`, writes color with translucency composited over it.
+// Constants come from the live config, so an ini change needs no rebuild.
+void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D12Resource *color, ID3D12Resource *translucency, bool composite, uint32_t w, uint32_t h)
 {
 	const uint32_t slot = g_native.ring++ % kDecodeRing;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_native.heap->GetCPUDescriptorHandleForHeapStart();
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_native.heap->GetGPUDescriptorHandleForHeapStart();
-	cpu.ptr += static_cast<SIZE_T>(slot) * 2 * g_native.inc;
-	gpu.ptr += static_cast<UINT64>(slot) * 2 * g_native.inc;
+	cpu.ptr += static_cast<SIZE_T>(slot) * kDescriptorsPerSet * g_native.inc;
+	gpu.ptr += static_cast<UINT64>(slot) * kDescriptorsPerSet * g_native.inc;
 
-	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
-	srv.Format = DXGI_FORMAT_R16G16_UNORM;
-	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srv.Texture2D.MipLevels = 1;
-	g_native.dev->CreateShaderResourceView(velocity, &srv, cpu);
-	D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
-	uav.Format = DXGI_FORMAT_R16G16_FLOAT;
-	uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	cpu.ptr += g_native.inc;
-	g_native.dev->CreateUnorderedAccessView(g_native.mv, nullptr, &uav, cpu);
+	auto make_srv = [&](ID3D12Resource *r, DXGI_FORMAT fmt) {
+		D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+		srv.Format = fmt;
+		srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srv.Texture2D.MipLevels = 1;
+		g_native.dev->CreateShaderResourceView(r, &srv, cpu);
+		cpu.ptr += g_native.inc;
+	};
+	auto make_uav = [&](ID3D12Resource *r, DXGI_FORMAT fmt) {
+		D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+		uav.Format = fmt;
+		uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+		g_native.dev->CreateUnorderedAccessView(r, nullptr, &uav, cpu);
+		cpu.ptr += g_native.inc;
+	};
+	make_srv(velocity, DXGI_FORMAT_R16G16_UNORM);
+	make_srv(color, DXGI_FORMAT_R16G16B16A16_FLOAT);
+	make_srv(translucency, DXGI_FORMAT_R16G16B16A16_FLOAT); // color again when not compositing: a valid, unread descriptor
+	make_uav(g_native.mv, DXGI_FORMAT_R16G16_FLOAT);
+	make_uav(g_native.comp, DXGI_FORMAT_R16G16B16A16_FLOAT);
 
-	struct { float sx, sy; uint32_t w, h; } constants = { g_cfg.mv_scale_x * w, g_cfg.mv_scale_y * h, w, h };
+	struct { float sx, sy; uint32_t w, h, encoding, composite; } constants = {
+		g_cfg.mv_scale_x * w, g_cfg.mv_scale_y * h, w, h, g_cfg.mv_gamma ? 1u : 0u, composite ? 1u : 0u };
 	ID3D12DescriptorHeap *heaps[] = { g_native.heap };
 	cl->SetDescriptorHeaps(1, heaps);
 	cl->SetComputeRootSignature(g_native.rs);
 	cl->SetPipelineState(g_native.pso);
-	cl->SetComputeRoot32BitConstants(0, 4, &constants, 0);
+	cl->SetComputeRoot32BitConstants(0, 6, &constants, 0);
 	cl->SetComputeRootDescriptorTable(1, gpu);
 	cl->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
 }
@@ -787,8 +833,8 @@ void record_half_fill(ID3D12GraphicsCommandList *cl, const Tex &src, const Tex &
 	const uint32_t slot = g_native.ring++ % kDecodeRing;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_native.heap->GetCPUDescriptorHandleForHeapStart();
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_native.heap->GetGPUDescriptorHandleForHeapStart();
-	cpu.ptr += static_cast<SIZE_T>(slot) * 2 * g_native.inc;
-	gpu.ptr += static_cast<UINT64>(slot) * 2 * g_native.inc;
+	cpu.ptr += static_cast<SIZE_T>(slot) * kDescriptorsPerSet * g_native.inc;
+	gpu.ptr += static_cast<UINT64>(slot) * kDescriptorsPerSet * g_native.inc;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
 	srv.Format = DXGI_FORMAT_R11G11B10_FLOAT;
@@ -990,6 +1036,77 @@ void restore_state(ID3D12GraphicsCommandList *cl, const Snapshot &s)
 	}
 }
 
+// ---- ini (read at start, and again whenever its modification time changes) -------------------------------------------
+
+bool ini_mtime(FILETIME &out)
+{
+	WIN32_FILE_ATTRIBUTE_DATA d;
+	if (!GetFileAttributesExA(g_ini_path.c_str(), GetFileExInfoStandard, &d))
+		return false;
+	out = d.ftLastWriteTime;
+	return true;
+}
+
+std::string config_summary()
+{
+	char buf[512];
+	snprintf(buf, sizeof(buf),
+		"enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
+		g_cfg.enabled, g_cfg.jitter_sign_x, g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.mv_gamma ? "gamma" : "linear",
+		g_cfg.composite_translucency, g_cfg.fill_half_res, g_cfg.never_fallback_after_start, g_cfg.log_every, g_cfg.jitter_cycle);
+	return buf;
+}
+
+void load_ini(bool reload)
+{
+	const std::string before = config_summary();
+	std::string text;
+	if (FILE *f = fopen(g_ini_path.c_str(), "rb"))
+	{
+		char buf[4096];
+		size_t got;
+		while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
+			text.append(buf, got);
+		fclose(f);
+	}
+	ini_mtime(g_ini_time);
+	const logic::Ini ini = logic::parse_ini(text);
+	g_cfg.enabled = ini.number("enabled", 1) != 0;
+	g_cfg.jitter_sign_x = static_cast<float>(ini.number("jitter_sign_x", 1));
+	g_cfg.jitter_sign_y = static_cast<float>(ini.number("jitter_sign_y", 1));
+	g_cfg.mv_scale_x = static_cast<float>(ini.number("mv_scale_x", -0.5));
+	g_cfg.mv_scale_y = static_cast<float>(ini.number("mv_scale_y", 0.5));
+	g_cfg.log_every = static_cast<uint32_t>(ini.number("log_every_n_frames", 300));
+	g_cfg.jitter_cycle = static_cast<uint32_t>(ini.number("jitter_cycle", 8));
+	if (g_cfg.jitter_cycle == 0)
+		g_cfg.jitter_cycle = 8;
+	g_cfg.fill_half_res = ini.number("fill_half_res", 1) != 0;
+	g_cfg.never_fallback_after_start = ini.number("never_fallback_after_start", 1) != 0;
+	g_cfg.composite_translucency = ini.number("composite_translucency", 1) != 0;
+	const std::string encoding = ini.text("mv_encoding", "linear");
+	g_cfg.mv_gamma = encoding == "gamma";
+	if (encoding != "gamma" && encoding != "linear")
+		log_line("mv_encoding=%s is not linear or gamma; using linear", encoding.c_str());
+
+	const std::string after = config_summary();
+	if (!reload)
+		log_line("loaded: %s", after.c_str());
+	else if (after != before)
+	{
+		log_line("ini changed, reloaded: %s (DLSS resets its history on the next frame)", after.c_str());
+		g_reset_next = true;
+	}
+}
+
+// Every 60 upscale dispatches: re-read the ini if its modification time changed.
+void reload_ini_if_changed()
+{
+	static uint32_t tick = 0;
+	FILETIME ft;
+	if (++tick % 60 == 0 && ini_mtime(ft) && CompareFileTime(&ft, &g_ini_time) != 0)
+		load_ini(true);
+}
+
 // ---- the hook -----------------------------------------------------------------------------------------------
 
 // Counts since the last report, so a reason that keeps firing is visible even after its first three detailed lines.
@@ -1000,7 +1117,6 @@ struct Stats
 	std::map<std::string, uint64_t> counts;
 	std::string last_mismatch;
 } g_stats;
-bool g_reset_next = false; // set when TSR ran in between: DLSS must not trust its history
 
 void stat_count(const char *key)
 {
@@ -1121,22 +1237,40 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!ensure_mv_texture(b.color.width, b.color.height))
 		return give_up("mv-texture", "motion vector texture creation failed");
 
+	// Translucency is composited over the scene color only when both are plain r16g16b16a16_float of the same size.
+	auto is_rgba16f = [](format f) { return f == format::r16g16b16a16_float || f == format::r16g16b16a16_typeless; };
+	bool composite = g_cfg.composite_translucency;
+	if (composite && !(b.translucency.ok && is_rgba16f(b.translucency.res_format) && is_rgba16f(b.color.res_format) &&
+		b.translucency.width == b.color.width && b.translucency.height == b.color.height))
+	{
+		if (first_n("composite-skipped", 3))
+			log_line("translucency composite skipped, DLSS gets u3 raw: %s; %s", describe("u3 color", b.color).c_str(), describe("u4 translucency", b.translucency).c_str());
+		stat_count("composite-skipped");
+		composite = false;
+	}
+	if (composite && !ensure_comp_texture(b.color.width, b.color.height))
+		composite = false;
+
 	if (first_time("known-gaps"))
-		log_line("known gaps: translucency u4 (%s) is dropped; u2 (history metadata) is no longer written; u1 (half-size color) is %s",
-			b.translucency.ok ? "bound" : "not bound", g_cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
+		log_line("known gaps: translucency u4 (%s); u2 (history metadata) is no longer written; u1 (half-size color) is %s",
+			composite ? "composited over u3 before DLSS" : "dropped", g_cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
 
 	const uint32_t rw = b.color.width, rh = b.color.height, ow = b.output.width, oh = b.output.height;
 	bool reset = g_ngx.evals == 0 || g_reset_next;
 	g_reset_next = false;
 
 	auto *color = reinterpret_cast<ID3D12Resource *>(b.color.res.handle);
+	auto *translucency = reinterpret_cast<ID3D12Resource *>(b.translucency.res.handle);
 	auto *depth = reinterpret_cast<ID3D12Resource *>(b.depth.res.handle);
 	auto *velocity = reinterpret_cast<ID3D12Resource *>(b.velocity.res.handle);
 	auto *output = reinterpret_cast<ID3D12Resource *>(b.output.res.handle);
 
 	// Inputs the game left in the UAV state must be readable (NON_PIXEL_SHADER_RESOURCE) for the decode pass and DLSS.
 	std::vector<D3D12_RESOURCE_BARRIER> before, after;
-	for (const Tex *t : { &b.color, &b.depth, &b.velocity })
+	std::vector<const Tex *> inputs = { &b.color, &b.depth, &b.velocity };
+	if (composite)
+		inputs.push_back(&b.translucency);
+	for (const Tex *t : inputs)
 		if (t->uav_view)
 		{
 			auto *r = reinterpret_cast<ID3D12Resource *>(t->res.handle);
@@ -1146,11 +1280,22 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!before.empty())
 		cl->ResourceBarrier(static_cast<UINT>(before.size()), before.data());
 
-	record_decode(cl, velocity, rw, rh);
-	D3D12_RESOURCE_BARRIER mv[2] = { {}, transition(g_native.mv, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) };
-	mv[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-	mv[0].UAV.pResource = g_native.mv;
-	cl->ResourceBarrier(2, mv);
+	record_decode(cl, velocity, color, composite ? translucency : color, composite, rw, rh);
+	// The decode pass wrote the motion vectors (and the composited color): make them readable for DLSS.
+	std::vector<D3D12_RESOURCE_BARRIER> generated;
+	std::vector<ID3D12Resource *> generated_res = { g_native.mv };
+	if (composite)
+		generated_res.push_back(g_native.comp);
+	for (ID3D12Resource *g : generated_res)
+	{
+		D3D12_RESOURCE_BARRIER u = {};
+		u.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+		u.UAV.pResource = g;
+		generated.push_back(u);
+	}
+	for (ID3D12Resource *g : generated_res)
+		generated.push_back(transition(g, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+	cl->ResourceBarrier(static_cast<UINT>(generated.size()), generated.data());
 
 	bool ok = ensure_feature(cl, rw, rh, ow, oh, reset);
 	if (!ok)
@@ -1159,7 +1304,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (ok)
 	{
 		NVSDK_NGX_D3D12_DLSS_Eval_Params e = {};
-		e.Feature.pInColor = color;
+		e.Feature.pInColor = composite ? g_native.comp : color;
 		e.Feature.pInOutput = output;
 		e.pInDepth = depth;
 		e.pInMotionVectors = g_native.mv;
@@ -1181,8 +1326,10 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 				s.jitter_fallback ? " [fallback B]" : " [read from b0]", reset ? 1 : 0, ok ? "" : " FAILED, original pass runs");
 	}
 
-	D3D12_RESOURCE_BARRIER back = transition(g_native.mv, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-	cl->ResourceBarrier(1, &back);
+	std::vector<D3D12_RESOURCE_BARRIER> back;
+	for (ID3D12Resource *g : generated_res)
+		back.push_back(transition(g, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	cl->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
 	// Only after a successful evaluate: when it failed the original pass still runs and writes u1 itself.
 	if (ok && g_cfg.fill_half_res)
 	{
@@ -1208,7 +1355,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 {
-	if (t_busy || !g_cfg.enabled)
+	if (t_busy)
 		return false;
 	Snapshot s;
 	{
@@ -1221,6 +1368,14 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			return false;
 
 		stat_frame();
+		reload_ini_if_changed();
+		if (!g_cfg.enabled)
+		{
+			// Disabled live: TSR runs, so DLSS starts over with a reset when it is enabled again.
+			if (g_ngx.evals > 0)
+				g_reset_next = true;
+			return false;
+		}
 		device *dev = cmd_list->get_device();
 		s.st = it->second;
 		if (const auto l = g_layouts.find(s.st.layout); l != g_layouts.end())
@@ -1230,9 +1385,12 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			return give_up("bindings", bind_why + " [" + describe_all(s.b) + "]");
 
 		Bindings &b = s.b;
+		// This TSR pass reads no depth: u14 is an unrelated slot UE refills every frame (seen empty, 1x1, 5712x5712).
+		// Depth is the latest depth buffer bound at render size; if there is none, the mismatch path below decides.
+		find_depth_of_size(b.color.width, b.color.height, b.depth);
 		if (b.color.width != b.velocity.width || b.color.height != b.velocity.height || b.color.width != b.depth.width || b.color.height != b.depth.height)
 		{
-			const std::string sizes = describe("u3 color", b.color) + "; " + describe("u6 velocity", b.velocity) + "; " + describe("u14 depth", b.depth);
+			const std::string sizes = describe("u3 color", b.color) + "; " + describe("u6 velocity", b.velocity) + "; " + describe("depth", b.depth);
 			stat_mismatch(sizes);
 			Tex alt;
 			const bool depth_only = b.color.width == b.velocity.width && b.color.height == b.velocity.height;
@@ -1240,7 +1398,7 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			{
 				stat_count("size-mismatch-depth-substituted");
 				if (first_n("depth-substituted", 3))
-					log_line("size mismatch, using the latest depth buffer of render size %ux%u instead of u14: %s; substitute: %s", b.color.width, b.color.height,
+					log_line("size mismatch, using the latest depth buffer of render size %ux%u instead of the bound one: %s; substitute: %s", b.color.width, b.color.height,
 						sizes.c_str(), describe("depth", alt).c_str());
 				b.depth = alt;
 			}
@@ -1305,29 +1463,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		g_dir.erase(g_dir.find_last_of("\\/") + 1);
 		g_log_path = g_dir + "amdlss_dx12_dlss.log";
 
-		std::string text;
-		if (FILE *f = fopen((g_dir + "amdlss_dx12_dlss.ini").c_str(), "rb"))
-		{
-			char buf[4096];
-			size_t got;
-			while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
-				text.append(buf, got);
-			fclose(f);
-		}
-		const logic::Ini ini = logic::parse_ini(text);
-		g_cfg.enabled = ini.number("enabled", 1) != 0;
-		g_cfg.jitter_sign_x = static_cast<float>(ini.number("jitter_sign_x", 1));
-		g_cfg.jitter_sign_y = static_cast<float>(ini.number("jitter_sign_y", 1));
-		g_cfg.mv_scale_x = static_cast<float>(ini.number("mv_scale_x", g_cfg.mv_scale_x));
-		g_cfg.mv_scale_y = static_cast<float>(ini.number("mv_scale_y", g_cfg.mv_scale_y));
-		g_cfg.log_every = static_cast<uint32_t>(ini.number("log_every_n_frames", 300));
-		g_cfg.jitter_cycle = static_cast<uint32_t>(ini.number("jitter_cycle", 8));
-		g_cfg.fill_half_res = ini.number("fill_half_res", 1) != 0;
-		g_cfg.never_fallback_after_start = ini.number("never_fallback_after_start", 1) != 0;
-		if (g_cfg.jitter_cycle == 0)
-			g_cfg.jitter_cycle = 8;
-		log_line("loaded: enabled=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) log_every_n_frames=%u jitter_cycle=%u fill_half_res=%d never_fallback_after_start=%d", g_cfg.enabled, g_cfg.jitter_sign_x,
-			g_cfg.jitter_sign_y, g_cfg.mv_scale_x, g_cfg.mv_scale_y, g_cfg.log_every, g_cfg.jitter_cycle, g_cfg.fill_half_res, g_cfg.never_fallback_after_start);
+		g_ini_path = g_dir + "amdlss_dx12_dlss.ini";
+		load_ini(false);
 
 		reshade::register_event<addon_event::init_pipeline>(on_init_pipeline);
 		reshade::register_event<addon_event::destroy_pipeline>(on_destroy_pipeline);

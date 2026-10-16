@@ -156,3 +156,19 @@ Not proven yet, and owed to stage 2:
   accounting (every `log_every_n_frames` dispatches): evaluates, each fallback reason, substitutions, kept-previous
   skips and the latest mismatch, so a reason that keeps firing is visible. Built (half_fill 4240 bytes of DXIL), not yet
   re-run: A/B with `fill_half_res` and `never_fallback_after_start`.
+- 2026-10-16: T8 live result on 4096ede: the blink was the `bindings` fallback on 50-80% of frames. u14 is not depth, it is an
+  unrelated slot UE refills every frame (no descriptor, 1x1 r24g8, 512x512, a 5712x5712 shadow map, an 8192x1024 UAV), and
+  the final TSR pass reads no depth. Fix: depth is now always the newest depth buffer bound for rendering at the render
+  size (`find_depth_of_size`), u14 is no longer read; result `evaluate-ok=300` of 300 per report, no blink, half-res fill
+  on. Remaining owner report: soft, fuzzy, slightly distorted image and colours a bit less rich, like DLSS Performance.
+  The DLSS guide (3.7.4) ties fuzzy static objects to wrong jitter or motion vectors (MVs current->previous in render
+  pixels, y down; jitter in the same system, within +-0.5). Changes for that, built, not yet run: (1) the add-on writes
+  the game's TSR shader once as `tsr_1ff10c3ce95d3bcb.dxil` and `probe/dx12/dlss/disasm.sh` disassembles it with the pinned
+  dxc, so the velocity decode (linear `*0.2495+0.49999` or a signed square) and the use of the b0 jitter can be read
+  from UE's own code; (2) the ini is hot-reloaded (mtime checked every 60 dispatches, `InReset` after a change,
+  `enabled=0` hands the pass to TSR live); (3) separate translucency u4 is composited over u3 in the decode dispatch
+  (`rgb = scene.rgb * trans.a + trans.rgb`) into an r16g16b16a16_float texture that DLSS gets as color
+  (`composite_translucency`), with the known-gaps line updated; (4) `mv_encoding=linear|gamma` (UE4 style
+  `sign(e)*e*e` after dividing by 2/1.4142) plus `mv_scale_x/y` and `jitter_sign_x/y`, all root constants so a reload
+  needs no shader rebuild. Build: velocity_decode.dxil 5048 bytes, half_fill.dxil 4240 bytes, selftest ok, imports
+  KERNEL32, ADVAPI32, USER32.

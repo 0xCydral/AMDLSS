@@ -31,9 +31,15 @@ int main()
 		assert(std::fabs(decode_velocity(encode_velocity(v)) - v) < 1e-5);
 	assert(encode_velocity(1.0f) < 1.0f && encode_velocity(-1.0f) > 0.0f);
 
+	// Gamma velocity: signed square, zero stays zero, the divisor is 2/1.4142.
+	assert(decode_velocity_gamma(0.0f) == 0.0f);
+	assert(std::fabs(decode_velocity_gamma(kGammaVelocityDivisor) - 1.0f) < 1e-6);
+	assert(std::fabs(decode_velocity_gamma(-kGammaVelocityDivisor / 2) + 0.25f) < 1e-6);
+
 	const Ini ini = parse_ini("; comment\nenabled = 1\n# other\njitter_sign_y=-1\r\nmv_scale_x=-0.5 \nbroken line\n\nlog_every_n_frames=300");
 	assert(ini.number("enabled", 0) == 1 && ini.number("jitter_sign_y", 1) == -1);
 	assert(ini.number("mv_scale_x", 0) == -0.5 && ini.number("log_every_n_frames", 0) == 300);
+	assert(parse_ini("mv_encoding = gamma\n").text("mv_encoding", "linear") == "gamma" && ini.text("missing", "linear") == "linear");
 	assert(ini.number("missing", 7) == 7 && ini.values.count("broken line") == 0);
 
 	std::puts("dlss logic selftest ok");

@@ -6,18 +6,26 @@ Stage 3b of the DX12 spike (`odd/tasks/dx12-spike.md`): a ReShade add-on that re
 
 ## What it does on that dispatch
 
-1. Finds the pass's textures through the same descriptor-heap shadow the probe uses, at root param 1: output u0, scene
-   color u3, velocity u6, depth u14. Translucency u4 is looked up but not used (known gap).
+1. Finds the pass's textures through the same descriptor-heap shadow the probe uses, at root param 1: output u0, half-size
+   output u1, scene color u3, translucency u4, velocity u6. **Depth is not u14**: that slot is an unrelated one UE
+   refills every frame (live: empty, 1x1, a 5712x5712 shadow map, an 8192x1024 UAV), and the final TSR pass reads no
+   depth. DLSS gets the newest depth buffer bound for rendering whose size equals the render size.
 2. Reads the camera jitter, a float2 in render pixels at byte 256 of the root CBV b0 at root param 2 (found in T7).
    - **Option A (used first):** the CBV lives in an upload heap and UE wrote it on the CPU before recording, so
      `device::map_buffer_region` reads the 8 bytes at record time. The value must lie within +-0.5.
    - **Option B (fallback):** each good read is matched to Halton(2,3)-0.5 (`jitter_cycle`, default 8) to lock the
      phase; if a later read fails the jitter is predicted from the evaluation count. If A never worked, nothing is
      replaced.
-3. Decodes UE's velocity into DLSS motion vectors with a small compute pass (`velocity_decode.hlsl`, DXIL embedded
-   at build time): `v = (enc - 32767/65535) / (0.499 * 0.5)`, the inverse of UE5's `EncodeVelocityToTexture`
-   (`VelocityCommon.ush`), then times `(mv_scale_x * width, mv_scale_y * height)` = `(-0.5 w, +0.5 h)` so the result is
-   "previous minus current" in render pixels, y down. It writes an `r16g16_float` texture of render size.
+3. One small compute pass (`velocity_decode.hlsl`, DXIL embedded at build time) does two jobs:
+   - Decodes UE's velocity into DLSS motion vectors: `v = (enc - 32767/65535) / (0.499 * 0.5)` (`mv_encoding=linear`,
+     the inverse of UE5's `EncodeVelocityToTexture`) or the UE4 gamma form (`mv_encoding=gamma`: that value divided
+     by 2/1.4142, then `sign(e) * e * e`), times `(mv_scale_x * width, mv_scale_y * height)` = `(-0.5 w, +0.5 h)` so
+     the result is "previous minus current" in render pixels, y down. It writes an `r16g16_float` texture.
+   - With `composite_translucency=1`, composites the separate translucency u4 over the scene color u3 into an
+     `r16g16b16a16_float` texture: `rgb = scene.rgb * trans.a + trans.rgb` (premultiplied, alpha = transmittance).
+     DLSS then gets that texture as its color input. If u4 is missing, not `r16g16b16a16_float` or not render size,
+     DLSS gets u3 raw and the log says why.
+   The scales, encoding and composite flag are root constants, so an ini change needs no shader rebuild.
 4. Evaluates DLSS on the game's own command list (`get_native()`), flags `IsHDR | AutoExposure | MVLowRes |
    DepthInverted`, output written straight into u0, preset chosen from the render/output width ratio (nearest of
    DLAA, UltraQuality, MaxQuality, Balanced, MaxPerf, UltraPerformance). `InReset` is set on the first frame and
@@ -36,8 +44,9 @@ Deviation from the brief: the decode pass uses native D3D12 calls (root signatur
 heap) instead of the ReShade pipeline API, because the heaps and root state have to be restored on the native list
 anyway and ReShade's descriptor table allocation would add a second set of heaps to put back.
 
-Known gaps, logged once: u4 translucency is dropped and u2 (r8 history metadata) is no longer written, so passes that
-read them see stale data. u1 (half-size r11g11b10) is filled from u0, see below (`fill_half_res`).
+Known gaps, logged once: u2 (r8 history metadata) is no longer written, so passes that read it see stale data.
+Translucency u4 is composited into the color (`composite_translucency`), and u1 (half-size r11g11b10) is filled from u0,
+see below (`fill_half_res`).
 
 ## Build
 
@@ -90,8 +99,21 @@ succeeds in the log.
 | `mv_scale_x`, `mv_scale_y` | -0.5, 0.5 | NDC delta to pixels is `(mv_scale_x * width, mv_scale_y * height)` |
 | `log_every_n_frames` | 300 | log cadence after the first 10 evaluations |
 | `jitter_cycle` | 8 | Halton cycle length for the fallback |
+| `composite_translucency` | 1 | composite u4 over u3 before DLSS; 0 feeds u3 raw |
+| `mv_encoding` | linear | `linear` (UE5) or `gamma` (UE4 style) velocity decode |
 | `fill_half_res` | 1 | fill u1 (TSR's half-size output, read by bloom and eye adaptation) from u0 after the evaluate |
 | `never_fallback_after_start` | 1 | after DLSS started, skip TSR even when no evaluate is possible and keep the previous u0 |
+
+## Live ini and the game's own TSR shader
+
+- **Hot reload:** the ini is re-read when its modification time changes, checked every 60 upscale dispatches. Changed
+  values are logged and DLSS resets its history on the next frame (`InReset=1`). `enabled=0` hands the pass back to
+  TSR at once; `enabled=1` resumes DLSS with a reset.
+- **TSR bytecode:** the first time the game creates the TSR shader (hash `1ff10c3ce95d3bcb`) its raw DXIL is written
+  to `tsr_1ff10c3ce95d3bcb.dxil` next to the add-on. `bash probe/dx12/dlss/disasm.sh tsr_1ff10c3ce95d3bcb.dxil`
+  disassembles it with the pinned dxc in the build container (`dxc -dumpbin`, output next to the file as `.txt`, or the
+  second argument). Read how the shader decodes velocity (linear `* 0.2495 + 0.49999` or a signed square) and how it
+  uses the jitter in b0.
 
 ## Half-size fill, depth substitution and accounting
 
@@ -101,8 +123,8 @@ succeeds in the log.
   into u1, sizes from the resource descriptions, reads clamped. u0 moves UAV to `NON_PIXEL_SHADER_RESOURCE` and back,
   u1 stays a UAV. It runs on the proxy list, and the game's compute state is restored once after both passes.
   `fill_half_res=0` turns it off. u2 (TSR history metadata) is still not written.
-- **Size mismatch:** when u14 is not the size of u3 and u6, the newest depth buffer bound for rendering with the render
-  size is used instead (its state is assumed to be `NON_PIXEL_SHADER_RESOURCE`). When there is none, with
+- **Size mismatch:** depth is always the newest depth buffer bound for rendering with the render size (its state is
+  assumed to be `NON_PIXEL_SHADER_RESOURCE`); u3 and u6 must also match that size. When there is none, with
   `never_fallback_after_start=1` and DLSS already running, TSR is skipped and u0 keeps the previous DLSS output. Any
   other fallback after DLSS started makes the next DLSS frame run with `InReset=1`.
 - **Accounting:** every `log_every_n_frames` upscale dispatches the log gets one line with the counts since the last
