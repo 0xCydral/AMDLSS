@@ -45,10 +45,14 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
         size x row length), rebuilt and installed. A clean depth image is not yet re-dumped. Not blocking: depth is
         proven present and valid.
 
-- [ ] T7 Stage 3a: find the camera jitter. Auto-capture (no key) the constant buffers of the upscale dispatch for 16
+- [x] T7 Stage 3a: find the camera jitter. Auto-capture (no key) the constant buffers of the upscale dispatch for 16
       consecutive frames, then find the float2 that cycles within +-0.5 render pixels (Halton-like). Route: delegated
-      (same writer, probe change). The parent runs it by launching the game (title screen runs the pass); no owner input.
-      Tool built (`cbcapture` mode in the add-on, `probe/dx12/find_jitter.py`), not yet run in game.
+      (same writer, probe change). The parent ran it by launching the game; no owner input. Result:
+      - 16 consecutive frames (presents 120-135) on the title screen, render 1552x876, output 2560x1440, no `CB skip`.
+      - **Jitter is root param 2 (b0), byte offset 256, float2 in render pixels**: exact Halton(2,3) - 0.5, score
+        1.000, e.g. frame 0 = (+0.375, +0.055556). The same pair is at p3 (b1) offset 2392.
+      - UV-scale copies (x sign flipped) at p3 b1 offsets 1280 and 624; 624 lags by one frame (previous jitter).
+      - Capture copied to `~/Downloads/dx12-spike/cb1/` (not in repo).
 - [ ] T8 Stage 3b: replace the pass with DLSS (RTX 4070 on this machine) fed by u3+u4, u14 depth, decoded u6 and the
       T7 jitter; write u0. Pass: a stable upscaled image. Route and design decided after T7.
 
