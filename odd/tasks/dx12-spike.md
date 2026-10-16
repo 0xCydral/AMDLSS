@@ -45,6 +45,13 @@ All 5 empty-Luma-tab reports in `~/amdlss-reports` come from it.
         size x row length), rebuilt and installed. A clean depth image is not yet re-dumped. Not blocking: depth is
         proven present and valid.
 
+- [ ] T7 Stage 3a: find the camera jitter. Auto-capture (no key) the constant buffers of the upscale dispatch for 16
+      consecutive frames, then find the float2 that cycles within +-0.5 render pixels (Halton-like). Route: delegated
+      (same writer, probe change). The parent runs it by launching the game (title screen runs the pass); no owner input.
+      Tool built (`cbcapture` mode in the add-on, `probe/dx12/find_jitter.py`), not yet run in game.
+- [ ] T8 Stage 3b: replace the pass with DLSS (RTX 4070 on this machine) fed by u3+u4, u14 depth, decoded u6 and the
+      T7 jitter; write u0. Pass: a stable upscaled image. Route and design decided after T7.
+
 ## Stage 2 result (2026-10-16): pass for color, motion vectors and output; depth pending
 
 F11 dump #1 in a fresh launch: the hash `1ff10c3ce95d3bcb` matched again, the game did not crash or hang, and 16 of
@@ -103,3 +110,9 @@ Not proven yet, and owed to stage 2:
   only KERNEL32 and USER32. `python3 -I probe/dx12/dds2png.py --selftest` prints `dds2png selftest ok`. Not run in
   game yet (T5). Unverified guesses to check on the first run: the "before" resource states (NON_PIXEL_SHADER_RESOURCE
   for SRVs and depth) and how ReShade lays out the depth footprint of `r32_g8_typeless`.
+- 2026-10-16: T7 tool built, not yet run. Create `amdlss_dx12_probe.cbcapture` next to the add-on and launch: after the
+  120th present the add-on copies every constant buffer and the root constants of the upscale dispatch for 16 frames
+  into `cbcapture/` (`frame_<n>_p<param>_<slot>_<size>.bin` + `index.txt`). Then
+  `python3 -I probe/dx12/find_jitter.py cbcapture` ranks the float pairs that look like Halton(2,3) jitter.
+  `bash probe/dx12/build.sh` exit 0, 264704 bytes, PE32+ DLL, imports only KERNEL32 and USER32;
+  `find_jitter.py --selftest` passes (planted pair at offset 64 ranks first, pixel and NDC scale).

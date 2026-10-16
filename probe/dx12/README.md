@@ -96,6 +96,43 @@ with B=0 as stored (UE encodes velocity centred at 0.5, so 128 is no motion). `r
 are stretched min..max to the full range. `r32_float` depth is stretched with near = bright; `--z auto` (default) picks
 reversed-Z or standard-Z from the median, `--z reversed|standard` forces it.
 
+## Constant-buffer capture (stage 3a, finds the camera jitter)
+
+No hotkey. When a file named `amdlss_dx12_probe.cbcapture` exists next to the add-on (its content does not matter),
+the add-on arms itself at the 120th present, so the title scene has settled. In each of the next frames where the
+upscale dispatch (`kUpscaleHash`) runs, up to 16 frames in all and once per process, it copies every constant buffer
+bound to that dispatch:
+
+- CBV ranges in descriptor tables (`bind_descriptor_tables`) and root CBVs (`push_descriptors`): the buffer range
+  (resource, offset, size) is copied with `copy_buffer_region` into a readback buffer at the dispatch. A root CBV has
+  no size, so the whole buffer from the offset is taken, capped at 64 KB (`kCbMaxBytes`).
+- Root constants: ReShade v6.8.0 reports them through the `push_constants` event, so the add-on keeps the values per
+  command list and root parameter and writes them as slot `rc`.
+- Copy and barrier: upload-heap buffers cannot be transitioned and are always readable as copy sources, so they get no
+  barrier. Default-heap buffers are moved from `constant_buffer` to `copy_source` and back (`kCbDefaultHeapState`, a
+  guess). Mapping an upload buffer directly was not used: UE keeps them mapped and the copy sees exactly what the
+  dispatch sees.
+- Destroyed buffers: a descriptor can outlive its buffer, so `init_resource`/`destroy_resource` keep a set of live
+  buffers and a dead one is skipped.
+- Write: like F11, after the command list was submitted and a present has passed, then `wait_idle` and map.
+
+Output in `cbcapture/` next to the add-on: `frame_<n>_p<param>_<slot>_<size>.bin` (raw bytes, `n` from 00) and
+`index.txt` with one `# frame <n> present <p> render=WxH output=WxH` line per frame (sizes from the bound u3 and u0)
+followed by tab-separated rows: frame, present, param, slot, resource, offset, size, heap type, file. Failures write a
+`CB skip ...` line to `amdlss_dx12_probe.log` and the capture continues.
+
+Find the jitter on Linux (Python 3 standard library only):
+
+```
+python3 -I probe/dx12/find_jitter.py path/to/cbcapture
+python3 -I probe/dx12/find_jitter.py --selftest
+```
+
+For every 4-byte offset it reads float32 across the frames and ranks pairs (offset, offset+4) that change on most
+frames, stay within +-1.0 and correlate with Halton(2,3)-0.5 (Pearson, best over phase 0-15, cycle none/4/8/16 and
+both axis orders). It labels the scale as pixels (+-0.5), UV (+-0.5/render width) or NDC (+-1/render width) from the
+largest value, and prints the top 10 with their per-frame values.
+
 ## Install for a test
 
 1. Use an add-on-enabled ReShade (the 6.8.0.1 build from Luma's release) as `dxgi.dll` next to the game exe.
@@ -109,6 +146,6 @@ reversed-Z or standard-Z from the median, `--z reversed|standard` forces it.
   and execution (bindless tricks) shows its state at record time.
 - Command lists recorded on several threads interleave in the log; use `cl=` to separate them. UE5 records ahead of
   the present thread, so the captured window holds one frame's worth of recorded work, offset by about a frame.
-- Unbounded descriptor ranges print at most the first 64 entries. Root constants are not logged.
+- Unbounded descriptor ranges print at most the first 64 entries. Root constants are not in the F10 log (the cbcapture mode saves them).
 - Descriptor heaps are never freed from the shadow, which is fine for a short test session.
-- The F10 logger ran live in stage 1; the F11 dump (stage 2) has only been built and its converter self-checked, not run in game.
+- F10 and F11 ran live (stages 1 and 2). The constant-buffer capture (stage 3a) is built and its analysis self-checked, not yet run in game.

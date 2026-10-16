@@ -13,7 +13,9 @@
  */
 #include <reshade.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace reshade::api;
@@ -65,6 +68,7 @@ struct CmdState
 	uint64_t pipeline = 0, layout = 0;
 	std::map<uint32_t, descriptor_table> tables;
 	std::map<uint32_t, std::vector<Entry>> pushes;
+	std::map<uint32_t, std::vector<uint32_t>> consts; // root constants per root parameter, in 32-bit values
 	std::string last_rt;
 	uint32_t epoch = 0;
 };
@@ -360,6 +364,7 @@ CmdState &compute_state(command_list *cmd_list, pipeline_layout layout)
 		st.layout = layout.handle;
 		st.tables.clear();
 		st.pushes.clear();
+		st.consts.clear();
 	}
 	return st;
 }
@@ -618,7 +623,7 @@ void add_item(std::vector<DumpItem> &items, DumpItem &&it)
 	items.push_back(std::move(it));
 }
 
-void collect_upscale_bindings(device *dev, CmdState &st, std::vector<DumpItem> &out)
+void collect_upscale_bindings(device *dev, CmdState &st, std::vector<DumpItem> &out, bool quiet = false)
 {
 	const auto layout = g_layouts.find(st.layout);
 	const auto table = st.tables.find(kUpscaleRootParam);
@@ -647,7 +652,7 @@ void collect_upscale_bindings(device *dev, CmdState &st, std::vector<DumpItem> &
 			DumpItem it;
 			if (e.info == nullptr || e.info->buffer_range || !make_item(*e.info, "pre", slot, uav, r.dx_register_index + j, it))
 			{
-				if (e.handle != 0)
+				if (e.handle != 0 && !quiet)
 					note("skip " + slot + ": not a plain 2D texture or format not supported");
 				continue;
 			}
@@ -869,8 +874,365 @@ void dump_present()
 	dump_release();
 }
 
+// ---- Stage 3a: automatic constant-buffer capture to find the camera jitter --------------------------------
+// No hotkey: when amdlss_dx12_probe.cbcapture exists next to the add-on, the constant buffers of the first 16
+// upscale dispatches (one per frame, after the title scene has settled) are copied to cbcapture/*.bin.
+
+constexpr const char *kCbFlagFile = "amdlss_dx12_probe.cbcapture";
+constexpr uint32_t kCbFrames = 16;
+constexpr uint32_t kCbStartPresent = 120;
+// A constant buffer view is at most 64 KB and a root CBV has no size at all, so the same cap serves both.
+constexpr uint64_t kCbMaxBytes = 65536;
+// Constant buffers in a default heap are read by the shader in this state; upload-heap buffers cannot be transitioned.
+constexpr resource_usage kCbDefaultHeapState = resource_usage::constant_buffer;
+
+struct CbItem
+{
+	uint32_t param = 0;
+	std::string slot, heap;
+	resource buffer = { 0 }, readback = { 0 };
+	uint64_t offset = 0, size = 0;
+	bool constants = false, barrier = false;
+	std::vector<uint32_t> values;
+};
+struct CbCapture
+{
+	command_list *cmd_list = nullptr;
+	device *dev = nullptr;
+	command_queue *queue = nullptr;
+	uint32_t frame = 0, present = 0, submitted_at = 0;
+	bool submitted = false;
+	std::string sizes;
+	std::vector<CbItem> items;
+};
+
+std::atomic<bool> g_cb_active { false };
+std::atomic<size_t> g_cb_pending_count { 0 };
+std::vector<CbCapture> g_cb_pending;
+std::unordered_set<uint64_t> g_live_buffers; // a descriptor can outlive its buffer; never copy from a destroyed one
+uint32_t g_cb_started = 0, g_cb_last_present = 0;
+
+void cb_note(const std::string &line)
+{
+	reshade::log::message(reshade::log::level::info, ("amdlss_dx12_probe: CB " + line).c_str());
+	if (FILE *f = fopen(g_log_path.c_str(), "ab"))
+	{
+		fputs(("CB " + line + "\n").c_str(), f);
+		fclose(f);
+	}
+}
+
+const char *heap_name(memory_heap h)
+{
+	switch (h)
+	{
+	case memory_heap::default_: return "default";
+	case memory_heap::upload: return "upload";
+	case memory_heap::readback: return "readback";
+	case memory_heap::custom: return "custom";
+	default: return "unknown";
+	}
+}
+
+void on_init_resource(device *, const resource_desc &desc, const subresource_data *, resource_usage, resource res)
+{
+	if (desc.type != resource_type::buffer)
+		return;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	g_live_buffers.insert(res.handle);
+}
+void on_destroy_resource(device *, resource res)
+{
+	std::lock_guard<std::mutex> lock(g_mutex);
+	g_live_buffers.erase(res.handle);
+}
+
+void on_push_constants(command_list *cmd_list, shader_stage stages, pipeline_layout layout, uint32_t param, uint32_t first, uint32_t count, const void *values)
+{
+	if ((stages & shader_stage::compute) == static_cast<shader_stage>(0) || values == nullptr || count == 0 || first + count > 256)
+		return;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	std::vector<uint32_t> &v = compute_state(cmd_list, layout).consts[param];
+	if (v.size() < first + count)
+		v.resize(first + count);
+	memcpy(v.data() + first, values, static_cast<size_t>(count) * 4);
+}
+
+void cb_add_range(std::vector<CbItem> &out, uint32_t param, const std::string &slot, const Info &info)
+{
+	if (info.resource == 0 || info.desc.type != resource_type::buffer || g_live_buffers.count(info.resource) == 0)
+	{
+		cb_note(str("skip p%u %s: buffer not resolved or already destroyed", param, slot.c_str()));
+		return;
+	}
+	const uint64_t total = info.desc.buffer.size;
+	const uint64_t avail = total > info.offset ? total - info.offset : 0;
+	uint64_t size = info.range == UINT64_MAX || info.range > avail ? avail : info.range;
+	if (size > kCbMaxBytes)
+		size = kCbMaxBytes;
+	if (size == 0)
+	{
+		cb_note(str("skip p%u %s: empty range", param, slot.c_str()));
+		return;
+	}
+	CbItem it;
+	it.param = param;
+	it.slot = slot;
+	it.heap = heap_name(info.desc.heap);
+	it.buffer = { info.resource };
+	it.offset = info.offset;
+	it.size = size;
+	it.barrier = info.desc.heap == memory_heap::default_;
+	out.push_back(std::move(it));
+}
+
+// Every constant buffer the compute stage has bound: CBV ranges in descriptor tables, root CBVs and root constants.
+void collect_cbs(device *dev, CmdState &st, std::vector<CbItem> &out)
+{
+	const auto layout = g_layouts.find(st.layout);
+	if (layout == g_layouts.end())
+		return;
+	for (const auto &[param, table] : st.tables)
+	{
+		if (param >= layout->second.size())
+			continue;
+		for (const descriptor_range &r : layout->second[param].ranges)
+		{
+			if (r.type != descriptor_type::constant_buffer && r.type != descriptor_type::constant_buffer_with_dynamic_offset)
+				continue;
+			uint64_t heap;
+			uint32_t base;
+			if (!heap_offset(dev, table, r.binding, 0, heap, base))
+				continue;
+			const auto h = g_heaps.find(heap);
+			if (h == g_heaps.end())
+				continue;
+			const uint32_t n = r.count == UINT32_MAX ? kUnboundedCap : r.count;
+			for (uint32_t j = 0; j < n && base + j < h->second.size(); ++j)
+			{
+				const Entry &e = h->second[base + j];
+				if (e.set && e.info != nullptr && e.info->buffer_range)
+					cb_add_range(out, param, "b" + std::to_string(r.dx_register_index + j), *e.info);
+			}
+		}
+	}
+	for (const auto &[param, entries] : st.pushes)
+		for (uint32_t k = 0; k < entries.size(); ++k)
+			if (entries[k].type == descriptor_type::constant_buffer && entries[k].info != nullptr)
+			{
+				const bool known = param < layout->second.size() && !layout->second[param].ranges.empty();
+				cb_add_range(out, param, "b" + std::to_string((known ? layout->second[param].ranges[0].dx_register_index : 0) + k), *entries[k].info);
+			}
+	for (const auto &[param, values] : st.consts)
+	{
+		CbItem it;
+		it.param = param;
+		it.slot = "rc";
+		it.heap = "root";
+		it.constants = true;
+		it.values = values;
+		it.size = values.size() * 4;
+		out.push_back(std::move(it));
+	}
+}
+
+bool has_slot(const DumpItem &it, const std::string &slot)
+{
+	size_t pos = 0;
+	while (pos <= it.slots.size())
+	{
+		const size_t end = it.slots.find('+', pos);
+		if (it.slots.substr(pos, end == std::string::npos ? end : end - pos) == slot)
+			return true;
+		if (end == std::string::npos)
+			break;
+		pos = end + 1;
+	}
+	return false;
+}
+
+// Render size is u3 (scene color) and output size is u0, per the stage 2 result.
+std::string frame_sizes(device *dev, CmdState &st)
+{
+	std::vector<DumpItem> tex;
+	collect_upscale_bindings(dev, st, tex, true);
+	std::string render = "?", output = "?";
+	for (const DumpItem &it : tex)
+	{
+		if (has_slot(it, "u3"))
+			render = str("%ux%u", it.width, it.height);
+		if (has_slot(it, "u0"))
+			output = str("%ux%u", it.width, it.height);
+	}
+	return "render=" + render + " output=" + output;
+}
+
+void cb_record(command_list *cmd_list, CbCapture &cap)
+{
+	for (size_t i = 0; i < cap.items.size();)
+	{
+		CbItem &it = cap.items[i];
+		if (!it.constants && !(cap.dev->create_resource(resource_desc(it.size, memory_heap::readback, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &it.readback) && it.readback.handle != 0))
+		{
+			cb_note(str("skip p%u %s: cannot create readback buffer", it.param, it.slot.c_str()));
+			cap.items.erase(cap.items.begin() + i);
+			continue;
+		}
+		++i;
+	}
+	std::vector<resource> res;
+	for (const CbItem &it : cap.items)
+		if (it.barrier && std::find_if(res.begin(), res.end(), [&](resource r) { return r.handle == it.buffer.handle; }) == res.end())
+			res.push_back(it.buffer);
+	const std::vector<resource_usage> cb_state(res.size(), kCbDefaultHeapState), src_state(res.size(), resource_usage::copy_source);
+	if (!res.empty())
+		cmd_list->barrier(static_cast<uint32_t>(res.size()), res.data(), cb_state.data(), src_state.data());
+	for (const CbItem &it : cap.items)
+		if (!it.constants)
+			cmd_list->copy_buffer_region(it.buffer, it.offset, it.readback, 0, it.size);
+	if (!res.empty())
+		cmd_list->barrier(static_cast<uint32_t>(res.size()), res.data(), src_state.data(), cb_state.data());
+}
+
+void cb_dispatch(command_list *cmd_list)
+{
+	if (!g_cb_active)
+		return;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	const uint32_t now = g_presents;
+	if (!g_cb_active || now == g_cb_last_present)
+		return;
+	CmdState &st = g_cmds[cmd_list];
+	const auto pipe = g_pipelines.find(st.pipeline);
+	if (pipe == g_pipelines.end() || pipe->second.hash != kUpscaleHash)
+		return;
+
+	g_cb_last_present = now;
+	CbCapture cap;
+	cap.cmd_list = cmd_list;
+	cap.dev = cmd_list->get_device();
+	cap.frame = g_cb_started++;
+	cap.present = now;
+	if (g_cb_started >= kCbFrames)
+		g_cb_active = false;
+	cap.sizes = frame_sizes(cap.dev, st);
+	collect_cbs(cap.dev, st, cap.items);
+	cb_record(cmd_list, cap);
+	cb_note(str("frame %u present %u: recorded %zu constant buffers (%s)", cap.frame, now, cap.items.size(), cap.sizes.c_str()));
+	g_cb_pending.push_back(std::move(cap));
+	g_cb_pending_count = g_cb_pending.size();
+}
+
+void cb_release(CbCapture &cap)
+{
+	for (CbItem &it : cap.items)
+		if (it.readback.handle != 0 && cap.dev != nullptr)
+			cap.dev->destroy_resource(it.readback);
+}
+
+void cb_write(CbCapture &cap)
+{
+	CreateDirectoryA((g_dir + "cbcapture").c_str(), nullptr);
+	const std::string dir = g_dir + "cbcapture\\";
+	const bool fresh = GetFileAttributesA((dir + "index.txt").c_str()) == INVALID_FILE_ATTRIBUTES;
+	std::string index;
+	if (fresh)
+		index = "# frame, present, param, slot, resource, offset, size, heap, file (tab separated)\n";
+	index += str("# frame %u present %u %s\n", cap.frame, cap.present, cap.sizes.c_str());
+	for (CbItem &it : cap.items)
+	{
+		const void *data = it.values.data();
+		void *mapped = nullptr;
+		if (!it.constants)
+		{
+			if (!cap.dev->map_buffer_region(it.readback, 0, it.size, map_access::read_only, &mapped) || mapped == nullptr)
+			{
+				cb_note(str("skip p%u %s: cannot map readback buffer", it.param, it.slot.c_str()));
+				continue;
+			}
+			data = mapped;
+		}
+		const std::string name = str("frame_%02u_p%u_%s_%llu.bin", cap.frame, it.param, it.slot.c_str(), (unsigned long long)it.size);
+		bool ok = false;
+		if (FILE *f = fopen((dir + name).c_str(), "wb"))
+		{
+			ok = fwrite(data, 1, static_cast<size_t>(it.size), f) == it.size;
+			ok = fclose(f) == 0 && ok;
+		}
+		if (mapped != nullptr)
+			cap.dev->unmap_buffer_region(it.readback);
+		if (!ok)
+		{
+			cb_note("skip " + name + ": cannot write");
+			continue;
+		}
+		index += str("%u\t%u\t%u\t%s\t%llx\t%llu\t%llu\t%s\t%s\n", cap.frame, cap.present, it.param, it.slot.c_str(),
+			(unsigned long long)it.buffer.handle, (unsigned long long)it.offset, (unsigned long long)it.size, it.heap.c_str(), name.c_str());
+	}
+	if (FILE *f = fopen((dir + "index.txt").c_str(), "ab"))
+	{
+		fwrite(index.data(), 1, index.size(), f);
+		fclose(f);
+	}
+	cb_note(str("frame %u written to %scbcapture", cap.frame, g_dir.c_str()));
+}
+
+// Per present: arm after the settle time if the flag file exists, then write captures whose list was submitted.
+void cb_present(uint32_t now)
+{
+	if (now == kCbStartPresent && GetFileAttributesA((g_dir + kCbFlagFile).c_str()) != INVALID_FILE_ATTRIBUTES)
+	{
+		g_cb_active = true;
+		cb_note("armed: capturing the upscale constant buffers for 16 frames");
+	}
+	if (g_cb_pending_count == 0)
+		return;
+	std::vector<CbCapture> ready;
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		for (size_t i = 0; i < g_cb_pending.size();)
+		{
+			CbCapture &cap = g_cb_pending[i];
+			const bool stale = !cap.submitted && now - cap.present > kGiveUpPresents;
+			const bool done = cap.submitted && now > cap.submitted_at;
+			if (stale)
+			{
+				cb_note(str("frame %u abandoned: command list never submitted", cap.frame));
+				cb_release(cap);
+			}
+			if (done)
+				ready.push_back(std::move(cap));
+			if (stale || done)
+				g_cb_pending.erase(g_cb_pending.begin() + i);
+			else
+				++i;
+		}
+		g_cb_pending_count = g_cb_pending.size();
+	}
+	// Outside the lock: the GPU may be waiting on work that other threads still have to record.
+	for (CbCapture &cap : ready)
+		cap.queue->wait_idle();
+	std::lock_guard<std::mutex> lock(g_mutex);
+	for (CbCapture &cap : ready)
+	{
+		cb_write(cap);
+		cb_release(cap);
+	}
+}
+
 void on_execute_command_list(command_queue *queue, command_list *cmd_list)
 {
+	if (g_cb_pending_count != 0)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		for (CbCapture &cap : g_cb_pending)
+			if (cap.cmd_list == cmd_list && !cap.submitted)
+			{
+				cap.submitted = true;
+				cap.queue = queue;
+				cap.submitted_at = g_presents;
+			}
+	}
 	if (g_dump_mode != DumpMode::waiting)
 		return;
 	std::lock_guard<std::mutex> lock(g_mutex);
@@ -895,6 +1257,16 @@ void on_reset_command_list(command_list *cmd_list)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_cmds.erase(cmd_list);
+	for (size_t i = 0; i < g_cb_pending.size();)
+		if (g_cb_pending[i].cmd_list == cmd_list && !g_cb_pending[i].submitted)
+		{
+			cb_note(str("frame %u abandoned: command list was reset before submission", g_cb_pending[i].frame));
+			cb_release(g_cb_pending[i]);
+			g_cb_pending.erase(g_cb_pending.begin() + i);
+			g_cb_pending_count = g_cb_pending.size();
+		}
+		else
+			++i;
 	if (g_dump_mode != DumpMode::idle && g_dump_mode != DumpMode::armed && g_run.cmd_list == cmd_list && !g_run.submitted)
 	{
 		note(str("dump #%u abandoned: command list was reset before submission", g_run.number));
@@ -972,6 +1344,7 @@ void on_bind_render_targets(command_list *cmd_list, uint32_t count, const resour
 bool on_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
 {
 	dump_event(cmd_list, true);
+	cb_dispatch(cmd_list);
 	log_dispatch(cmd_list, str("%ux%ux%u", x, y, z));
 	return false;
 }
@@ -1052,6 +1425,7 @@ void finish_capture()
 void on_present(command_queue *, swapchain *swap, const rect *, const rect *, uint32_t, const rect *)
 {
 	dump_present();
+	cb_present(g_presents);
 	if (g_mode == Mode::capturing)
 		finish_capture();
 	else if (g_mode == Mode::armed)
@@ -1078,7 +1452,7 @@ void on_reshade_present(effect_runtime *runtime)
 extern "C"
 {
 __declspec(dllexport) const char *NAME = "AMDLSS DX12 probe";
-__declspec(dllexport) const char *DESCRIPTION = "F10 logs one frame of compute dispatches and their bound resources to amdlss_dx12_probe.log; F11 dumps the upscale pass textures to dump/*.dds.";
+__declspec(dllexport) const char *DESCRIPTION = "F10 logs one frame of compute dispatches and their bound resources to amdlss_dx12_probe.log; F11 dumps the upscale pass textures to dump/*.dds; amdlss_dx12_probe.cbcapture captures its constant buffers to cbcapture/.";
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
@@ -1105,6 +1479,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		reshade::register_event<addon_event::destroy_resource_view>(on_destroy_resource_view);
 		reshade::register_event<addon_event::update_descriptor_tables>(on_update_descriptor_tables);
 		reshade::register_event<addon_event::copy_descriptor_tables>(on_copy_descriptor_tables);
+		reshade::register_event<addon_event::init_resource>(on_init_resource);
+		reshade::register_event<addon_event::destroy_resource>(on_destroy_resource);
+		reshade::register_event<addon_event::push_constants>(on_push_constants);
 		reshade::register_event<addon_event::barrier>(on_barrier);
 		reshade::register_event<addon_event::close_command_list>(on_close_command_list);
 		reshade::register_event<addon_event::execute_command_list>(on_execute_command_list);
