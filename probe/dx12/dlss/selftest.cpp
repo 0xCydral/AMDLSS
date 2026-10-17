@@ -68,6 +68,67 @@ int main()
 		assert(!parse_tsr_constants(buf, sizeof(buf), c));
 	}
 
+	// Hashes from the 200% capture (title-history200.log, D152 and D153) and the 100% capture (D715).
+	assert(tsr_pass_for_hash(0x1ff10c3ce95d3bcbull) == TsrPass::single);
+	assert(tsr_pass_for_hash(0xe32f96d4dc79be5bull) == TsrPass::update_history);
+	assert(tsr_pass_for_hash(0x0b1375003bfb8294ull) == TsrPass::resolve);
+	assert(tsr_pass_for_hash(0x793b3ceb82f744ecull) == TsrPass::none && tsr_pass_for_hash(0) == TsrPass::none);
+
+	// A per-hash layout moves the fields: the same bytes parse differently with shifted offsets, and a short buffer is judged
+	// against the layout's own size.
+	{
+		assert(tsr_layout_for_hash(kHashUpdateHistory).bytes() == kTsrConstantsBytes);
+		uint8_t buf[512] = {};
+		const auto put_u = [&](size_t at, uint32_t v) { std::memcpy(buf + at, &v, 4); };
+		const auto put_f = [&](size_t at, float v) { std::memcpy(buf + at, &v, 4); };
+		const size_t shift = 16;
+		put_f(48 + shift, 1552.0f); put_f(52 + shift, 876.0f);
+		put_f(160 + shift, 5120.0f); put_f(164 + shift, 2880.0f);
+		put_f(256 + shift, -0.25f); put_f(260 + shift, 0.125f);
+		put_u(264 + shift, 0);
+		put_f(272 + shift, 776.0f); put_f(276 + shift, -438.0f);
+		TsrConstants c;
+		assert(!parse_tsr_constants(buf, sizeof(buf), c));               // default offsets see zeros: no viewport
+		TsrLayout moved = kTsrDefaultLayout;
+		moved.input_min += shift; moved.input_size += shift; moved.history_min += shift; moved.history_size += shift;
+		moved.jitter += shift; moved.camera_cut += shift; moved.velocity += shift;
+		assert(moved.bytes() == kTsrConstantsBytes + shift);
+		assert(parse_tsr_constants(buf, sizeof(buf), c, moved));
+		assert(c.history_size[0] == 5120.0f && c.jitter[0] == -0.25f && c.velocity_to_pixels[1] == -438.0f);
+		assert(!parse_tsr_constants(buf, moved.bytes() - 1, c, moved) && parse_tsr_constants(buf, moved.bytes(), c, moved));
+	}
+
+	// Two-pass: DLSS writes the resolve's 2560x1440 output, never the 5120x2880 history from b0.
+	{
+		TsrConstants c;
+		c.input_size[0] = 1552; c.input_size[1] = 873;
+		c.history_min[0] = 7; c.history_min[1] = 9;
+		c.history_size[0] = 5120; c.history_size[1] = 2880;
+		const TsrConstants o = with_output_viewport(c, 2560, 1440);
+		assert(o.history_size[0] == 2560.0f && o.history_size[1] == 1440.0f && o.history_min[0] == 0 && o.history_min[1] == 0);
+		assert(o.input_size[0] == 1552.0f && o.input_size[1] == 873.0f);       // the rest is untouched
+
+		assert(history_scale_ok(5120, 2880, 2560, 1440) && history_scale_ok(2560, 1440, 2560, 1440));
+		assert(!history_scale_ok(1280, 720, 2560, 1440) && !history_scale_ok(5120, 2880, 0, 0) && !history_scale_ok(20480, 2880, 2560, 1440));
+
+		assert(resolve_pairs_with_update(0x9b4a8cd0, 0x9b4a8cd0));              // D152 u0 and D153 u2 in the capture
+		assert(!resolve_pairs_with_update(0x9b4a8cd0, 0x9b3f88b0) && !resolve_pairs_with_update(0, 0));
+
+		// The first frame and the frame after a failure keep UpdateHistory; only a fully replaced frame lets the next skip it.
+		TwoPassGate g;
+		assert(!g.may_skip_update());
+		g.resolve_replaced();
+		assert(g.may_skip_update());
+		g.resolve_replaced();
+		assert(g.may_skip_update());
+		g.failed();
+		assert(!g.may_skip_update());
+		g.failed();
+		assert(!g.may_skip_update());
+		g.resolve_replaced();
+		assert(g.may_skip_update());
+	}
+
 	const Ini ini = parse_ini("; comment\nenabled = 1\n# other\njitter_sign_y=-1\r\nmv_scale_x=-0.5 \nbroken line\n\nlog_every_n_frames=300");
 	assert(ini.number("enabled", 0) == 1 && ini.number("jitter_sign_y", 1) == -1);
 	assert(ini.number("mv_scale_x", 0) == -0.5 && ini.number("log_every_n_frames", 0) == 300);

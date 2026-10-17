@@ -1,7 +1,8 @@
 /*
  * Pure logic of the DLSS add-on (no Windows, no ReShade, no NGX), so selftest.cpp can check it on the Linux host
- * inside the build container: Halton jitter, jitter phase matching, preset choice, UE5 velocity decode, ini parsing
- * and merging, DLSS render preset names, frame-time statistics.
+ * inside the build container: which TSR pass a shader hash is, TSR constant layouts, two-pass decisions, Halton jitter,
+ * jitter phase matching, preset choice, UE5 velocity decode, ini parsing and merging, DLSS render preset names,
+ * frame-time statistics.
  */
 #pragma once
 
@@ -57,8 +58,29 @@ inline void predict_jitter(int phase, uint32_t frames_since_lock, uint32_t cycle
 	jitter_at((static_cast<uint32_t>(phase) + frames_since_lock) % cycle + 1, x, y);
 }
 
-// The fields of TSR's root constant buffer b0 (_RootShaderParameters) that the DLSS add-on needs. The byte offsets
-// come from the disassembly of UE's own shader (T8, tsr_1ff10c3ce95d3bcb.dxil).
+// ---- which TSR pass a compute shader is ------------------------------------------------------------------------------
+// FNV-1a hashes of the DXIL, found by the probe (odd/tasks/dx12-spike.md). With the history at 100% of the output TSR is one
+// pass (UpdateHistory writes the output and the half-size target); with the history at 200% it is two: UpdateHistory writes
+// the 5120x2880 history, a resolve reads it and writes the 2560x1440 output and the half-size target.
+constexpr uint64_t kHashSinglePass = 0x1ff10c3ce95d3bcbull;
+constexpr uint64_t kHashUpdateHistory = 0xe32f96d4dc79be5bull;
+constexpr uint64_t kHashResolve = 0x0b1375003bfb8294ull;
+
+enum class TsrPass { none, single, update_history, resolve };
+
+inline TsrPass tsr_pass_for_hash(uint64_t hash)
+{
+	switch (hash)
+	{
+	case kHashSinglePass: return TsrPass::single;
+	case kHashUpdateHistory: return TsrPass::update_history;
+	case kHashResolve: return TsrPass::resolve;
+	default: return TsrPass::none;
+	}
+}
+
+// The fields of TSR's root constant buffer b0 (_RootShaderParameters) that the DLSS add-on needs. The default byte offsets
+// come from the disassembly of UE's own single-pass shader (T8, tsr_1ff10c3ce95d3bcb.dxil).
 constexpr size_t kTsrInputViewportMin = 32;      // uint2, then InputInfo_ViewportMax uint2 @40
 constexpr size_t kTsrInputViewportSize = 48;     // float2
 constexpr size_t kTsrHistoryViewportMin = 144;   // uint2
@@ -67,6 +89,20 @@ constexpr size_t kTsrJitter = 256;               // float2, render pixels
 constexpr size_t kTsrCameraCut = 264;            // uint
 constexpr size_t kTsrVelocityToPixels = 272;     // float2, ScreenVelocityToInputPixelVelocity
 constexpr size_t kTsrConstantsBytes = 280;       // bytes of b0 the add-on reads
+
+// Where those fields sit in b0 for one shader. The 200% UpdateHistory shader (e32f96d4dc79be5b) has not been disassembled yet
+// (its DXIL only exists at run time), so every hash uses the single-pass offsets; UE puts the common TSR parameters first in
+// every TSR shader's parameter struct. If the live run reports implausible constants for it, this table is the one place to fix.
+struct TsrLayout
+{
+	size_t input_min, input_size, history_min, history_size, jitter, camera_cut, velocity;
+	size_t bytes() const { return velocity + 8; } // the last field is a float2
+};
+constexpr TsrLayout kTsrDefaultLayout = { kTsrInputViewportMin, kTsrInputViewportSize, kTsrHistoryViewportMin, kTsrHistoryViewportSize, kTsrJitter,
+	kTsrCameraCut, kTsrVelocityToPixels };
+static_assert(kTsrDefaultLayout.velocity + 8 == kTsrConstantsBytes, "kTsrConstantsBytes must cover the default layout");
+
+inline TsrLayout tsr_layout_for_hash(uint64_t) { return kTsrDefaultLayout; }
 
 struct TsrConstants
 {
@@ -91,21 +127,21 @@ inline float read_f32(const uint8_t *p, size_t at)
 
 // Parses the fields above; false when the buffer is short or the values cannot be a real TSR frame (non-positive
 // viewport, jitter outside +-0.5 pixels, non-finite velocity scale), so a mapped buffer holding something else is never used.
-inline bool parse_tsr_constants(const uint8_t *buf, size_t size, TsrConstants &out)
+inline bool parse_tsr_constants(const uint8_t *buf, size_t size, TsrConstants &out, const TsrLayout &layout = kTsrDefaultLayout)
 {
-	if (buf == nullptr || size < kTsrConstantsBytes)
+	if (buf == nullptr || size < layout.bytes())
 		return false;
 	TsrConstants c;
 	for (int i = 0; i < 2; ++i)
 	{
-		c.input_min[i] = read_u32(buf, kTsrInputViewportMin + 4 * i);
-		c.history_min[i] = read_u32(buf, kTsrHistoryViewportMin + 4 * i);
-		c.input_size[i] = read_f32(buf, kTsrInputViewportSize + 4 * i);
-		c.history_size[i] = read_f32(buf, kTsrHistoryViewportSize + 4 * i);
-		c.jitter[i] = read_f32(buf, kTsrJitter + 4 * i);
-		c.velocity_to_pixels[i] = read_f32(buf, kTsrVelocityToPixels + 4 * i);
+		c.input_min[i] = read_u32(buf, layout.input_min + 4 * i);
+		c.history_min[i] = read_u32(buf, layout.history_min + 4 * i);
+		c.input_size[i] = read_f32(buf, layout.input_size + 4 * i);
+		c.history_size[i] = read_f32(buf, layout.history_size + 4 * i);
+		c.jitter[i] = read_f32(buf, layout.jitter + 4 * i);
+		c.velocity_to_pixels[i] = read_f32(buf, layout.velocity + 4 * i);
 	}
-	c.camera_cut = read_u32(buf, kTsrCameraCut);
+	c.camera_cut = read_u32(buf, layout.camera_cut);
 	const auto sane_size = [](float v) { return v >= 1.0f && v <= 16384.0f; };
 	const auto sane_scale = [](float v) { return std::isfinite(v) && std::fabs(v) > 0.0f && std::fabs(v) < 65536.0f; };
 	if (!sane_size(c.input_size[0]) || !sane_size(c.input_size[1]) || !sane_size(c.history_size[0]) || !sane_size(c.history_size[1]))
@@ -117,6 +153,46 @@ inline bool parse_tsr_constants(const uint8_t *buf, size_t size, TsrConstants &o
 	out = c;
 	return true;
 }
+
+// ---- two-pass mode (history at 200%) ---------------------------------------------------------------------------------------
+
+// In two-pass mode b0's HistoryInfo describes the big history, not the output DLSS writes. The output viewport is the
+// resolve's output texture, with its origin at 0.
+inline TsrConstants with_output_viewport(TsrConstants c, uint32_t out_w, uint32_t out_h)
+{
+	c.history_min[0] = c.history_min[1] = 0;
+	c.history_size[0] = static_cast<float>(out_w);
+	c.history_size[1] = static_cast<float>(out_h);
+	return c;
+}
+
+// The history viewport of a two-pass frame is the output size times 1 to 4 on both axes (the game uses 2). Anything else
+// means the constants were misread or this is not the TSR instance whose output is replaced.
+inline bool history_scale_ok(float history_w, float history_h, uint32_t out_w, uint32_t out_h)
+{
+	if (out_w == 0 || out_h == 0)
+		return false;
+	const float sx = history_w / static_cast<float>(out_w), sy = history_h / static_cast<float>(out_h);
+	return sx >= 1.0f && sx <= 4.0f && sy >= 1.0f && sy <= 4.0f;
+}
+
+// The resolve belongs to the pending UpdateHistory when it reads the very resource UpdateHistory wrote (resource handles).
+inline bool resolve_pairs_with_update(uint64_t update_history_out, uint64_t resolve_history_in)
+{
+	return update_history_out != 0 && update_history_out == resolve_history_in;
+}
+
+// When UpdateHistory may be skipped. Skipping it leaves the game's history stale, so a resolve that cannot be replaced then
+// shows an old image. It is therefore only skipped after the previous two-pass frame was replaced completely by DLSS, so
+// everything the resolve needs (proxies, NGX, the feature, the output binding) has just been shown to work; the first frame
+// and the frame after any failure run the game's UpdateHistory and replace only the resolve.
+struct TwoPassGate
+{
+	bool primed = false;
+	bool may_skip_update() const { return primed; }
+	void resolve_replaced() { primed = true; }
+	void failed() { primed = false; }
+};
 
 enum class Preset { dlaa, quality, balanced, performance, ultra_performance };
 

@@ -1,12 +1,17 @@
 /*
  * amdlss_dx12_dlss: ReShade add-on for stage 3b of the DX12 spike (odd/tasks/dx12-spike.md).
  *
- * Replaces the game's TSR upscale dispatch (compute shader hash kUpscaleHash) with DLSS Super Resolution. On that
- * dispatch it finds scene color, velocity, depth and the output through the descriptor heap shadow (the same approach
- * as the probe add-on), reads the camera jitter from the root CBV, decodes UE's velocity into DLSS motion vectors,
- * evaluates NGX on the game's own command list and returns true so ReShade skips the original dispatch. NGX and the
- * decode pass change the compute root signature, pipeline, descriptor heaps and root arguments of the list, so all of
- * it is set back afterwards from the shadowed state. If anything is missing the game renders normally.
+ * Replaces the game's TSR upscale with DLSS Super Resolution. On the single-pass shader (history at 100%) it finds scene
+ * color, velocity, depth and the output through the descriptor heap shadow (the same approach as the probe add-on),
+ * reads the camera jitter from the root CBV, decodes UE's velocity into DLSS motion vectors, evaluates NGX on the game's
+ * own command list and returns true so ReShade skips the original dispatch. NGX and the decode pass change the compute
+ * root signature, pipeline, descriptor heaps and root arguments of the list, so all of it is set back afterwards from
+ * the shadowed state. If anything is missing the game renders normally.
+ *
+ * With the history at 200% TSR is two passes on one command list: UpdateHistory (inputs at render size, writes the big
+ * history) and a resolve (reads it, writes the output and the half-size target). The inputs are gathered at UpdateHistory
+ * and kept as a pending snapshot; DLSS runs at the resolve, into the resolve's output. UpdateHistory is skipped only once
+ * a previous two-pass frame was fully replaced (logic::TwoPassGate); until then it runs and only the resolve is replaced.
  *
  * Known gaps, logged once: translucency u4 is not used and u2 (history metadata) is not written. u1, TSR's half-size
  * output that bloom and eye adaptation read, is filled from the DLSS output (ini fill_half_res).
@@ -44,11 +49,12 @@ static_assert(NVSDK_NGX_DLSS_Hint_Render_Preset_J == 10 && NVSDK_NGX_DLSS_Hint_R
 
 namespace
 {
-// Compute shader found in stage 1: one thread per output pixel (see "Stage 1 result" in odd/tasks/dx12-spike.md).
-constexpr uint64_t kUpscaleHash = 0x1ff10c3ce95d3bcbull;
-// Root parameter 1 is the pass's descriptor table; the registers below are the slots found in stage 2.
+// The TSR compute shaders are recognised by the hashes in logic.hpp (single pass found in stage 1, the two-pass pair in
+// the 200% history capture). Root parameter 1 is the pass's descriptor table; the registers below are the slots found in
+// stage 2, the same in the single-pass shader and in the two-pass UpdateHistory; the resolve shares u0/u1 and reads the
+// history it just got at u2 (checked against the history UpdateHistory wrote).
 constexpr uint32_t kBindingsParam = 1;
-constexpr uint32_t kRegOutput = 0, kRegHalf = 1, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6;
+constexpr uint32_t kRegOutput = 0, kRegHalf = 1, kRegHistorySrc = 2, kRegColor = 3, kRegTranslucency = 4, kRegVelocity = 6;
 // Stage 3a (T7): TSR's constants (jitter at byte 256, viewports, camera cut, velocity scale) are the root CBV b0 at root
 // parameter 2; the field offsets are in logic.hpp.
 constexpr uint32_t kJitterParam = 2;
@@ -250,19 +256,25 @@ CmdState &compute_state(command_list *cmd_list, pipeline_layout layout)
 	return st;
 }
 
-// The game's own TSR shader, written once so its DXIL can be disassembled (disasm.sh): how it decodes velocity and how
-// it uses the jitter is then read from UE's code instead of guessed.
-void dump_tsr_bytecode(const void *code, size_t size)
+// The game's own TSR shaders (single pass, and the two-pass UpdateHistory and resolve), each written once so its DXIL can
+// be disassembled (disasm.sh): how it decodes velocity, where b0 keeps the jitter and the viewports is then read from UE's
+// code instead of guessed.
+void dump_tsr_bytecode(uint64_t hash, logic::TsrPass pass, const void *code, size_t size)
 {
-	static std::atomic<bool> dumped { false };
-	if (dumped.exchange(true))
-		return;
-	const std::string path = g_dir + "tsr_1ff10c3ce95d3bcb.dxil";
+	static std::unordered_set<uint64_t> dumped;
+	static std::mutex m;
+	{
+		std::lock_guard<std::mutex> lock(m);
+		if (!dumped.insert(hash).second)
+			return;
+	}
+	const char *role = pass == logic::TsrPass::single ? "single pass" : pass == logic::TsrPass::update_history ? "two-pass UpdateHistory" : "two-pass resolve";
+	const std::string path = g_dir + str_format("tsr_%016llx.dxil", static_cast<unsigned long long>(hash));
 	FILE *f = fopen(path.c_str(), "wb");
 	const bool ok = f != nullptr && fwrite(code, 1, size, f) == size;
 	if (f != nullptr)
 		fclose(f);
-	log_line("TSR bytecode (%zu bytes) %s %s", size, ok ? "written to" : "could not be written to", path.c_str());
+	log_line("TSR bytecode %016llx (%s, %zu bytes) %s %s", static_cast<unsigned long long>(hash), role, size, ok ? "written to" : "could not be written to", path.c_str());
 }
 
 void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_subobject *subobjects, pipeline pipe)
@@ -273,8 +285,8 @@ void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_
 			continue;
 		const auto *shader = static_cast<const shader_desc *>(subobjects[i].data);
 		const uint64_t hash = shader->code != nullptr ? fnv1a(shader->code, shader->code_size) : 0;
-		if (hash == kUpscaleHash)
-			dump_tsr_bytecode(shader->code, shader->code_size);
+		if (const logic::TsrPass pass = logic::tsr_pass_for_hash(hash); pass != logic::TsrPass::none)
+			dump_tsr_bytecode(hash, pass, shader->code, shader->code_size);
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_pipelines[pipe.handle] = hash;
 	}
@@ -400,10 +412,14 @@ bool on_copy_descriptor_tables(device *dev, uint32_t count, const descriptor_tab
 	return false;
 }
 
+// Two-pass mode: an UpdateHistory whose resolve never came (defined with the pending snapshots below; g_mutex held).
+void drop_pending_locked(const command_list *cmd_list, const char *why);
+
 void on_reset_command_list(command_list *cmd_list)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_cmds.erase(cmd_list);
+	drop_pending_locked(cmd_list, "the command list was reset or destroyed");
 }
 
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
@@ -477,7 +493,8 @@ struct Tex
 };
 struct Bindings
 {
-	Tex output, half, color, translucency, velocity, depth;
+	// history: u2, what the two-pass resolve reads (UpdateHistory's u2 is an unrelated r8 output; it is never used there).
+	Tex output, half, history, color, translucency, velocity, depth;
 };
 
 Tex tex_from(const Entry &e)
@@ -564,7 +581,9 @@ bool find_depth_of_size(uint32_t w, uint32_t h, Tex &out)
 	return false;
 }
 
-bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &why)
+// `need_inputs` is false for the two-pass resolve, which only has an output (u0), the half-size target (u1) and the history
+// (u2); its u3 and u6 are unrelated slots.
+bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &why, bool need_inputs = true)
 {
 	const auto layout = g_layouts.find(st.layout);
 	const auto table = st.tables.find(kBindingsParam);
@@ -597,11 +616,17 @@ bool find_bindings(device *dev, const CmdState &st, Bindings &b, std::string &wh
 				continue;
 			resolve(e);
 			const uint32_t reg = r.dx_register_index + j;
-			Tex *target = reg == kRegOutput ? &b.output : reg == kRegHalf ? &b.half : reg == kRegColor ? &b.color : reg == kRegTranslucency ? &b.translucency :
-				reg == kRegVelocity ? &b.velocity : nullptr;
+			Tex *target = reg == kRegOutput ? &b.output : reg == kRegHalf ? &b.half : reg == kRegHistorySrc ? &b.history : reg == kRegColor ? &b.color :
+				reg == kRegTranslucency ? &b.translucency : reg == kRegVelocity ? &b.velocity : nullptr;
 			if (target != nullptr)
 				*target = tex_from(e);
 		}
+	}
+	if (!need_inputs)
+	{
+		if (!b.output.ok)
+			why = "u0 is not a usable texture";
+		return b.output.ok;
 	}
 	if (!(b.output.ok && b.color.ok && b.velocity.ok))
 	{
@@ -626,7 +651,7 @@ struct JitterState
 logic::TsrConstants g_tsr_last;
 bool g_tsr_last_valid = false;
 
-bool read_tsr_constants(device *dev, const CmdState &st, logic::TsrConstants &out, std::string &why)
+bool read_tsr_constants(device *dev, const CmdState &st, const logic::TsrLayout &layout, logic::TsrConstants &out, std::string &why)
 {
 	const auto it = st.pushes.find(kJitterParam);
 	if (it == st.pushes.end() || it->second.empty() || it->second[0].info == nullptr || !it->second[0].info->buffer_range)
@@ -645,23 +670,29 @@ bool read_tsr_constants(device *dev, const CmdState &st, logic::TsrConstants &ou
 		why = "constant buffer is not in an upload heap";
 		return false;
 	}
-	if (info.offset + logic::kTsrConstantsBytes > info.desc.buffer.size)
+	const size_t bytes = layout.bytes();
+	if (bytes > 512 || info.offset + bytes > info.desc.buffer.size)
 	{
 		why = "the TSR constants are past the end of the buffer";
 		return false;
 	}
 	void *data = nullptr;
-	if (!dev->map_buffer_region({ info.resource }, info.offset, logic::kTsrConstantsBytes, map_access::read_only, &data) || data == nullptr)
+	if (!dev->map_buffer_region({ info.resource }, info.offset, bytes, map_access::read_only, &data) || data == nullptr)
 	{
 		why = "map_buffer_region failed";
 		return false;
 	}
-	uint8_t copy[logic::kTsrConstantsBytes];
-	memcpy(copy, data, sizeof(copy));
+	uint8_t copy[512];
+	memcpy(copy, data, bytes);
 	dev->unmap_buffer_region({ info.resource });
-	if (!logic::parse_tsr_constants(copy, sizeof(copy), out))
+	if (!logic::parse_tsr_constants(copy, bytes, out, layout))
 	{
-		why = "the bytes read are not plausible TSR constants (viewport, jitter or velocity scale out of range)";
+		// Show what sits at the expected offsets: for a shader whose b0 layout was never read this is how the real one is found.
+		why = str_format("the bytes read are not plausible TSR constants (viewport, jitter or velocity scale out of range): input size (%g, %g), history size (%g, %g), "
+			"jitter (%g, %g), velocity scale (%g, %g) at offsets %zu, %zu, %zu, %zu",
+			logic::read_f32(copy, layout.input_size), logic::read_f32(copy, layout.input_size + 4), logic::read_f32(copy, layout.history_size),
+			logic::read_f32(copy, layout.history_size + 4), logic::read_f32(copy, layout.jitter), logic::read_f32(copy, layout.jitter + 4),
+			logic::read_f32(copy, layout.velocity), logic::read_f32(copy, layout.velocity + 4), layout.input_size, layout.history_size, layout.jitter, layout.velocity);
 		return false;
 	}
 	return true;
@@ -1015,6 +1046,7 @@ struct Snapshot
 	float jitter_x = 0, jitter_y = 0;
 	logic::TsrConstants tsr;
 	bool jitter_fallback = false;
+	bool update_skipped = false; // two-pass: the game's UpdateHistory did not run this frame, so its history is stale
 	Config cfg; // g_cfg as it was when this dispatch started; the overlay may change g_cfg while the pass records
 };
 
@@ -1309,9 +1341,16 @@ struct Status
 	bool auto_exposure = true;
 	uint64_t evals = 0;
 	std::string eval_result = "not evaluated yet";
+	std::string tsr_mode; // which TSR layout the last upscale dispatch was: single pass, or two-pass with UpdateHistory skipped or kept
 	uint64_t seq = 0; // upscale dispatches seen; the overlay compares it between its own frames
 } g_status;
 std::mutex g_status_m;
+
+void status_mode(const char *mode)
+{
+	std::lock_guard<std::mutex> lock(g_status_m);
+	g_status.tsr_mode = mode;
+}
 
 void status_path(Status::Path path, const char *reason = "")
 {
@@ -1591,39 +1630,42 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	return ok;
 }
 
-bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
+// One upscale frame begins (the single-pass dispatch or the two-pass UpdateHistory); g_mutex held. False when the user turned
+// the replacement off: TSR runs.
+bool begin_upscale_frame()
 {
-	if (t_busy)
-		return false;
-	Snapshot s;
-	{
-		std::lock_guard<std::mutex> lock(g_mutex);
-		const auto it = g_cmds.find(cmd_list);
-		if (it == g_cmds.end())
-			return false;
-		const auto pipe = g_pipelines.find(it->second.pipeline);
-		if (pipe == g_pipelines.end() || pipe->second != kUpscaleHash)
-			return false;
+	stat_frame();
+	reload_ini_if_changed();
+	if (g_cfg.enabled)
+		return true;
+	// Disabled live: TSR runs, so DLSS starts over with a reset when it is enabled again.
+	if (g_ngx.evals > 0)
+		g_reset_next = true;
+	status_path(Status::Path::disabled);
+	perf_count_upscale(false);
+	return false;
+}
 
-		stat_frame();
-		reload_ini_if_changed();
-		if (!g_cfg.enabled)
-		{
-			// Disabled live: TSR runs, so DLSS starts over with a reset when it is enabled again.
-			if (g_ngx.evals > 0)
-				g_reset_next = true;
-			status_path(Status::Path::disabled);
-			perf_count_upscale(false);
-			return false;
-		}
+enum class Prep { fallback, replace, keep_previous };
+
+// Everything the single-pass dispatch checks before it replaces the pass, and the same for the two-pass UpdateHistory: bindings,
+// depth, sizes, TSR constants. g_mutex held. `fallback` has been counted and logged already (the game's pass runs);
+// `keep_previous` means TSR is skipped without an evaluate and the output keeps the previous DLSS frame.
+Prep prepare_upscale(command_list *cmd_list, const CmdState &cs, const logic::TsrLayout &layout, Snapshot &s)
+{
+	const auto fail = [](const char *key, const std::string &why) {
+		give_up(key, why);
+		return Prep::fallback;
+	};
+	{
 		device *dev = cmd_list->get_device();
-		s.st = it->second;
+		s.st = cs;
 		s.cfg = g_cfg;
 		if (const auto l = g_layouts.find(s.st.layout); l != g_layouts.end())
 			s.params = l->second;
 		std::string bind_why;
 		if (!find_bindings(dev, s.st, s.b, bind_why))
-			return give_up("bindings", bind_why + " [" + describe_all(s.b) + "]");
+			return fail("bindings", bind_why + " [" + describe_all(s.b) + "]");
 
 		Bindings &b = s.b;
 		// This TSR pass reads no depth: u14 is an unrelated slot UE refills every frame (seen empty, 1x1, 5712x5712).
@@ -1649,14 +1691,14 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 				status_path(Status::Path::kept_previous);
 				if (first_n("kept-previous", 3))
 					log_line("size mismatch and no usable depth: skipping TSR without evaluating, u0 keeps the previous DLSS output: %s", sizes.c_str());
-				return true;
+				return Prep::keep_previous;
 			}
 			else
-				return give_up("size-mismatch", "color, velocity and depth differ in size and no depth of render size was seen: " + sizes);
+				return fail("size-mismatch", "color, velocity and depth differ in size and no depth of render size was seen: " + sizes);
 		}
 
 		std::string why;
-		if (read_tsr_constants(dev, s.st, s.tsr, why))
+		if (read_tsr_constants(dev, s.st, layout, s.tsr, why))
 		{
 			g_tsr_last = s.tsr;
 			g_tsr_last_valid = true;
@@ -1680,12 +1722,193 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 				log_line("TSR constants option A failed (%s); using option B, the Halton sequence locked from an earlier read and the last viewport and scale", why.c_str());
 		}
 		else
-			return give_up("jitter", "the TSR constants could not be read (" + why + ") and no earlier read locked the Halton phase");
+			return fail("jitter", "the TSR constants could not be read (" + why + ") and no earlier read locked the Halton phase");
+	}
+	return Prep::replace;
+}
+
+// ---- two-pass mode (history at 200%): UpdateHistory, then a resolve on the same command list ----------------------------
+
+// What UpdateHistory gathered, waiting for the resolve. g_mutex guards the map and the gate.
+struct Pending
+{
+	Snapshot s;
+	uint64_t history = 0;       // the history resource UpdateHistory writes; the resolve has to read this one
+	bool keep_previous = false; // no usable depth: UpdateHistory is skipped and so is the resolve (the output keeps the previous frame)
+};
+std::unordered_map<const command_list *, Pending> g_pending;
+logic::TwoPassGate g_gate;
+
+// An UpdateHistory whose resolve never came. If UpdateHistory had been skipped, the frame shows the game's stale history.
+void drop_pending_locked(const command_list *cmd_list, const char *why)
+{
+	const auto p = g_pending.find(cmd_list);
+	if (p == g_pending.end())
+		return;
+	const bool keep_previous = p->second.keep_previous, stale = p->second.s.update_skipped;
+	g_pending.erase(p);
+	if (keep_previous)
+		return; // nothing was meant to run on this frame
+	g_gate.failed();
+	if (stale)
+		stat_count("twopass-stale-history-frame");
+	give_up("twopass-resolve-missing", std::string("the two-pass UpdateHistory got no resolve on its command list (") + why + ")" +
+		(stale ? "; UpdateHistory was skipped, so this frame shows the stale history" : ""));
+}
+
+// The two-pass UpdateHistory; g_mutex held. Gathers the same inputs the single-pass path does and keeps them for the resolve.
+// Returns whether the dispatch is skipped, which it is only once a previous two-pass frame was replaced completely.
+bool on_update_history(command_list *cmd_list, const CmdState &cs, uint64_t hash)
+{
+	drop_pending_locked(cmd_list, "a new UpdateHistory started first");
+	if (!begin_upscale_frame())
+	{
+		status_mode("two-pass (history above the output size)");
+		g_gate.failed();
+		return false;
+	}
+	Pending pend;
+	const Prep prep = prepare_upscale(cmd_list, cs, logic::tsr_layout_for_hash(hash), pend.s);
+	if (prep == Prep::fallback)
+	{
+		status_mode("two-pass (history above the output size)");
+		g_gate.failed();
+		return false;
+	}
+	pend.history = pend.s.b.output.res.handle;
+	pend.s.st = CmdState(); // the resolve's own state is the one to put back
+	pend.s.params.clear();
+	pend.keep_previous = prep == Prep::keep_previous;
+	const bool skip = pend.keep_previous || g_gate.may_skip_update();
+	pend.s.update_skipped = skip && !pend.keep_previous;
+	if (!pend.keep_previous)
+	{
+		stat_count(skip ? "twopass-update-skipped" : "twopass-update-kept");
+		if (skip && first_time("twopass-skipped"))
+			log_line("two-pass TSR: UpdateHistory %016llx skipped, DLSS replaces the resolve (the game's history is no longer written)", static_cast<unsigned long long>(hash));
+		if (!skip && first_n("twopass-kept", 3))
+			log_line("two-pass TSR: UpdateHistory %016llx kept this frame (first frame or after a failure), only the resolve is replaced; it is skipped after one fully replaced frame",
+				static_cast<unsigned long long>(hash));
+	}
+	status_mode(pend.keep_previous ? "two-pass, no usable depth (previous output kept)" : skip ? "two-pass, UpdateHistory skipped" : "two-pass, UpdateHistory kept");
+	g_pending[cmd_list] = std::move(pend);
+	return skip;
+}
+
+enum class Resolve { pass_through, skip, replace };
+
+// The two-pass resolve; g_mutex held. `replace` fills `s` with the inputs UpdateHistory gathered, the resolve's own output and
+// half-size target, and its command list state. `pass_through` lets the game's resolve run: either no UpdateHistory is pending
+// (it fell back, already counted) or this resolve cannot be replaced (counted and logged here).
+Resolve take_resolve(command_list *cmd_list, const CmdState &cs, Snapshot &s)
+{
+	const auto p = g_pending.find(cmd_list);
+	if (p == g_pending.end())
+		return Resolve::pass_through;
+	Pending pend = std::move(p->second);
+	g_pending.erase(p);
+	if (pend.keep_previous)
+		return Resolve::skip;
+
+	const auto fail = [&](const char *key, const std::string &why) {
+		g_gate.failed();
+		if (pend.s.update_skipped)
+			stat_count("twopass-stale-history-frame");
+		give_up(key, why + (pend.s.update_skipped ? " (UpdateHistory was skipped, so the game's resolve shows the stale history this frame)" : ""));
+		return Resolve::pass_through;
+	};
+	Bindings rb;
+	std::string why;
+	if (!find_bindings(cmd_list->get_device(), cs, rb, why, false))
+		return fail("twopass-resolve-bindings", why + " [" + describe("u0 output", rb.output) + "; " + describe("u1 half-size", rb.half) + "]");
+	if (!logic::resolve_pairs_with_update(pend.history, rb.history.ok ? rb.history.res.handle : 0))
+		return fail("twopass-pairing", str_format("the resolve does not read the history UpdateHistory wrote (resource %llx): ", static_cast<unsigned long long>(pend.history)) +
+			describe("u2 history", rb.history));
+	if (!logic::history_scale_ok(pend.s.tsr.history_size[0], pend.s.tsr.history_size[1], rb.output.width, rb.output.height))
+		return fail("twopass-sizes", str_format("b0's history viewport %gx%g is not 1 to 4 times the resolve output: ", pend.s.tsr.history_size[0], pend.s.tsr.history_size[1]) +
+			describe("u0 output", rb.output));
+
+	if (first_n("twopass-resolve", 3))
+		log_line("two-pass TSR: history viewport %gx%g (resource %llx) -> resolve output %ux%u, half-size %s; DLSS output is the resolve's output, UpdateHistory is %s",
+			pend.s.tsr.history_size[0], pend.s.tsr.history_size[1], static_cast<unsigned long long>(pend.history), rb.output.width, rb.output.height,
+			rb.half.ok ? str_format("%ux%u", rb.half.width, rb.half.height).c_str() : "not found", pend.s.update_skipped ? "skipped" : "kept");
+	s = std::move(pend.s);
+	s.st = cs;
+	if (const auto l = g_layouts.find(cs.layout); l != g_layouts.end())
+		s.params = l->second;
+	s.b.output = rb.output;
+	s.b.half = rb.half;
+	s.tsr = logic::with_output_viewport(s.tsr, rb.output.width, rb.output.height);
+	return Resolve::replace;
+}
+
+// After DLSS tried to replace the resolve: arm or disarm the skipping of UpdateHistory for the next frame.
+void finish_resolve(bool replaced, const Snapshot &s)
+{
+	std::lock_guard<std::mutex> lock(g_mutex);
+	if (replaced)
+	{
+		g_gate.resolve_replaced();
+		stat_count("twopass-replaced");
+		if (!s.update_skipped && first_time("twopass-armed"))
+			log_line("two-pass TSR: a frame was fully replaced by DLSS, UpdateHistory is skipped from the next one");
+		return;
+	}
+	g_gate.failed();
+	stat_count("twopass-resolve-fallback");
+	if (s.update_skipped)
+		stat_count("twopass-stale-history-frame");
+	if (first_n("twopass-fallback", 3))
+		log_line("two-pass TSR: DLSS could not replace the resolve (the reason is counted as fallback-* or evaluate-failed): the game's resolve runs%s, and UpdateHistory runs again from the next frame",
+			s.update_skipped ? " on the stale history of an earlier frame" : "");
+}
+
+bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
+{
+	if (t_busy)
+		return false;
+	Snapshot s;
+	logic::TsrPass pass = logic::TsrPass::none;
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		const auto it = g_cmds.find(cmd_list);
+		if (it == g_cmds.end())
+			return false;
+		const auto pipe = g_pipelines.find(it->second.pipeline);
+		if (pipe == g_pipelines.end())
+			return false;
+		pass = logic::tsr_pass_for_hash(pipe->second);
+		switch (pass)
+		{
+		case logic::TsrPass::single:
+		{
+			status_mode("single pass");
+			if (!begin_upscale_frame())
+				return false;
+			const Prep prep = prepare_upscale(cmd_list, it->second, logic::tsr_layout_for_hash(pipe->second), s);
+			if (prep != Prep::replace)
+				return prep == Prep::keep_previous;
+			break;
+		}
+		case logic::TsrPass::update_history:
+			return on_update_history(cmd_list, it->second, pipe->second);
+		case logic::TsrPass::resolve:
+		{
+			const Resolve r = take_resolve(cmd_list, it->second, s);
+			if (r != Resolve::replace)
+				return r == Resolve::skip;
+			break;
+		}
+		default:
+			return false;
+		}
 	}
 
 	t_busy = true;
 	const bool replaced = replace_upscale(cmd_list, s);
 	t_busy = false;
+	if (pass == logic::TsrPass::resolve)
+		finish_resolve(replaced, s);
 	return replaced;
 }
 
@@ -1759,6 +1982,8 @@ void draw_status(const Status &st, bool dispatching)
 		ImGui::TextDisabled("No upscale pass ran since the last overlay frame; this is the last one seen.");
 	if (st.rw != 0)
 		ImGui::Text("Render %ux%u -> output %ux%u, ratio %.3f", st.rw, st.rh, st.ow, st.oh, static_cast<double>(st.rw) / st.ow);
+	if (!st.tsr_mode.empty())
+		ImGui::Text("TSR layout: %s", st.tsr_mode.c_str());
 	if (st.rw != 0)
 		ImGui::Text("DLSS mode: %s", logic::preset_name(st.mode));
 	ImGui::Text("Last NGX evaluate: %s", st.eval_result.c_str());
