@@ -92,3 +92,7 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
   Scaler layout. Not a Radeon: HelixSR's speed on an AMD card is still unmeasured (T6).
   - T5 seen again: launch E's first dump was blank (input 0.3% non-zero, output 0); launch F's two dumps were good.
     Intermittent, not tied to DLAA.
+- 2026-10-17 render preset (launch G, NVIDIA layout, 1440p, Quality): default 81-90 fps, K 81-85 fps. Vs native TSR:
+  default edge flicker 1.00x, all 0.82x, stair 1.16x; K 0.93x, 0.77x, 1.32x. K is steadier but scores higher on the
+  stair metric (which also rises with sharper edges) and costs about 4 fps: the default preset stays. Across launches C
+  and G the default preset measured edge flicker 0.85x and 1.00x, so title-screen drift moves these numbers by about 0.15.
