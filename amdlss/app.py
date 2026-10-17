@@ -782,7 +782,7 @@ class App:
         self.work(install, lambda result: self.installed(*result))
 
     def download_progress_fsr4(self, done, total):
-        """The downloads this path can make: AMD's FSR loader (26 KB) and the HelixSR Scaler package (about 127 MB)."""
+        """The downloads this path can make: AMD's FSR loader (26 KB) and the HelixSR Scaler package (about 133 MB)."""
         if total >= 1 << 20:
             self.progress.configure(text=f'Downloading HelixSR Scaler: {done >> 20} of {total >> 20} MB')
         else:

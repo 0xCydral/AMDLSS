@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""HelixSR Scaler: OptiScaler 0.9.4 with HelixSR built in, for games without an FSR 3.1 DLL.
+"""HelixSR Scaler: OptiScaler with HelixSR built in, for games without an FSR 3.1 DLL.
 
 HelixSR 1.9.0's own setup installed only the FSR drop-in and its installer reported a game without FSR 3.1 as
 'unsupported'; 1.9.1's and later setups install HelixSR Scaler too ('scaler', or 'blocked' with anti-cheat), with the
@@ -398,7 +398,7 @@ def plan_text(game):
     """What installing HelixSR Scaler will do, before the user agrees (gamelist.plan_text's OptiScaler route)."""
     where = game.exe_folder or "the game's .exe folder"
     text = (f"AMDLSS downloads HelixSR Scaler {VERSION} (about {ZIP_SIZE >> 20} MB, checked by SHA-256, GPL-3.0) "
-            f"and puts OptiScaler 0.9.4 with HelixSR built in next to the game's .exe ({where}). Files it replaces "
+            f"and puts OptiScaler with HelixSR built in next to the game's .exe ({where}). Files it replaces "
             f"are kept in the HelixSR folder's {BACKUP} and put back by Remove.")
     if installed(game.exe_folder):
         text += ' The OptiScaler.ini settings you have are kept.'

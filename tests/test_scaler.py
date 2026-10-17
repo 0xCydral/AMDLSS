@@ -195,7 +195,7 @@ def test_name_for_uses_scalers_own_order(tmp_path, game):
 
 def test_plan_text_names_the_package_and_what_remove_does(game):
     text = scaler.plan_text(type('G', (), {'exe_folder': str(game)})())
-    assert f'HelixSR Scaler {scaler.VERSION}' in text and scaler.VERSION == '1.0.6' and 'OptiScaler 0.9.4' in text and scaler.BACKUP in text
+    assert f'HelixSR Scaler {scaler.VERSION}' in text and scaler.VERSION == '1.0.6' and 'OptiScaler with HelixSR built in' in text and scaler.BACKUP in text
 
 
 # --- install_game, the game's HelixSR folder and an earlier install ------------------------------------------------

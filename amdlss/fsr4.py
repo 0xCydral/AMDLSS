@@ -593,7 +593,7 @@ def plan_text(game, route, source, data_dir):
     else:
         where = game.exe_folder or "the game's .exe folder"
         text = (f"AMDLSS downloads HelixSR Scaler {scaler.VERSION} (about {scaler.ZIP_SIZE >> 20} MB, checked by "
-                f"SHA-256) and puts OptiScaler 0.9.4 with HelixSR built in next to the game's .exe ({where}), then "
+                f"SHA-256) and puts OptiScaler with HelixSR built in next to the game's .exe ({where}), then "
                 f"points OptiScaler at {NAME} ({source.label}). Files it replaces are kept in the HelixSR folder's "
                 f"{scaler.BACKUP} and put back by Remove.")
     if not source.user:

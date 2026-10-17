@@ -11,7 +11,7 @@ This module:
 
   - fetches the pinned Luma UE release zip (resumable, SHA-256 checked, zip-slip checked) and unpacks it;
   - puts its files next to the game's .exe the way OptiScaler's own wiki pairs the two (page "Luma Unreal Engine
-    Luma UE", tested with OptiScaler 0.9.4, the version inside HelixSR Scaler): Luma's dxgi.dll becomes
+    Luma UE", tested with OptiScaler 0.9.4): Luma's dxgi.dll becomes
     ReShade64.dll, OptiScaler itself takes the name dxgi.dll, and OptiScaler.ini is set to load it
     ([Plugins] LoadReshade=true). Luma goes in first, so its dxgi.dll is out of the way when the Scaler install
     picks its own name;

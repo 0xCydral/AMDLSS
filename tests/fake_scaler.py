@@ -10,7 +10,7 @@ from amdlss import scaler
 TOP = scaler.TOP
 LIST = 'HelixSR-Scaler-package.txt'
 # The sections AMDLSS touches in the real file, with its own comment lines and CRLFs, so tests read like the real
-# ini (shipped by the package, OptiScaler 0.9.4 with HelixSR built in).
+# ini (shipped by the package, OptiScaler with HelixSR built in).
 INI = (b'; header\r\n'
        b'[HelixSR]\r\n; frame generation\r\nFrameGeneration=auto\r\nInt8=auto\r\n\r\n'
        b'[FrameGen]\r\nEnabled=auto\r\nFGInput=auto\r\nFGOutput=auto\r\nFGNvngxReplacement=auto\r\n'
