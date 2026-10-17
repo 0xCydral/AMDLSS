@@ -189,3 +189,22 @@ Not proven yet, and owed to stage 2:
   the history origin is the output subrect base, and the decode pass writes only inside the input viewport;
   `bCameraCut != 0` forces InReset=1 that frame and is counted as `camera-cut`; the viewports and the scale are logged
   when they change. decode shader 5112 bytes.
+- 2026-10-16: T8 two-pass TSR (history at 200%), built, not yet run. Found in `~/Downloads/dx12-spike/captures/title-history200.log`
+  (`D 152`, `D 153`, same command list): with the game's current settings TSR is `e32f96d4dc79be5b` UpdateHistory (groups
+  640x360; u0 = new 5120x2880 history, u1 = 1x1 dummy, u2 = 5120x2880 r8 metadata; inputs at the same registers as the
+  single-pass shader: u3 color, u4 translucency, u6 velocity, old history u11/u12) followed by `0b1375003bfb8294` resolve (groups
+  427x240; u0 = 2560x1440 output, u1 = 1280x720 half-size target, u2 = the history UpdateHistory wrote, same resource handle).
+  That is why `upscaler=none` in the perf log: only `1ff10c3ce95d3bcb` was known. The half-size target is written by the
+  resolve, so it is filled at the resolve. Built: `logic::tsr_pass_for_hash` (single / update_history / resolve), per-hash b0
+  layouts (`TsrLayout`, all default to the single-pass offsets because the DXIL of the new shaders only exists at run time and
+  was not available), the add-on dumps all three shaders as `tsr_<hash>.dxil`. UpdateHistory gathers the single-pass inputs and
+  keeps a pending snapshot per command list; the resolve takes it, checks that its u2 is the history UpdateHistory wrote and that
+  b0's history viewport is 1 to 4 times the output, and runs DLSS into the resolve's output (viewport = the output texture, not
+  b0's HistoryInfo), then fills u1. UpdateHistory is skipped only after one fully replaced frame (`TwoPassGate`); until then,
+  and after any failure, the game's UpdateHistory runs and only the resolve is replaced, so a failure shows a valid image
+  (a skipped UpdateHistory plus a failing resolve shows the stale history for one frame and is counted as
+  `twopass-stale-history-frame`). New accounting keys `twopass-update-skipped/kept`, `twopass-replaced`,
+  `twopass-resolve-fallback`, `fallback-twopass-*`; the DLSS tab shows the TSR layout; a replaced two-pass frame counts as DLSS in
+  `perf:`. `bash probe/dx12/dlss/build.sh` exit 0, selftest ok. To check on the first live run: the log lines in
+  `probe/dx12/dlss/README.md` ("Two-pass TSR"), `fallback-jitter` (would mean the b0 layout of `e32f96d4dc79be5b` differs), and
+  `twopass-stale-history-frame` staying 0.
