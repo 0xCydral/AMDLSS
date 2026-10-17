@@ -4,12 +4,13 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
-from . import (VERSION, covers, crashes, framegen, fsr4, games, gpu, helixsr, identify, logs, luma, reports, scaler,
-               update)
+from . import (VERSION, covers, crashes, dx12inject, framegen, fsr4, games, gpu, helixsr, identify, logs, luma,
+               reports, scaler, update)
 
 
 def check_parsing():
@@ -348,6 +349,63 @@ def check_luma():
         assert games.mark_inject(refuser).reason == games.NO_UPSCALER  # not an Unreal layout: the plain reason stays
 
 
+def check_dx12inject():
+    """The DirectX 12 add-on route: the layout each card gets, the ini, the placement and Remove, how a game is told
+    DirectX 12 from DirectX 11, and that the add-on and its ini are really shipped (in a frozen build they must be;
+    from source the add-on exists only after probe/dx12/dlss/build.sh). No network: the Luma files are stand-ins."""
+    nvidia, amd = gpu.Gpu('GeForce RTX 4070', '10de', '2786'), gpu.Gpu('Radeon RX 7800 XT', '1002', '747e')
+    assert dx12inject.layout([amd, nvidia]) == dx12inject.NVIDIA_LAYOUT         # a GeForce anywhere: the add-on alone
+    assert dx12inject.layout([amd]) == dx12inject.layout([]) == dx12inject.OTHER_LAYOUT   # the rest: with Scaler
+    assert dx12inject.reshade_name(dx12inject.NVIDIA_LAYOUT) == 'dxgi.dll'
+    assert dx12inject.reshade_name(dx12inject.OTHER_LAYOUT) == 'ReShade64.dll'  # OptiScaler takes dxgi.dll
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        ini = root / 'shipped.ini'
+        ini.write_bytes(b'; render_scale=game\nrender_scale=game\nother=1\n')
+        assert dx12inject.ini_bytes(ini) == b'; render_scale=game\nrender_scale=quality\nother=1\n'
+        (root / dx12inject.INI).write_bytes(b'render_scale=58\n')
+        assert dx12inject.kept_scale(root) == b'58'                              # Update keeps the player's mode
+        (root / dx12inject.INI).write_bytes(b'render_scale=a b\n')
+        assert dx12inject.kept_scale(root) == b'quality'
+        game = root / 'Game'
+        game.mkdir()
+        (game / 'dxgi.dll').write_bytes(b'the game already had one')
+        record = {'amdlss': VERSION, 'layout': dx12inject.NVIDIA_LAYOUT, 'moved': [], 'created': []}
+        dx12inject.install_into(game, [('dxgi.dll', b'ReShade'), (dx12inject.ADDON, root / 'shipped.ini'),
+                                       (dx12inject.INI, b'render_scale=quality\n')], record)
+        assert (game / 'dxgi.dll').read_bytes() == b'ReShade' and (game / dx12inject.INI).is_file()
+        assert [item['name'] for item in record['moved']] == ['dxgi.dll']
+        dx12inject.record_path(game).parent.mkdir(parents=True, exist_ok=True)
+        dx12inject.record_path(game).write_text(json.dumps(record), encoding='utf-8')
+        assert dx12inject.installed(game) and dx12inject.mark(games.Game(name='G', exe_folder=str(game))).state == games.INJECT12
+        dx12inject.remove(game)
+        assert not dx12inject.installed(game)
+        assert (game / 'dxgi.dll').read_bytes() == b'the game already had one'
+        assert sorted(p.name for p in game.iterdir()) == ['dxgi.dll']
+        # DirectX 11 or 12: DefaultEngine.ini first, then the graphics DLLs the .exe links, then a Shader Model 6 cache
+        binaries = root / 'Unreal' / 'Project' / 'Binaries' / 'Win64'
+        binaries.mkdir(parents=True)
+        entry = games.Game(name='U', folder=str(root / 'Unreal'), exe_folder=str(binaries))
+        assert games.unreal_rhi(entry)[0] == ''
+        caches = binaries.parent.parent / 'Content' / 'PipelineCaches' / 'Windows'
+        caches.mkdir(parents=True)
+        (caches / 'Project_PCD3D_SM5.stable.upipelinecache').write_bytes(b'x')
+        assert games.unreal_rhi(entry)[0] == ''                                  # SM5 runs on both APIs
+        (caches / 'Project_PCD3D_SM6.stable.upipelinecache').write_bytes(b'x')
+        assert games.unreal_rhi(entry)[0] == games.RHI_DX12
+        (binaries.parent.parent / 'Config').mkdir()
+        (binaries.parent.parent / 'Config' / 'DefaultEngine.ini').write_text('DefaultGraphicsRHI=DefaultGraphicsRHI_DX11\n')
+        assert games.unreal_rhi(entry)[0] == games.RHI_DX11                      # the engine's own answer wins
+    addon, shipped_ini = dx12inject.bundled(dx12inject.ADDON), dx12inject.bundled(dx12inject.INI)
+    assert shipped_ini is not None and b'render_scale=' in shipped_ini.read_bytes(), 'the add-on ini is not shipped'
+    if addon is None:   # from source before the add-on is built; a frozen build must always hold it
+        assert not hasattr(sys, '_MEIPASS'), 'the DirectX 12 add-on is missing from this binary'
+        print(f'    (add-on not built here: {dx12inject.BUILD_COMMAND})')
+    else:
+        data = addon.read_bytes()
+        assert 100 << 10 <= len(data) <= 50 << 20 and data[:2] == b'MZ', f'{addon} is not a plausible add-on'
+
+
 def check_running_game():
     locked = 'PermissionError: [WinError 5] Acceso denegado: "E:\\Games\\One\\dxgi.dll"'
     assert helixsr.plain_failure(locked, 'One') == helixsr.still_running_message('One')
@@ -489,7 +547,7 @@ def check_fsr4():
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_unsafe_folder, check_framegen, check_logging_switch,
                   check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
-                  check_helixsr, check_scaler, check_luma, check_running_game, check_zip_slip, check_update,
+                  check_helixsr, check_scaler, check_luma, check_dx12inject, check_running_game, check_zip_slip, check_update,
                   check_identify, check_covers, check_fsr4):
         check()
         print(f'ok  {check.__name__}')

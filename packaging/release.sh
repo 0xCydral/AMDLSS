@@ -9,10 +9,21 @@ ZSRC="Z:${SRC//\//\\}"     # the same path the way the Wine Python reads it (Z:\
 mkdir -p "$R"
 mountpoint -q /media/cydral/Data || udisksctl mount -b /dev/nvme1n1p2
 rm -rf "$R/dist" "$R/work"
+echo "== dx12 add-on"   # both binaries bundle it (dx12dlss\ inside), so a release without it is not a release
+bash probe/dx12/dlss/build.sh > "$R/dlss-build.log" 2>&1
+DLSS_RC=$?
+echo "dlss add-on build exit=$DLSS_RC"
+if [ "$DLSS_RC" -ne 0 ]; then
+    tail -n 20 "$R/dlss-build.log"
+    echo "release stopped: the DirectX 12 add-on did not build (log: $R/dlss-build.log)"
+    exit 1
+fi
 echo "== windows exe"
 timeout 900 amdlss-wine 'C:\Python312\python.exe' -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
     --onefile --name AMDLSS --icon "$ZSRC/amdlss.ico" \
-    --add-data "$ZSRC/amdlss.ico;." --hidden-import PIL.ImageTk \
+    --add-data "$ZSRC/amdlss.ico;." \
+    --add-data "$ZSRC/probe/dx12/dlss/out/amdlss_dx12_dlss.addon64;dx12dlss" \
+    --add-data "$ZSRC/probe/dx12/dlss/amdlss_dx12_dlss.ini;dx12dlss" --hidden-import PIL.ImageTk \
     --hidden-import PIL._tkinter_finder --distpath 'Z:\tmp\amdlss-rel\dist' --workpath 'Z:\tmp\amdlss-rel\work' \
     --specpath 'Z:\tmp\amdlss-rel\work' --paths "$ZSRC" \
     "$ZSRC/AMDLSS.pyw" > "$R/pyi-win.log" 2>&1
