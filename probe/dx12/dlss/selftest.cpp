@@ -95,6 +95,39 @@ int main()
 		assert(merge_ini("; enabled=5\n", { { "enabled", "1" } }) == "; enabled=5\nenabled=1\n"); // a commented key is not the key
 	}
 
+	// frame_stats: even series, a few spikes, one frame, none.
+	{
+		const auto approx = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+		FrameStats even = frame_stats(std::vector<double>(100, 10.0));
+		assert(even.frames == 100 && approx(even.avg_ms, 10) && approx(even.fps, 100) && approx(even.p99_ms, 10) && approx(even.low1_fps, 100));
+
+		std::vector<double> spiky(98, 10.0);
+		spiky.push_back(50.0);
+		spiky.push_back(50.0);
+		const FrameStats sp = frame_stats(spiky);   // 100 frames: the slowest 1% is one frame
+		assert(sp.frames == 100 && approx(sp.avg_ms, 10.8) && std::fabs(sp.fps - 1000 / 10.8) < 1e-9);
+		assert(approx(sp.p99_ms, 50) && approx(sp.low1_fps, 20));
+		std::vector<double> big(300, 10.0);
+		big[7] = big[100] = big[299] = 40.0;         // 300 frames: the slowest 1% is three frames, here all spikes
+		assert(approx(frame_stats(big).low1_fps, 25) && approx(frame_stats(big).p99_ms, 10));
+		std::vector<double> few = { 30.0, 10.0, 20.0 }; // unsorted input, under 100 frames: at least one frame
+		const FrameStats fs = frame_stats(few);
+		assert(approx(fs.avg_ms, 20) && approx(fs.p99_ms, 30) && approx(fs.low1_fps, 1000.0 / 30));
+
+		const FrameStats one = frame_stats({ 20.0 });
+		assert(one.frames == 1 && approx(one.avg_ms, 20) && approx(one.fps, 50) && approx(one.p99_ms, 20) && approx(one.low1_fps, 50));
+		const FrameStats none = frame_stats({});
+		assert(none.frames == 0 && none.avg_ms == 0 && none.fps == 0 && none.p99_ms == 0 && none.low1_fps == 0);
+
+		assert(std::strcmp(upscaler_label(5, 0), "DLSS") == 0 && std::strcmp(upscaler_label(0, 3), "TSR") == 0);
+		assert(std::strcmp(upscaler_label(5, 1), "mixed") == 0 && std::strcmp(upscaler_label(0, 0), "none") == 0);
+
+		assert(perf_line(12.34, sp, "DLSS", 1552, 873, 2560, 1440) ==
+			"perf: t=12.3 frames=100 avg_ms=10.80 fps=92.6 low1_fps=20.0 p99_ms=50.00 upscaler=DLSS render=1552x873 output=2560x1440 ratio=0.606");
+		assert(perf_line(5.0, none, "none", 0, 0, 0, 0) ==
+			"perf: t=5.0 frames=0 avg_ms=0.00 fps=0.0 low1_fps=0.0 p99_ms=0.00 upscaler=none render=0x0 output=0x0 ratio=0.000");
+	}
+
 	std::puts("dlss logic selftest ok");
 	return 0;
 }

@@ -124,6 +124,7 @@ Config g_cfg;
 std::string g_dir, g_log_path, g_ini_path;
 FILETIME g_ini_time = {};
 bool g_reset_next = false; // set when TSR ran in between or the ini changed: DLSS must not trust its history
+std::atomic<uint32_t> g_perf_seconds { 5 }; // perf_report_seconds (0 = off), written by load_ini, read on every present
 
 void log_line(const char *fmt, ...)
 {
@@ -1143,6 +1144,8 @@ void load_ini(bool reload)
 		g_cfg.render_preset = 0;
 	}
 	g_cfg.auto_exposure = ini.number("auto_exposure", 1) != 0;
+	const double perf_seconds = ini.number("perf_report_seconds", 5);
+	g_perf_seconds = perf_seconds > 0 ? static_cast<uint32_t>(perf_seconds) : 0;
 
 	const std::string after = config_summary(g_cfg);
 	if (!reload)
@@ -1220,6 +1223,42 @@ bool commit_config(Config c)
 	return true;
 }
 
+// ---- frame timing -------------------------------------------------------------------------------------------
+
+// Present timestamps feed a report window of perf_report_seconds of wall time (0 disables). The present path only
+// pushes a double under g_perf.m; statistics and the log line are made when a window closes. The upscale dispatches
+// count what ran on them in the same window.
+struct Perf
+{
+	std::mutex m;
+	LONGLONG load_qpc = 0, last_qpc = 0, window_qpc = 0;
+	std::vector<double> ms;
+	uint64_t dlss = 0, tsr = 0;
+	bool have_last = false; // the overlay shows the latest closed window
+	logic::FrameStats last;
+	const char *last_upscaler = "none";
+	double last_t = 0;
+} g_perf;
+
+LONGLONG qpc_now()
+{
+	LARGE_INTEGER v;
+	QueryPerformanceCounter(&v);
+	return v.QuadPart;
+}
+LONGLONG qpc_freq()
+{
+	static const LONGLONG f = [] { LARGE_INTEGER v; QueryPerformanceFrequency(&v); return v.QuadPart; }();
+	return f;
+}
+
+// One upscale dispatch: DLSS evaluated successfully, or the game's TSR ran (disabled or any fallback).
+void perf_count_upscale(bool dlss)
+{
+	std::lock_guard<std::mutex> lock(g_perf.m);
+	++(dlss ? g_perf.dlss : g_perf.tsr);
+}
+
 // ---- the hook -----------------------------------------------------------------------------------------------
 
 // Counts since the last report, so a reason that keeps firing is visible even after its first three detailed lines.
@@ -1287,6 +1326,7 @@ void status_path(Status::Path path, const char *reason = "")
 bool give_up(const char *key, const std::string &why)
 {
 	status_path(Status::Path::fallback, key);
+	perf_count_upscale(false);
 	stat_count((std::string("fallback-") + key).c_str());
 	if (g_ngx.evals > 0)
 		g_reset_next = true;
@@ -1522,6 +1562,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 			g_status.eval_result = str_format("0x%08x %s", static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
 		}
 	}
+	perf_count_upscale(ok);
 
 	std::vector<D3D12_RESOURCE_BARRIER> back;
 	for (ID3D12Resource *g : generated_res)
@@ -1572,6 +1613,7 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			if (g_ngx.evals > 0)
 				g_reset_next = true;
 			status_path(Status::Path::disabled);
+			perf_count_upscale(false);
 			return false;
 		}
 		device *dev = cmd_list->get_device();
@@ -1647,6 +1689,57 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 	return replaced;
 }
 
+// Present: one timestamp per frame. When the window's wall time is over, its statistics are logged as one `perf:` line.
+void on_present(command_queue *, swapchain *, const rect *, const rect *, uint32_t, const rect *)
+{
+	const LONGLONG now = qpc_now(), freq = qpc_freq();
+	const uint32_t seconds = g_perf_seconds;
+	std::vector<double> ms;
+	uint64_t dlss = 0, tsr = 0;
+	{
+		std::lock_guard<std::mutex> lock(g_perf.m);
+		if (seconds == 0)
+		{
+			g_perf.last_qpc = 0; // off: forget the window so turning it on again starts clean
+			g_perf.ms.clear();
+			g_perf.dlss = g_perf.tsr = 0;
+			return;
+		}
+		if (g_perf.last_qpc == 0)
+			g_perf.window_qpc = now;
+		else
+			g_perf.ms.push_back(static_cast<double>(now - g_perf.last_qpc) * 1000.0 / freq);
+		g_perf.last_qpc = now;
+		if (g_perf.ms.empty() || now - g_perf.window_qpc < static_cast<LONGLONG>(seconds) * freq)
+			return;
+		ms.swap(g_perf.ms);
+		dlss = g_perf.dlss;
+		tsr = g_perf.tsr;
+		g_perf.dlss = g_perf.tsr = 0;
+		g_perf.window_qpc = now;
+	}
+
+	uint32_t rw, rh, ow, oh;
+	{
+		std::lock_guard<std::mutex> lock(g_status_m);
+		rw = g_status.rw;
+		rh = g_status.rh;
+		ow = g_status.ow;
+		oh = g_status.oh;
+	}
+	const logic::FrameStats stats = logic::frame_stats(std::move(ms));
+	const char *upscaler = logic::upscaler_label(dlss, tsr);
+	const double t = static_cast<double>(now - g_perf.load_qpc) / freq;
+	{
+		std::lock_guard<std::mutex> lock(g_perf.m);
+		g_perf.last = stats;
+		g_perf.last_upscaler = upscaler;
+		g_perf.last_t = t;
+		g_perf.have_last = true;
+	}
+	log_line("%s", logic::perf_line(t, stats, upscaler, rw, rh, ow, oh).c_str());
+}
+
 // ---- the "DLSS" tab of ReShade's overlay -----------------------------------------------------------------------------
 
 // The overlay draws on another call path than the dispatch hooks. It only copies g_status and g_cfg under their own short
@@ -1675,6 +1768,26 @@ void draw_status(const Status &st, bool dispatching)
 	ImGui::TextWrapped("Mode follows the game's Anti-Aliasing Level and resolution.");
 }
 
+// Frame timing of the latest closed report window (perf_report_seconds), copied under its lock.
+void draw_perf()
+{
+	bool have;
+	logic::FrameStats s;
+	const char *upscaler;
+	{
+		std::lock_guard<std::mutex> lock(g_perf.m);
+		have = g_perf.have_last;
+		s = g_perf.last;
+		upscaler = g_perf.last_upscaler;
+	}
+	if (g_perf_seconds == 0)
+		ImGui::TextDisabled("Frame timing: off (perf_report_seconds=0)");
+	else if (!have)
+		ImGui::TextDisabled("Frame timing: waiting for the first %u s window", g_perf_seconds.load());
+	else
+		ImGui::Text("Frame timing (last window): %.1f fps, avg %.2f ms, 1%% low %.1f fps, upscaler %s", s.fps, s.avg_ms, s.low1_fps, upscaler);
+}
+
 void draw_overlay(reshade::api::effect_runtime *)
 {
 	static Config edit; // what the widgets show; refreshed from g_cfg whenever no widget is being edited
@@ -1696,6 +1809,7 @@ void draw_overlay(reshade::api::effect_runtime *)
 
 	ImGui::SeparatorText("Status");
 	draw_status(st, dispatching);
+	draw_perf();
 
 	// Checkboxes and combos apply on the click; typed numbers apply when the field is left (Enter or click away).
 	bool changed = false;
@@ -1779,6 +1893,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		g_log_path = g_dir + "amdlss_dx12_dlss.log";
 
 		g_ini_path = g_dir + "amdlss_dx12_dlss.ini";
+		g_perf.load_qpc = qpc_now();
 		load_ini(false);
 
 		reshade::register_overlay("DLSS", draw_overlay);
@@ -1801,6 +1916,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		reshade::register_event<addon_event::bind_descriptor_tables>(on_bind_descriptor_tables);
 		reshade::register_event<addon_event::bind_render_targets_and_depth_stencil>(on_bind_render_targets);
 		reshade::register_event<addon_event::dispatch>(on_dispatch);
+		reshade::register_event<addon_event::present>(on_present);
 		break;
 	}
 	case DLL_PROCESS_DETACH:

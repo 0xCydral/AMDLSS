@@ -1,18 +1,21 @@
 /*
  * Pure logic of the DLSS add-on (no Windows, no ReShade, no NGX), so selftest.cpp can check it on the Linux host
  * inside the build container: Halton jitter, jitter phase matching, preset choice, UE5 velocity decode, ini parsing
- * and merging, DLSS render preset names.
+ * and merging, DLSS render preset names, frame-time statistics.
  */
 #pragma once
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace logic
 {
@@ -283,5 +286,53 @@ inline std::string merge_ini(const std::string &text, const std::map<std::string
 			out += key + "=" + value + "\n";
 		}
 	return out;
+}
+
+// ---- frame-time statistics for the perf report ---------------------------------------------------------------------
+
+struct FrameStats
+{
+	size_t frames = 0;
+	double avg_ms = 0, fps = 0, p99_ms = 0, low1_fps = 0;
+};
+
+// Statistics of one report window from its frame times in ms. p99 is the nearest-rank 99th percentile; the 1% low is
+// 1000 / (mean of the slowest max(1, floor(n / 100)) frames). An empty series gives all zeros.
+inline FrameStats frame_stats(std::vector<double> ms)
+{
+	FrameStats s;
+	s.frames = ms.size();
+	if (ms.empty())
+		return s;
+	std::sort(ms.begin(), ms.end());
+	const size_t n = ms.size();
+	double sum = 0;
+	for (double v : ms)
+		sum += v;
+	s.avg_ms = sum / n;
+	s.p99_ms = ms[static_cast<size_t>(std::ceil(0.99 * n)) - 1];
+	const size_t k = n >= 100 ? n / 100 : 1; // no std::max: windows.h defines a max macro in the add-on build
+	double slow = 0;
+	for (size_t i = n - k; i < n; ++i)
+		slow += ms[i];
+	slow /= k;
+	s.fps = s.avg_ms > 0 ? 1000.0 / s.avg_ms : 0;
+	s.low1_fps = slow > 0 ? 1000.0 / slow : 0;
+	return s;
+}
+
+// What ran on the upscale dispatches of a window: counts of successful DLSS evaluates and of dispatches the game's TSR took.
+inline const char *upscaler_label(uint64_t dlss, uint64_t tsr)
+{
+	return dlss > 0 && tsr > 0 ? "mixed" : dlss > 0 ? "DLSS" : tsr > 0 ? "TSR" : "none";
+}
+
+// The line a script parses; `t` is seconds since the add-on loaded.
+inline std::string perf_line(double t, const FrameStats &s, const char *upscaler, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh)
+{
+	char buf[256];
+	snprintf(buf, sizeof(buf), "perf: t=%.1f frames=%llu avg_ms=%.2f fps=%.1f low1_fps=%.1f p99_ms=%.2f upscaler=%s render=%ux%u output=%ux%u ratio=%.3f",
+		t, static_cast<unsigned long long>(s.frames), s.avg_ms, s.fps, s.low1_fps, s.p99_ms, upscaler, rw, rh, ow, oh, ow != 0 ? static_cast<double>(rw) / ow : 0.0);
+	return buf;
 }
 } // namespace logic

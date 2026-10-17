@@ -81,7 +81,7 @@ It runs the probe build once if the ReShade headers or the MSVC toolchain (clang
   `imconfig.h`, checked against pinned sha256 values. The widgets run in ReShade's own ImGui through its function table;
   the add-on does not load without an ImGui-enabled ReShade;
 - compiles and runs `selftest.cpp` (Halton, phase matching, preset choice, velocity decode, ini parsing and merging,
-  render preset names) on the Linux side of the container;
+  render preset names, frame-time statistics and the perf line) on the Linux side of the container;
 - compiles and links the add-on with clang-cl `/MT`, as for the probe.
 
 `nvngx_dlss.dll` sha256: `d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e`
@@ -123,6 +123,7 @@ succeeds in the log.
 | `mv_encoding` | gamma | `gamma` (what UE's TSR shader does) or `linear` (the unbias alone) |
 | `fill_half_res` | 1 | fill u1 (TSR's half-size output, read by bloom and eye adaptation) from u0 after the evaluate |
 | `never_fallback_after_start` | 1 | after DLSS started, skip TSR even when no evaluate is possible and keep the previous u0 |
+| `perf_report_seconds` | 5 | wall-time length of a frame-time report window, see below; 0 turns the report off |
 
 ## Live ini and the game's own TSR shader
 
@@ -171,6 +172,23 @@ ReShade's overlay gets a **DLSS** tab (`reshade::register_overlay`, removed agai
   one: `evaluate-ok`, `evaluate-failed`, each `fallback-<reason>`, `size-mismatch-depth-substituted`,
   `size-mismatch-kept-previous-output`, and the latest mismatch with u3, u6 and u14 in full (size, formats, view
   type). The first three mismatches are also logged in full when they happen.
+
+## Frame timing (DLSS vs TSR)
+
+Each `present` takes a `QueryPerformanceCounter` timestamp. Every `perf_report_seconds` of wall time the log gets one
+line, so the same game scene can be compared with `enabled=1` (DLSS) and `enabled=0` (TSR) by a script:
+
+```
+perf: t=<s since load, 1 dec> frames=<n> avg_ms=<2 dec> fps=<1 dec> low1_fps=<1 dec> p99_ms=<2 dec> upscaler=<DLSS|TSR|mixed|none> render=<WxH> output=<WxH> ratio=<3 dec>
+```
+
+- `frames` is the number of present-to-present deltas in the window; `fps` is 1000 / `avg_ms`; `p99_ms` is the nearest-rank
+  99th percentile; `low1_fps` is 1000 / the mean of the slowest 1% of frame times (at least one frame).
+- `upscaler`: `DLSS` if every upscale dispatch in the window was a successful DLSS evaluate, `TSR` if every one went to
+  the game's TSR (`enabled=0` or any fallback), `mixed` if both happened, `none` if no upscale dispatch ran. A frame that
+  kept the previous DLSS output (no usable depth) counts as neither.
+- `render`/`output` are the viewport sizes of the last upscale dispatch (`0x0` before the first one).
+- The DLSS tab shows fps, average ms, 1% low and the upscaler of the latest window under Status.
 
 ## Proxies
 
