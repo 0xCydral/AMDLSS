@@ -41,9 +41,11 @@ HISTORY_SEND_RUNS = 5       # snapshots Collect logs and Send logs carry per gam
 SESSION_LOG = 'amdlss-install.log'
 CRASHES = 'crashes.txt'
 PROTON_LOG = 'proton.log'
-# What is collected from every place HelixSR or OptiScaler may write to (matched on the lower-cased name).
-PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'optiscaler*.ini', 'fakenvapi*.ini',
-            'helixsr-install*.json', 'helixsr.ini', 'amdlss-fsr4*.json', 'amdlss-scaler*.json')
+# What is collected from every place HelixSR, OptiScaler or ReShade may write to (matched on the lower-cased name).
+# ReShade.log carries the add-on registration (Luma's own messages too) and ReShade.ini Luma's settings.
+PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'reshade*.log', 'optiscaler*.ini',
+            'fakenvapi*.ini', 'reshade*.ini', 'helixsr-install*.json', 'helixsr.ini', 'amdlss-fsr4*.json',
+            'amdlss-scaler*.json')
 # DLLs whose owner is worth saying: the upscalers and the files OptiScaler and HelixSR take their names.
 UPSCALER_PREFIXES = ('amd_fidelityfx', 'helixsr', 'nvngx', 'libxess', 'ffx_', 'fakenvapi', 'optiscaler')
 OPTI_NAMES = ('dxgi.dll', 'winmm.dll', 'version.dll', 'dbghelp.dll', 'd3d12.dll', 'wininet.dll', 'winhttp.dll')

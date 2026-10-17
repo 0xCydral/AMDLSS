@@ -53,7 +53,6 @@ SCALER_NAME = 'dxgi.dll'                      # what OptiScaler is called next t
 RESHADE = 'ReShade64.dll'                     # what Luma's dxgi.dll becomes: the name OptiScaler loads it under
 RENAME = {SCALER_NAME: RESHADE}
 RECORD = 'amdlss-luma.json'                   # AMDLSS's record, inside the game's HelixSR folder
-SETTINGS = 'Luma.ini'                         # Luma's own settings file, written by its overlay (never by AMDLSS)
 
 
 def install_folder(data_dir):
@@ -239,8 +238,9 @@ def plan_text(game):
             f"checked by SHA-256, custom MIT licence) and puts it next to the game's .exe ({where}), with HelixSR "
             f"Scaler {scaler.VERSION} (about {scaler.ZIP_SIZE >> 20} MB, checked by SHA-256).\n\n"
             f"{FULL_NAME} replaces the game's TAA with a DLSS call, and HelixSR Scaler runs that call on your card, "
-            f"the way it runs a game's own DLSS. It needs the game to run in DirectX 11; some games need a '-dx11' "
-            f"launch option for that, and AMDLSS cannot check it for you.\n\n"
+            f"the way it runs a game's own DLSS. It needs the game to run in DirectX 11: check the game's graphics "
+            f"settings for a DirectX 11 mode, or add '-dx11' to its launch options (AMDLSS cannot check this for "
+            f"you).\n\n"
             f"Files it replaces are kept in the HelixSR folder's {scaler.BACKUP} and put back by Remove.\n\n"
             f'{gamelist.WARNINGS}\n\nInstall into {game.name}?')
 
@@ -251,8 +251,11 @@ def after_text(game):
             f"Start the game and press Home: Luma's overlay (with ReShade's) opens. Set 'Upscaler/Super Resolution' "
             f"to DLSS - the game's own menu has no upscaler entry, and this is the call HelixSR runs. Press Insert "
             f"for OptiScaler's overlay: it should name DLSS as the input.\n\n"
+            f"A Luma tab that opens empty - no settings at all - means the game is running DirectX 12, which {NAME} "
+            f"cannot use. Pick DirectX 11 in the game's own graphics settings if it offers one, or add '-dx11' to "
+            f"its launch options (Steam: right-click the game, Properties, Launch Options), and start it again.\n\n"
             f"If the frame rate is capped like Vsync, turn Vsync off in OptiScaler's overlay. If the game crashes or "
-            f"shows a non-DirectX 11 device error, set DontCreateD3D12DeviceForLuma=true in its OptiScaler.ini.\n\n"
+            f"shows a non-DirectX 11 device error, set CreateD3D12DeviceForLuma=false in its OptiScaler.ini.\n\n"
             f"Luma UE is experimental here: the pairing is the one its and OptiScaler's authors document and test, "
             f"not one AMDLSS has tested in a game.\n\n"
             f"If it looks unchanged in game, press Collect logs and send the zip."

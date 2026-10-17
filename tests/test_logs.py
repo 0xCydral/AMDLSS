@@ -18,7 +18,8 @@ INFO = {'gpu': [{'Name': 'AMD Radeon RX 7800 XT', 'DriverVersion': '32.0.21001.9
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
-    """A game folder with logs in all three places HelixSR and OptiScaler write to, under a fake user profile."""
+    """A game folder with logs in all three places HelixSR, OptiScaler and ReShade write to, under a fake user
+    profile."""
     monkeypatch.setattr(logs, 'user_names', lambda: [USER])
     root = tmp_path / 'Users' / USER / 'Games' / 'Fake Game'
     exe, helix, fsr = root / 'bin', root / 'bin' / 'HelixSR', root / 'plugins'
@@ -31,6 +32,8 @@ def fake(tmp_path, monkeypatch):
     (exe / 'OptiScaler.log').write_bytes(f'[Info] loaded from C:\\Users\\{USER}\\Games\\Fake Game\\bin\r\n'.encode())
     (exe / 'OptiScaler.ini').write_bytes(b'[Log]\r\nLogToFile=true\r\n')
     (exe / 'fakenvapi.ini').write_bytes(b'[fakenvapi]\r\n')
+    (exe / 'ReShade.log').write_bytes(f'[1] | INFO | loaded from C:\\Users\\{USER}\\Games\\Fake Game\\bin\\ReShade64.dll\r\n'.encode())
+    (exe / 'ReShade.ini').write_bytes(b'[ADDON]\r\nAddonPath=\r\n')
     (helix / 'helixsr.log').write_bytes(b'network ready\n')
     (helix / 'helixsr-install.json').write_text(json.dumps({'folder': str(root), 'route': 'optiscaler'}), 'utf-8')
     (helix / 'helixsr.dll').write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
@@ -62,11 +65,14 @@ def test_the_zip_holds_every_log_from_every_place(fake):
     held = entries(path)
     assert sorted(held) == ['crashes.txt', 'exe-folder/HelixSR/helixsr-install.json',
                             'exe-folder/HelixSR/helixsr.log', 'exe-folder/OptiScaler.ini',
-                            'exe-folder/OptiScaler.log', 'exe-folder/fakenvapi.ini',
+                            'exe-folder/OptiScaler.log', 'exe-folder/ReShade.ini',
+                            'exe-folder/ReShade.log', 'exe-folder/fakenvapi.ini',
                             'files.txt', 'fsr-dll-folder/helixsr.log', 'system.txt']
     assert 'not collected on Linux' in held['crashes.txt'] and 'PROTON_LOG=1' in held['crashes.txt']
     assert held['fsr-dll-folder/helixsr.log'] == 'fsr drop-in log\n'
     assert held['exe-folder/OptiScaler.ini'] == '[Log]\r\nLogToFile=true\r\n'
+    assert held['exe-folder/ReShade.ini'] == '[ADDON]\r\nAddonPath=\r\n'
+    assert held['exe-folder/ReShade.log'].startswith('[1] | INFO | loaded from C:\\Users\\<user>\\Games\\Fake Game\\bin\\ReShade64.dll')
     assert not list(fake[3].glob('*.part'))
 
 
