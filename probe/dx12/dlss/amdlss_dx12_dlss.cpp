@@ -26,6 +26,41 @@
 
 #include <d3d12.h>
 
+#include <nvsdk_ngx.h>
+
+#include <string>
+
+// The NGX calls go through these pointers. They start at the SDK's own functions, whose loader finds NVIDIA's NGX core
+// (_nvngx.dll next to the .exe, else the driver's registry key). A card without NVIDIA's driver has none, and Init fails
+// with FeatureNotSupported (seen on an RX 6600). HelixSR Scaler (OptiScaler, the game's dxgi.dll in the AMD layout)
+// exports the same NGX D3D12 API, so then ensure_ngx points them at its exports and HelixSR answers.
+namespace ngx_api
+{
+using InitFn = NVSDK_NGX_Result(NVSDK_CONV *)(const char *, NVSDK_NGX_EngineType, const char *, const wchar_t *, ID3D12Device *, const NVSDK_NGX_FeatureCommonInfo *, NVSDK_NGX_Version);
+using ParamsFn = NVSDK_NGX_Result(NVSDK_CONV *)(NVSDK_NGX_Parameter **);
+using CreateFn = NVSDK_NGX_Result(NVSDK_CONV *)(ID3D12GraphicsCommandList *, NVSDK_NGX_Feature, NVSDK_NGX_Parameter *, NVSDK_NGX_Handle **);
+using EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV *)(ID3D12GraphicsCommandList *, const NVSDK_NGX_Handle *, const NVSDK_NGX_Parameter *, PFN_NVSDK_NGX_ProgressCallback);
+
+InitFn init = &NVSDK_NGX_D3D12_Init_with_ProjectID;
+ParamsFn capability = &NVSDK_NGX_D3D12_GetCapabilityParameters;
+ParamsFn allocate = &NVSDK_NGX_D3D12_AllocateParameters;
+CreateFn create = &NVSDK_NGX_D3D12_CreateFeature;
+EvaluateFn evaluate = &NVSDK_NGX_D3D12_EvaluateFeature;
+std::string provider = "NGX SDK (NVIDIA driver)";
+
+NVSDK_NGX_Result NVSDK_CONV create_feature(ID3D12GraphicsCommandList *cl, NVSDK_NGX_Feature id, NVSDK_NGX_Parameter *p, NVSDK_NGX_Handle **h)
+{
+	return create(cl, id, p, h);
+}
+// OptiScaler exports EvaluateFeature but not EvaluateFeature_C; with no progress callback the two are the same call.
+NVSDK_NGX_Result NVSDK_CONV evaluate_feature(ID3D12GraphicsCommandList *cl, const NVSDK_NGX_Handle *h, const NVSDK_NGX_Parameter *p, PFN_NVSDK_NGX_ProgressCallback_C)
+{
+	return evaluate(cl, h, p, nullptr);
+}
+}
+// The DLSS helpers below are inline and call these two names; route them through the pointers.
+#define NVSDK_NGX_D3D12_CreateFeature ngx_api::create_feature
+#define NVSDK_NGX_D3D12_EvaluateFeature_C ngx_api::evaluate_feature
 #include <nvsdk_ngx_helpers.h>
 
 #include <atomic>
@@ -976,13 +1011,40 @@ bool ensure_ngx(ID3D12Device *dev)
 	info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
 	info.LoggingInfo.DisableOtherLoggingSinks = false;
 
-	NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", data.c_str(), dev, &info, NVSDK_NGX_Version_API);
+	NVSDK_NGX_Result r = ngx_api::init(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", data.c_str(), dev, &info, NVSDK_NGX_Version_API);
 	log_line("NVSDK_NGX_D3D12_Init_with_ProjectID: 0x%08x %s (NGX logs in %sngx, project id %s)", static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str(), g_dir.c_str(), kProjectId);
 	if (NVSDK_NGX_FAILED(r))
-		return false;
+	{
+		// No NVIDIA NGX core: use HelixSR Scaler's NGX exports when the game loaded it (see ngx_api).
+		HMODULE scaler = GetModuleHandleW(L"dxgi.dll");
+		const auto find = [scaler](const char *name) { return scaler != nullptr ? GetProcAddress(scaler, name) : nullptr; };
+		const auto i = reinterpret_cast<ngx_api::InitFn>(find("NVSDK_NGX_D3D12_Init_with_ProjectID"));
+		const auto c = reinterpret_cast<ngx_api::ParamsFn>(find("NVSDK_NGX_D3D12_GetCapabilityParameters"));
+		const auto a = reinterpret_cast<ngx_api::ParamsFn>(find("NVSDK_NGX_D3D12_AllocateParameters"));
+		const auto cr = reinterpret_cast<ngx_api::CreateFn>(find("NVSDK_NGX_D3D12_CreateFeature"));
+		const auto e = reinterpret_cast<ngx_api::EvaluateFn>(find("NVSDK_NGX_D3D12_EvaluateFeature"));
+		char path[MAX_PATH] = "";
+		if (scaler != nullptr)
+			GetModuleFileNameA(scaler, path, MAX_PATH);
+		if (i == nullptr || c == nullptr || a == nullptr || cr == nullptr || e == nullptr)
+		{
+			log_line("no NVIDIA NGX core, and the loaded dxgi.dll (%s) exports no NGX D3D12 API, so it is not HelixSR Scaler: DLSS is unavailable", path[0] != '\0' ? path : "none");
+			return false;
+		}
+		ngx_api::init = i;
+		ngx_api::capability = c;
+		ngx_api::allocate = a;
+		ngx_api::create = cr;
+		ngx_api::evaluate = e;
+		ngx_api::provider = std::string("HelixSR Scaler's NGX exports in ") + path;
+		r = ngx_api::init(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", data.c_str(), dev, &info, NVSDK_NGX_Version_API);
+		log_line("no NVIDIA NGX core; NVSDK_NGX_D3D12_Init_with_ProjectID through %s: 0x%08x %s", ngx_api::provider.c_str(), static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str());
+		if (NVSDK_NGX_FAILED(r))
+			return false;
+	}
 
 	NVSDK_NGX_Parameter *caps = nullptr;
-	r = NVSDK_NGX_D3D12_GetCapabilityParameters(&caps);
+	r = ngx_api::capability(&caps);
 	int available = 0, needs_driver = 0;
 	if (NVSDK_NGX_SUCCEED(r) && caps != nullptr)
 	{
@@ -1007,7 +1069,7 @@ bool ensure_feature(ID3D12GraphicsCommandList *cl, uint32_t rw, uint32_t rh, uin
 	g_ngx.feature = nullptr;
 	if (g_ngx.params == nullptr)
 	{
-		const NVSDK_NGX_Result a = NVSDK_NGX_D3D12_AllocateParameters(&g_ngx.params);
+		const NVSDK_NGX_Result a = ngx_api::allocate(&g_ngx.params);
 		if (NVSDK_NGX_FAILED(a) || g_ngx.params == nullptr)
 		{
 			log_line("NVSDK_NGX_D3D12_AllocateParameters: 0x%08x %s", static_cast<unsigned>(a), narrow(GetNGXResultAsString(a)).c_str());
