@@ -1436,7 +1436,10 @@ void on_reshade_present(effect_runtime *runtime)
 {
 	static bool was_down = false;
 	const bool down = runtime->is_key_pressed(kHotkey) || (GetAsyncKeyState(kHotkey) & 0x8000) != 0;
-	if (down && !was_down && g_mode == Mode::idle)
+	// A file named amdlss_dx12_probe.f10 next to the add-on acts as one F10 press, for runs with no keyboard input.
+	const std::string f10_file = g_dir + "amdlss_dx12_probe.f10";
+	const bool file_press = g_presents % 60 == 0 && g_mode == Mode::idle && DeleteFileA(f10_file.c_str()) != 0;
+	if (((down && !was_down) || file_press) && g_mode == Mode::idle)
 		g_mode = Mode::armed;
 	was_down = down;
 
