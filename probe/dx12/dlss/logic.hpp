@@ -364,6 +364,213 @@ inline std::string merge_ini(const std::string &text, const std::map<std::string
 	return out;
 }
 
+// ---- render scale (r.ScreenPercentage in the game's Engine.ini) ------------------------------------------------------
+
+// The DLSS mode names of the ini key render_scale and the percentage each one asks the game to render at (the nominal
+// ratios of preset_for_ratio). Index 0 is "game": leave the game's own scale alone.
+struct RenderScaleInfo { const char *name; const char *label; double percent; };
+constexpr RenderScaleInfo kRenderScales[] = {
+	{ "game", "Game default", 0 }, { "dlaa", "DLAA", 100 }, { "quality", "Quality", 66.7 },
+	{ "balanced", "Balanced", 58 }, { "performance", "Performance", 50 }, { "ultra_performance", "Ultra Performance", 33.3 },
+};
+constexpr int kRenderScaleCount = static_cast<int>(sizeof(kRenderScales) / sizeof(kRenderScales[0]));
+
+inline std::string lower(std::string s)
+{
+	for (char &c : s)
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	return s;
+}
+
+// A mode name in any case, or a number from 33 to 100, -> percentage (0 = game); -1 for anything else.
+inline double parse_render_scale(const std::string &text)
+{
+	const std::string t = lower(trim(text));
+	for (const RenderScaleInfo &r : kRenderScales)
+		if (t == r.name)
+			return r.percent;
+	char *end = nullptr;
+	const double v = std::strtod(t.c_str(), &end);
+	return !t.empty() && *end == '\0' && v >= 33 && v <= 100 ? v : -1;
+}
+
+// Index into kRenderScales of a percentage, -1 when it is a custom number.
+inline int render_scale_index(double percent)
+{
+	for (int i = 0; i < kRenderScaleCount; ++i)
+		if (std::fabs(percent - kRenderScales[i].percent) < 0.05)
+			return i;
+	return -1;
+}
+
+// One decimal at most, no trailing ".0": 66.7, 58, 50.
+inline std::string percent_text(double percent)
+{
+	char buf[32];
+	std::snprintf(buf, sizeof(buf), "%.1f", percent);
+	std::string s = buf;
+	if (s.size() > 2 && s.compare(s.size() - 2, 2, ".0") == 0)
+		s.resize(s.size() - 2);
+	return s;
+}
+
+// What the ini stores for a percentage: the mode name, or the number for a custom value.
+inline std::string render_scale_text(double percent)
+{
+	const int i = render_scale_index(percent);
+	return i >= 0 ? kRenderScales[i].name : percent_text(percent);
+}
+
+// The project name UE builds its config folder from: the folder two levels above the exe's folder when that sits under
+// "Binaries" (<game>\<Project>\Binaries\Win64\<exe>), else the exe name before "-Win64". Empty when neither fits.
+inline std::string project_name_from_exe(const std::string &exe_path)
+{
+	std::vector<std::string> parts;
+	size_t pos = 0;
+	while (pos <= exe_path.size())
+	{
+		size_t end = exe_path.find_first_of("\\/", pos);
+		if (end == std::string::npos)
+			end = exe_path.size();
+		parts.push_back(exe_path.substr(pos, end - pos));
+		pos = end + 1;
+	}
+	const size_t n = parts.size();
+	if (n >= 4 && !parts[n - 4].empty() && lower(parts[n - 3]) == "binaries")
+		return parts[n - 4];
+	const size_t dash = lower(parts.back()).find("-win64");
+	return dash == std::string::npos ? "" : parts.back().substr(0, dash);
+}
+
+// Engine.ini text -> Engine.ini text with r.ScreenPercentage set in [SystemSettings]. percent > 0: every
+// r.ScreenPercentage line of that section is replaced by one marked line pair (kept where the first one was, else right
+// under the header, else in a new section at the end). percent == 0: only a pair with the marker above is removed, so a
+// player's own r.ScreenPercentage stays. A [SystemSettings] section this leaves empty loses its header. Every other
+// line, each line's own ending (LF or CRLF; CRLF for lines the add-on adds to a file with none) and a BOM are kept.
+constexpr const char *kScaleMarker = "; amdlss_dx12_dlss render_scale";
+
+inline std::string set_screen_percentage(const std::string &input, double percent)
+{
+	struct Line { std::string body, term; };
+	const bool want = percent > 0;
+	std::string text = input, bom;
+	if (text.compare(0, 3, "\xEF\xBB\xBF") == 0)
+	{
+		bom = text.substr(0, 3);
+		text.erase(0, 3);
+	}
+	const std::string eol = text.find('\n') != std::string::npos && text.find("\r\n") == std::string::npos ? "\n" : "\r\n";
+
+	std::vector<Line> lines;
+	for (size_t pos = 0; pos < text.size();)
+	{
+		const size_t nl = text.find('\n', pos);
+		Line l;
+		l.body = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+		pos = nl == std::string::npos ? text.size() : nl + 1;
+		if (nl != std::string::npos)
+			l.term = "\n";
+		if (!l.body.empty() && l.body.back() == '\r' && nl != std::string::npos)
+		{
+			l.body.pop_back();
+			l.term = "\r\n";
+		}
+		lines.push_back(l);
+	}
+
+	const auto is_header = [](const std::string &t) { return t.size() >= 2 && t.front() == '[' && t.back() == ']'; };
+	const auto is_system = [&](const std::string &t) { return is_header(t) && lower(trim(t.substr(1, t.size() - 2))) == "systemsettings"; };
+	const auto is_scale_key = [](const std::string &t) {
+		const size_t eq = t.find('=');
+		return !t.empty() && t[0] != ';' && t[0] != '#' && eq != std::string::npos && lower(trim(t.substr(0, eq))) == "r.screenpercentage";
+	};
+
+	std::vector<Line> out;
+	bool in_system = false, placed = false, removed_here = false, placed_here = false;
+	size_t header_at = 0;
+	const auto close_section = [&](bool at_eof) {
+		if (!in_system || !removed_here || placed_here)
+			return;
+		for (size_t i = header_at + 1; i < out.size(); ++i)
+			if (!trim(out[i].body).empty())
+				return;
+		out.resize(header_at); // the section is empty now; at the end of the file its separating blank lines go too
+		while (at_eof && !out.empty() && trim(out.back().body).empty())
+			out.pop_back();
+		if (at_eof && !out.empty() && out.back().term.empty())
+			out.back().term = eol;
+	};
+	const auto scale_pair = [&](const std::string &term1, const std::string &term2) {
+		return std::vector<Line> { { kScaleMarker, term1.empty() ? eol : term1 },
+			{ "r.ScreenPercentage=" + percent_text(percent), term2.empty() ? eol : term2 } };
+	};
+
+	for (size_t i = 0; i < lines.size(); ++i)
+	{
+		const Line &l = lines[i];
+		const std::string t = trim(l.body);
+		if (is_header(t))
+		{
+			close_section(false);
+			in_system = is_system(t);
+			removed_here = placed_here = false;
+			header_at = out.size();
+			out.push_back(l);
+			continue;
+		}
+		const bool marker = in_system && t == kScaleMarker;
+		const bool marked_pair = marker && i + 1 < lines.size() && is_scale_key(trim(lines[i + 1].body));
+		if (marker && !marked_pair) // a marker with nothing under it is ours and stale
+		{
+			removed_here = true;
+			continue;
+		}
+		if (marked_pair || (in_system && is_scale_key(t) && want))
+		{
+			const Line &last = lines[i + (marked_pair ? 1 : 0)];
+			removed_here = true;
+			if (want && !placed)
+			{
+				const std::vector<Line> p = scale_pair(marked_pair ? l.term : "", last.term);
+				out.insert(out.end(), p.begin(), p.end());
+				placed = placed_here = true;
+			}
+			i += marked_pair ? 1 : 0;
+			continue;
+		}
+		out.push_back(l);
+	}
+	close_section(true);
+
+	if (want && !placed)
+	{
+		size_t at = 0;
+		while (at < out.size() && !is_system(trim(out[at].body)))
+			++at;
+		if (at == out.size())
+		{
+			if (!out.empty())
+			{
+				if (out.back().term.empty())
+					out.back().term = eol;
+				if (!trim(out.back().body).empty())
+					out.push_back({ "", eol });
+			}
+			out.push_back({ "[SystemSettings]", eol });
+			at = out.size() - 1;
+		}
+		if (out[at].term.empty())
+			out[at].term = eol;
+		const std::vector<Line> p = scale_pair(out[at].term, out[at].term);
+		out.insert(out.begin() + at + 1, p.begin(), p.end());
+	}
+
+	std::string result = bom;
+	for (const Line &l : out)
+		result += l.body + l.term;
+	return result;
+}
+
 // ---- frame-time statistics for the perf report ---------------------------------------------------------------------
 
 struct FrameStats

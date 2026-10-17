@@ -189,6 +189,67 @@ int main()
 			"perf: t=5.0 frames=0 avg_ms=0.00 fps=0.0 low1_fps=0.0 p99_ms=0.00 upscaler=none render=0x0 output=0x0 ratio=0.000");
 	}
 
+	// render_scale: names, numbers 33..100, anything else is invalid (-1).
+	assert(parse_render_scale("game") == 0 && parse_render_scale(" DLAA ") == 100 && parse_render_scale("Quality") == 66.7);
+	assert(parse_render_scale("balanced") == 58 && parse_render_scale("performance") == 50);
+	assert(parse_render_scale("ultra_performance") == 33.3 && parse_render_scale("72.5") == 72.5);
+	assert(parse_render_scale("33") == 33 && parse_render_scale("100") == 100);
+	assert(parse_render_scale("32.9") == -1 && parse_render_scale("100.1") == -1 && parse_render_scale("0") == -1);
+	assert(parse_render_scale("") == -1 && parse_render_scale("fast") == -1 && parse_render_scale("50%") == -1 && parse_render_scale("nan") == -1);
+	for (const RenderScaleInfo &r : kRenderScales)
+		assert(parse_render_scale(render_scale_text(r.percent)) == r.percent);
+	assert(render_scale_text(72.5) == "72.5" && render_scale_index(72.5) == -1 && render_scale_index(66.7f) == 2);
+	assert(percent_text(66.7) == "66.7" && percent_text(50) == "50" && percent_text(33.3) == "33.3" && percent_text(58.04) == "58");
+
+	// The scale each mode asks for lands on that mode again in preset_for_ratio.
+	assert(preset_for_ratio(66.7 / 100) == Preset::quality && preset_for_ratio(58.0 / 100) == Preset::balanced);
+	assert(preset_for_ratio(50.0 / 100) == Preset::performance && preset_for_ratio(33.3 / 100) == Preset::ultra_performance);
+
+	assert(project_name_from_exe("C:\\Games\\Echoes\\EchoesofAincrad\\Binaries\\Win64\\EchoesofAincrad-Win64-Shipping.exe") == "EchoesofAincrad");
+	assert(project_name_from_exe("/home/u/game/Proj/binaries/Win64/Other-Win64-Shipping.exe") == "Proj");
+	assert(project_name_from_exe("D:\\Stuff\\Foo-Win64-Shipping.exe") == "Foo");
+	assert(project_name_from_exe("C:\\Games\\launcher.exe").empty());
+
+	// Engine.ini: set_screen_percentage.
+	const std::string M = "; amdlss_dx12_dlss render_scale";
+	const std::string kPair = M + "\r\nr.ScreenPercentage=50\r\n";
+	assert(set_screen_percentage("", 50) == "[SystemSettings]\r\n" + kPair);                 // empty file
+	assert(set_screen_percentage("", 0).empty());                                          // nothing to remove
+	assert(set_screen_percentage("\xEF\xBB\xBF", 66.7) == "\xEF\xBB\xBF[SystemSettings]\r\n" + M + "\r\nr.ScreenPercentage=66.7\r\n");
+	const std::string other = "[Core.System]\r\nPaths=a\r\n";                              // other sections only
+	const std::string with_other = other + "\r\n[SystemSettings]\r\n" + kPair;
+	assert(set_screen_percentage(other, 50) == with_other);
+	assert(set_screen_percentage(with_other, 0) == other);                                 // round trip
+	assert(set_screen_percentage(with_other, 50) == with_other);                           // already set: unchanged
+	const std::string keys = "[A]\r\nx=1\r\n\r\n[SystemSettings]\r\nr.Foo=2\r\n\r\n[B]\r\ny=2\r\n"; // section with other keys
+	const std::string keys50 = "[A]\r\nx=1\r\n\r\n[SystemSettings]\r\n" + kPair + "r.Foo=2\r\n\r\n[B]\r\ny=2\r\n";
+	assert(set_screen_percentage(keys, 50) == keys50);
+	assert(set_screen_percentage(keys50, 0) == keys);
+	// Existing value replaced where it stands, with or without our marker; the key is case-insensitive.
+	assert(set_screen_percentage("[SystemSettings]\r\nr.Foo=2\r\nr.ScreenPercentage=80\r\nr.Bar=3\r\n", 58) ==
+		"[SystemSettings]\r\nr.Foo=2\r\n" + M + "\r\nr.ScreenPercentage=58\r\nr.Bar=3\r\n");
+	assert(set_screen_percentage("[systemsettings]\r\n" + kPair + "r.Foo=2\r\n", 33.3) ==
+		"[systemsettings]\r\n" + M + "\r\nr.ScreenPercentage=33.3\r\nr.Foo=2\r\n");
+	// Removal: a player's own line stays, ours goes, an emptied section loses its header, a stale marker goes.
+	assert(set_screen_percentage("[SystemSettings]\r\nr.ScreenPercentage=80\r\n", 0) == "[SystemSettings]\r\nr.ScreenPercentage=80\r\n");
+	assert(set_screen_percentage("[SystemSettings]\r\n" + kPair, 0).empty());
+	assert(set_screen_percentage("[A]\r\nx=1\r\n[SystemSettings]\r\n" + kPair + "[B]\r\ny=2\r\n", 0) == "[A]\r\nx=1\r\n[B]\r\ny=2\r\n");
+	assert(set_screen_percentage("[SystemSettings]\r\n" + M + "\r\nr.Foo=2\r\n", 0) == "[SystemSettings]\r\nr.Foo=2\r\n");
+	assert(set_screen_percentage("[SystemSettings]\r\n", 0) == "[SystemSettings]\r\n");     // empty section the add-on never touched
+	// A second [SystemSettings] with a line of its own: replaced once in the first spot, dropped in the other.
+	assert(set_screen_percentage("[SystemSettings]\r\nr.ScreenPercentage=70\r\n[X]\r\na=1\r\n[SystemSettings]\r\nr.ScreenPercentage=90\r\n", 50) ==
+		"[SystemSettings]\r\n" + kPair + "[X]\r\na=1\r\n");
+	// Line endings: LF stays LF, CRLF stays CRLF, a missing final newline is added only where we write.
+	assert(set_screen_percentage("[A]\nx=1\n", 50) == "[A]\nx=1\n\n[SystemSettings]\n" + M + "\nr.ScreenPercentage=50\n");
+	assert(set_screen_percentage("[A]\nx=1", 50) == "[A]\nx=1\n\n[SystemSettings]\n" + M + "\nr.ScreenPercentage=50\n");
+	assert(set_screen_percentage("[A]\nx=1\n[SystemSettings]\nz=1", 50) == "[A]\nx=1\n[SystemSettings]\n" + M + "\nr.ScreenPercentage=50\nz=1");
+	assert(set_screen_percentage("[A]\r\nx=1", 50) == "[A]\r\nx=1\r\n\r\n[SystemSettings]\r\n" + kPair);
+	// Mixed endings: lines we do not touch keep theirs.
+	assert(set_screen_percentage("[A]\nx=1\r\ny=2\n[SystemSettings]\r\nr.ScreenPercentage=70\r\n", 50) ==
+		"[A]\nx=1\r\ny=2\n[SystemSettings]\r\n" + kPair);
+	// Our own output is a fixed point for the same value and a BOM survives a removal.
+	assert(set_screen_percentage("\xEF\xBB\xBF[SystemSettings]\r\n" + kPair, 0) == "\xEF\xBB\xBF");
+
 	std::puts("dlss logic selftest ok");
 	return 0;
 }

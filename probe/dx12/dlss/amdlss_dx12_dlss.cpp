@@ -124,6 +124,7 @@ struct Config
 	bool mv_scale_from_game = true;     // pixel scale of the velocity from TSR's b0; false: mv_scale_x/y times the viewport
 	int render_preset = 0;              // NVSDK_NGX_DLSS_Hint_Render_Preset value, set on all five per-mode hints; 0 = Default
 	bool auto_exposure = true;          // the AutoExposure create flag
+	float render_scale = 0;             // r.ScreenPercentage written to the game's Engine.ini; 0 = leave the game's own scale
 };
 // Written under g_mutex (the ini reload and the overlay); the dispatch path copies it into its Snapshot under g_mutex.
 Config g_cfg;
@@ -1120,18 +1121,18 @@ bool ini_mtime(FILETIME &out)
 
 std::string config_summary(const Config &c)
 {
-	char buf[640];
+	char buf[768];
 	snprintf(buf, sizeof(buf),
-		"enabled=%d render_preset=%s auto_exposure=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
-		c.enabled, logic::render_preset_name(c.render_preset), c.auto_exposure, c.jitter_sign_x, c.jitter_sign_y, c.mv_scale_x, c.mv_scale_y, c.mv_scale_from_game ? "game" : "ini",
-		c.mv_gamma ? "gamma" : "linear", c.composite_translucency, c.fill_half_res, c.never_fallback_after_start, c.log_every, c.jitter_cycle);
+		"enabled=%d render_scale=%s render_preset=%s auto_exposure=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
+		c.enabled, logic::render_scale_text(c.render_scale).c_str(), logic::render_preset_name(c.render_preset), c.auto_exposure, c.jitter_sign_x, c.jitter_sign_y, c.mv_scale_x, c.mv_scale_y,
+		c.mv_scale_from_game ? "game" : "ini", c.mv_gamma ? "gamma" : "linear", c.composite_translucency, c.fill_half_res, c.never_fallback_after_start, c.log_every, c.jitter_cycle);
 	return buf;
 }
 
-std::string read_ini_text()
+std::string read_file(const std::string &path)
 {
 	std::string text;
-	if (FILE *f = fopen(g_ini_path.c_str(), "rb"))
+	if (FILE *f = fopen(path.c_str(), "rb"))
 	{
 		char buf[4096];
 		size_t got;
@@ -1140,6 +1141,22 @@ std::string read_ini_text()
 		fclose(f);
 	}
 	return text;
+}
+
+std::string read_ini_text() { return read_file(g_ini_path); }
+
+// The text goes to `path` + `tmp_suffix` and is moved over `path`, so a reader never sees half a file.
+bool write_file_atomic(const std::string &path, const std::string &text, const char *tmp_suffix)
+{
+	const std::string tmp = path + tmp_suffix;
+	FILE *f = fopen(tmp.c_str(), "wb");
+	bool ok = f != nullptr && fwrite(text.data(), 1, text.size(), f) == text.size();
+	if (f != nullptr)
+		ok = fclose(f) == 0 && ok;
+	ok = ok && MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+	if (!ok)
+		DeleteFileA(tmp.c_str());
+	return ok;
 }
 
 void load_ini(bool reload)
@@ -1176,6 +1193,11 @@ void load_ini(bool reload)
 		g_cfg.render_preset = 0;
 	}
 	g_cfg.auto_exposure = ini.number("auto_exposure", 1) != 0;
+	const std::string scale = ini.text("render_scale", "game");
+	const double scale_percent = logic::parse_render_scale(scale);
+	if (scale_percent < 0)
+		log_line("render_scale=%s is not game, dlaa, quality, balanced, performance, ultra_performance or a number from 33 to 100; using game", scale.c_str());
+	g_cfg.render_scale = scale_percent < 0 ? 0.0f : static_cast<float>(scale_percent);
 	const double perf_seconds = ini.number("perf_report_seconds", 5);
 	g_perf_seconds = perf_seconds > 0 ? static_cast<uint32_t>(perf_seconds) : 0;
 
@@ -1204,6 +1226,7 @@ std::map<std::string, std::string> ini_values(const Config &c)
 	const auto flag = [](bool v) { return std::string(v ? "1" : "0"); };
 	return {
 		{ "enabled", flag(c.enabled) },
+		{ "render_scale", logic::render_scale_text(c.render_scale) },
 		{ "render_preset", logic::render_preset_name(c.render_preset) },
 		{ "auto_exposure", flag(c.auto_exposure) },
 		{ "jitter_sign_x", str_format("%g", c.jitter_sign_x) },
@@ -1220,6 +1243,65 @@ std::map<std::string, std::string> ini_values(const Config &c)
 	};
 }
 
+// ---- render_scale: r.ScreenPercentage in the game's Engine.ini ---------------------------------------------------------
+
+bool dir_exists(const std::string &path)
+{
+	const DWORD a = GetFileAttributesA(path.c_str());
+	return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// %LOCALAPPDATA%\<project>\Saved\Config\WindowsClient\Engine.ini, or ...\Windows\ when only that folder exists. The project
+// comes from the exe's path. Returns "" and sets `error` when the folder cannot be found.
+std::string engine_ini_path(std::string &error)
+{
+	char exe[MAX_PATH], local[MAX_PATH];
+	const DWORD exe_len = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+	const DWORD local_len = GetEnvironmentVariableA("LOCALAPPDATA", local, MAX_PATH);
+	if (exe_len == 0 || exe_len >= MAX_PATH || local_len == 0 || local_len >= MAX_PATH)
+	{
+		error = "the exe path or %LOCALAPPDATA% is unavailable";
+		return "";
+	}
+	const std::string project = logic::project_name_from_exe(std::string(exe, exe_len));
+	if (project.empty())
+	{
+		error = std::string("no project name in the exe path ") + exe;
+		return "";
+	}
+	const std::string config = std::string(local, local_len) + "\\" + project + "\\Saved\\Config\\";
+	for (const char *target : { "WindowsClient", "Windows" })
+		if (dir_exists(config + target))
+			return config + target + "\\Engine.ini";
+	error = "neither " + config + "WindowsClient nor " + config + "Windows exists";
+	return "";
+}
+
+// Sets (scale > 0) or removes the add-on's own r.ScreenPercentage line in the game's Engine.ini. The game drops the
+// [SystemSettings] section when it exits, so this runs at load, at detach and when the overlay changes the setting.
+// Logs one line and carries on whatever happens.
+void write_engine_ini(float scale, const char *when)
+{
+	const std::string name = logic::render_scale_text(scale);
+	std::string error;
+	const std::string path = engine_ini_path(error);
+	if (path.empty())
+	{
+		log_line("render_scale=%s (%s): Engine.ini not touched, %s", name.c_str(), when, error.c_str());
+		return;
+	}
+	const std::string text = read_file(path);
+	const std::string updated = logic::set_screen_percentage(text, scale);
+	if (updated == text)
+		log_line("render_scale=%s (%s): %s needs no change", name.c_str(), when, path.c_str());
+	else if (!write_file_atomic(path, updated, ".amdlss.tmp"))
+		log_line("render_scale=%s (%s): could not write %s (error %lu)", name.c_str(), when, path.c_str(), GetLastError());
+	else if (scale > 0)
+		log_line("render_scale=%s (%s): wrote r.ScreenPercentage=%s to %s", name.c_str(), when, logic::percent_text(scale).c_str(), path.c_str());
+	else
+		log_line("render_scale=game (%s): removed the r.ScreenPercentage line the add-on wrote from %s", when, path.c_str());
+}
+
 // Overlay edits take effect at once (g_cfg is only written under g_mutex, and the dispatch path copies it under the same
 // lock) and are then written to the ini. The file goes to a temp name and is moved over the ini, so the live reload never
 // reads half a file; its mtime is recorded so the reload does not see our own write as a change. Returns false when the
@@ -1228,25 +1310,21 @@ bool commit_config(Config c)
 {
 	c.jitter_cycle = c.jitter_cycle == 0 ? 1 : c.jitter_cycle;
 	const std::string after = config_summary(c);
+	bool scale_changed;
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		if (config_summary(g_cfg) == after)
 			return true;
+		scale_changed = g_cfg.render_scale != c.render_scale;
 		g_cfg = c;
 		g_reset_next = true;
 	}
 	log_line("overlay changed: %s (DLSS resets its history on the next frame)", after.c_str());
+	if (scale_changed)
+		write_engine_ini(c.render_scale, "overlay");
 
-	const std::string tmp = g_ini_path + ".tmp";
-	const std::string text = logic::merge_ini(read_ini_text(), ini_values(c));
-	FILE *f = fopen(tmp.c_str(), "wb");
-	bool ok = f != nullptr && fwrite(text.data(), 1, text.size(), f) == text.size();
-	if (f != nullptr)
-		ok = fclose(f) == 0 && ok;
-	ok = ok && MoveFileExA(tmp.c_str(), g_ini_path.c_str(), MOVEFILE_REPLACE_EXISTING);
-	if (!ok)
+	if (!write_file_atomic(g_ini_path, logic::merge_ini(read_ini_text(), ini_values(c)), ".tmp"))
 	{
-		DeleteFileA(tmp.c_str());
 		log_line("the ini %s could not be written; the change is live but not saved", g_ini_path.c_str());
 		return false;
 	}
@@ -1990,7 +2068,7 @@ void draw_status(const Status &st, bool dispatching)
 	ImGui::Text("Evaluate count: %llu", static_cast<unsigned long long>(st.evals));
 	if (st.rw != 0)
 		ImGui::Text("Render preset in use: %s, auto exposure %s", logic::render_preset_name(st.render_preset), st.auto_exposure ? "on" : "off");
-	ImGui::TextWrapped("Mode follows the game's Anti-Aliasing Level and resolution.");
+	ImGui::TextWrapped("The mode follows the render/output ratio; set it with DLSS mode under Controls.");
 }
 
 // Frame timing of the latest closed report window (perf_report_seconds), copied under its lock.
@@ -2042,6 +2120,27 @@ void draw_overlay(reshade::api::effect_runtime *)
 
 	ImGui::SeparatorText("Controls");
 	changed |= ImGui::Checkbox("Enabled", &edit.enabled);
+	const char *scale_labels[logic::kRenderScaleCount + 1];
+	for (int i = 0; i < logic::kRenderScaleCount; ++i)
+		scale_labels[i] = logic::kRenderScales[i].label;
+	char custom_label[32];
+	std::snprintf(custom_label, sizeof(custom_label), "Custom (%s%%)", logic::percent_text(edit.render_scale).c_str());
+	scale_labels[logic::kRenderScaleCount] = custom_label;
+	int scale = logic::render_scale_index(edit.render_scale);
+	const int scale_items = scale < 0 ? logic::kRenderScaleCount + 1 : logic::kRenderScaleCount; // the custom entry shows an ini number
+	if (scale < 0)
+		scale = logic::kRenderScaleCount;
+	if (ImGui::Combo("DLSS mode", &scale, scale_labels, scale_items) && scale < logic::kRenderScaleCount)
+	{
+		edit.render_scale = static_cast<float>(logic::kRenderScales[scale].percent);
+		changed = true;
+	}
+	if (st.rw != 0)
+		ImGui::Text("Now rendering %ux%u -> %ux%u, ratio %.3f (%s)", st.rw, st.rh, st.ow, st.oh, static_cast<double>(st.rw) / st.ow, logic::preset_name(st.mode));
+	else
+		ImGui::TextDisabled("Now rendering: no upscale pass seen yet");
+	ImGui::TextWrapped("Sets the game's render resolution (r.ScreenPercentage in its Engine.ini) so DLSS has fewer pixels to start from. "
+		"Takes effect the next time the game starts.");
 	const char *names[logic::kRenderPresetCount];
 	for (int i = 0; i < logic::kRenderPresetCount; ++i)
 		names[i] = logic::kRenderPresets[i].name;
@@ -2120,6 +2219,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		g_ini_path = g_dir + "amdlss_dx12_dlss.ini";
 		g_perf.load_qpc = qpc_now();
 		load_ini(false);
+		write_engine_ini(g_cfg.render_scale, "load");
 
 		reshade::register_overlay("DLSS", draw_overlay);
 
@@ -2145,6 +2245,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		break;
 	}
 	case DLL_PROCESS_DETACH:
+		write_engine_ini(g_cfg.render_scale, "detach"); // the game rewrites Engine.ini on exit and drops our line
 		reshade::unregister_overlay("DLSS", draw_overlay);
 		reshade::unregister_addon(module);
 		break;

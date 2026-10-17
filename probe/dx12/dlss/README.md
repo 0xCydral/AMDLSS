@@ -140,7 +140,8 @@ It runs the probe build once if the ReShade headers or the MSVC toolchain (clang
   `imconfig.h`, checked against pinned sha256 values. The widgets run in ReShade's own ImGui through its function table;
   the add-on does not load without an ImGui-enabled ReShade;
 - compiles and runs `selftest.cpp` (TSR pass hashes and b0 layouts, the two-pass decisions, Halton, phase matching, preset
-  choice, velocity decode, ini parsing and merging, render preset names, frame-time statistics and the perf line) on the
+  choice, velocity decode, ini parsing and merging, render preset names, the `render_scale` parser and the Engine.ini
+  rewrite, frame-time statistics and the perf line) on the
   Linux side of the container;
 - compiles and links the add-on with clang-cl `/MT`, as for the probe.
 
@@ -172,6 +173,7 @@ succeeds in the log.
 | key | default | meaning |
 |---|---|---|
 | `enabled` | 1 | 0 leaves the game's upscaler alone |
+| `render_scale` | game | DLSS mode as a render resolution, written to the game's Engine.ini: `game` (leave the game's scale alone), `dlaa` (100), `quality` (66.7), `balanced` (58), `performance` (50), `ultra_performance` (33.3) or a number from 33 to 100; takes effect the next time the game starts, see "DLSS mode" |
 | `render_preset` | default | DLSS render preset hint for every mode: `default`, `J`, `K`, `L` or `M` (the presets NGX 310.9.16 still documents as usable); a change recreates the feature |
 | `auto_exposure` | 1 | the `AutoExposure` create flag; 0 supplies no exposure texture and a neutral exposure of 1; a change recreates the feature |
 | `jitter_sign_x`, `jitter_sign_y` | 1 | multiplied into the jitter sent to DLSS |
@@ -184,6 +186,43 @@ succeeds in the log.
 | `fill_half_res` | 1 | fill u1 (TSR's half-size output, read by bloom and eye adaptation) from u0 after the evaluate |
 | `never_fallback_after_start` | 1 | after DLSS started, skip TSR even when no evaluate is possible and keep the previous u0 |
 | `perf_report_seconds` | 5 | wall-time length of a frame-time report window, see below; 0 turns the report off |
+
+## DLSS mode (`render_scale`)
+
+DLSS only gains frame rate when the game renders fewer pixels, and the game's own settings leave it at about 61% of the
+output (1552x873 for 2560x1440, measured; `sg.ResolutionQuality` in `GameUserSettings.ini` does not change it). The
+add-on already picks the DLSS mode from the render/output ratio (`logic::preset_for_ratio`), so what it needs is to change
+the render size. `r.ScreenPercentage=50` under `[SystemSettings]` in the user's Engine.ini does that (measured: render
+1280x720 -> 2560x1440, ratio 0.500, mode MaxPerf). `render_scale` writes that line:
+
+- **File:** `%LOCALAPPDATA%\<Project>\Saved\Config\WindowsClient\Engine.ini` (`...\Windows\` when only that folder exists;
+  under Proton `C:\users\steamuser\AppData\Local\...`). `<Project>` is the folder two levels above the exe's folder
+  (`<game>\<Project>\Binaries\Win64\<Project>-Win64-Shipping.exe`), else the exe name before `-Win64`. If neither config
+  folder exists the log says so and nothing is written (the game creates it on its first run).
+- **Value:** `dlaa` 100, `quality` 66.7, `balanced` 58, `performance` 50, `ultra_performance` 33.3, or a number from 33 to
+  100 (one decimal at most is written). `game`, the default, leaves the game's own scale alone.
+- **When:** at load, at `DLL_PROCESS_DETACH`, and at once when the overlay changes it. The game reads Engine.ini at start,
+  so a change applies from the next start; and it rewrites Engine.ini when it exits and drops the `[SystemSettings]`
+  section (measured), so the line has to be written again after every exit. The detach write does that if it runs after
+  the game's own write (UE flushes its config in its shutdown path, before `ExitProcess` runs the DLL detaches, which is
+  the order this relies on; not observed in a game run); the load write covers the start after the next one in any case.
+- **What is written:** a marker comment and the value, in place of any `r.ScreenPercentage` line already in that section:
+
+  ```
+  [SystemSettings]
+  ; amdlss_dx12_dlss render_scale
+  r.ScreenPercentage=50
+  ```
+
+  Every other line, each line's ending (LF or CRLF) and a BOM are kept. With `render_scale=game` only a line that has the
+  marker above it is removed (and the section header if that leaves it empty), so a player's own `r.ScreenPercentage` is
+  never touched.
+- **How:** the file goes to `Engine.ini.amdlss.tmp` and is moved over `Engine.ini` (`MoveFileEx` replace). Any error is
+  logged and the add-on carries on. One log line per run, for example
+  `render_scale=performance (load): wrote r.ScreenPercentage=50 to C:\...\Engine.ini`, `render_scale=performance (detach): ... needs no change`,
+  or `render_scale=game (overlay): removed the r.ScreenPercentage line the add-on wrote from ...`.
+- A hand edit of `render_scale` in the ini while the game runs is read by the hot reload but is written to Engine.ini only
+  at detach (or by the next overlay change).
 
 ## Live ini and the game's own TSR shader
 
@@ -205,8 +244,10 @@ ReShade's overlay gets a **DLSS** tab (`reshade::register_overlay`, removed agai
   `Enabled` off, or "previous output kept"), the TSR layout (`single pass`, or `two-pass, UpdateHistory skipped` / `kept`),
   render -> output resolution and ratio, the DLSS mode chosen from that ratio,
   the last NGX evaluate result and the evaluate count, the render preset and auto exposure in use. The mode follows the
-  game's Anti-Aliasing Level and resolution; the add-on cannot change it.
-- **Controls:** `Enabled`, `Render preset` (Default, J, K, L, M: every other enum value of
+  render/output ratio, which `DLSS mode` under Controls sets.
+- **Controls:** `Enabled`, `DLSS mode` (Game default, DLAA, Quality, Balanced, Performance, Ultra Performance; a number
+  from the ini shows as "Custom"), with the current render size and ratio under it. It saves `render_scale` through the
+  ini save path and updates Engine.ini at once; it takes effect the next time the game starts. Then `Render preset` (Default, J, K, L, M: every other enum value of
   `NVSDK_NGX_DLSS_Hint_Render_Preset` in 310.9.16 is removed, deprecated or "reverts to default") and `Auto exposure`.
   A preset or auto exposure change recreates the DLSS feature and resets its history on the next frame. Not offered:
   sharpness (deprecated in DLSS since 2.5.1, no effect), frame generation and Reflex (not possible from this add-on).
@@ -281,6 +322,9 @@ fire, and the game's compute state is restored on the real list.
   Feature handles replaced by a preset or auto exposure change are parked like the ones from a size change.
 - The unverified parts are the guessed resource states, whether DLSS accepts an
   `r11g11b10_float` output, and whether the root descriptors that get restored match what UE set.
+- `render_scale` is selftested (parser, Engine.ini rewrite, project name) but the file writes, the folder lookup and the
+  detach order were not run against the game. It sets the render size for the next start only; the running game keeps its
+  size.
 - Feature and motion-vector texture replaced on a size change are parked, not released, because frames in flight may
   still use them.
 - The velocity decode formula is the one from UE5's `VelocityCommon.ush` as remembered, with the sign and scale
