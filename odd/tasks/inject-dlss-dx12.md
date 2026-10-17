@@ -37,6 +37,15 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
 - [ ] T5 Frame dump: a TSR dump taken after DLAA ran earlier in the same session is all zeros while the log says
       "0 failed" (launch B, 2026-10-17). A pure-TSR session dumps fine; it also hit a DLSS dump through Scaler (launch E), so it is intermittent. Fix, and make an all-zero readback count as failed.
 - [ ] T6 AMD layout on a real Radeon card (the Ryzen iGPU cannot run the game: 4 GPU resets on 2026-10-16).
+      First real Radeon report (RX 6600, Windows 11, 1.3.0): `fallback: ngx`. NGX found no NVIDIA core (`_nvngx.dll`
+      126, no registry key) and Init returned FeatureNotSupported; Scaler did not answer the load. Fixed in 1.3.1 (T8);
+      still waiting for the same player to confirm on the card.
+- [x] T8 NGX through HelixSR Scaler's exports when there is no NVIDIA core (1.3.1). The add-on's NGX calls go through
+      pointers that start at the SDK and move to the loaded `dxgi.dll`'s NVSDK_NGX_D3D12_* exports when Init fails.
+      Reproduced on the 4070 by hiding the prefix's NGXCore FullPath and forcing `[DLSS] Enabled=false, HelixSR=true`:
+      Init through Scaler 0x00000001, DLSS available=1, feature created, OptiScaler.log `helixsr.dll in use`, 78-83 fps
+      at 1708x961 -> 2560x1440. Also: the card shows **update** when the game's add-on differs from the shipped one
+      (`addon_outdated`, test `test_an_add_on_older_than_the_shipped_one_asks_for_update`). Route: inline.
 - [ ] T7 Remove prints no log line in the window (remove_game returned no notes in the live run).
 
 ## Progress
