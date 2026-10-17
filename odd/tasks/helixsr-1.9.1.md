@@ -80,15 +80,15 @@ Decisions:
 
 Tasks:
 
-- [ ] Repin `helixsr.py` (1.9.1: 137494566 / `9f329a8a…`) and `scaler.py` (1.0.4: 132516449 / `7ad03359…`).
-- [ ] Bridge: route mapping (`unsupported`/`scaler`/`blocked` → `optiscaler`), `scaler_installed` → state
+- [x] Repin `helixsr.py` (1.9.1: 137494566 / `9f329a8a…`) and `scaler.py` (1.0.4: 132516449 / `7ad03359…`).
+- [x] Bridge: route mapping (`unsupported`/`scaler`/`blocked` → `optiscaler`), `scaler_installed` → state
       `optiscaler`; comments.
-- [ ] `games.py`: `_ROW` accepts 1.9.1 labels; parse routes for the new Scaler label.
-- [ ] Fakes/tests first where deterministic: fake installer models 1.9.1 routes + a native Scaler install;
+- [x] `games.py`: `_ROW` accepts 1.9.1 labels; parse routes for the new Scaler label.
+- [x] Fakes/tests first where deterministic: fake installer models 1.9.1 routes + a native Scaler install;
       bridge mapping tests; label parsing tests; scaler pin tests.
-- [ ] Full suite under Xvfb :64, `node --test receiver/`, `--selftest`.
-- [ ] 1.3.0 in `amdlss/__init__.py` as its own `chore(release): 1.3.0` commit.
-- [ ] Build `bash packaging/release.sh` with output under `/tmp/amdlss-rel130/` (never `/tmp/amdlss-rel`, which
+- [x] Full suite under Xvfb :64, `node --test receiver/`, `--selftest`.
+- [x] 1.3.0 in `amdlss/__init__.py` as its own `chore(release): 1.3.0` commit.
+- [x] Build `bash packaging/release.sh` with output under `/tmp/amdlss-rel130/` (never `/tmp/amdlss-rel`, which
       holds the 1.2.0 assets being published); verify artifacts; player notes `/tmp/amdlss-rel130/notes130.md`.
 
 Checks:
@@ -122,3 +122,8 @@ Evidence (observed):
   `VERSION 1.3.0` + `modules True`, `exe selftest exit=0`, `linux selftest exit=0`.
   - AMDLSS.exe 18979609 bytes, SHA-256 `49da5e70b27fa8c903f3f90774c82d3ae6fc9a9814eda37772d3b09f8a04b74e`
   - AMDLSS-linux-x86_64 24390456 bytes, SHA-256 `2b983578a78ef62f9add768f40b8f14803f6b7c4c8036d328f8bf27eee425865`
+- Merged into main on 2026-10-16 (fast-forward from `feat/helixsr-191`, then `merge: fix/luma-tab`) and rebuilt from main
+  with `packaging/release.sh` into `/tmp/amdlss-rel/`: `pytest -q` 531 passed, 9 skipped; `node --test` in `receiver/`
+  23 passed (Node 24 rejects the `receiver/` directory argument, so the receiver README now says `cd receiver && node --test`);
+  `--selftest` passed; both `check_build.py` runs `VERSION 1.3.0`, `modules True`; both selftest exits 0. Notes:
+  `/tmp/amdlss-rel/notes130.md`. Not pushed, tagged or published.
