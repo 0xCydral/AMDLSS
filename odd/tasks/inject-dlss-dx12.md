@@ -32,8 +32,12 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
 - [x] T2 Release (9ccd053): release.sh builds the add-on and bundles `amdlss_dx12_dlss.addon64` + its ini into both binaries;
       check_build.py and the selftest prove they are inside.
 - [x] T3 Docs and 1.3.0 notes (README section; notes draft at `/tmp/amdlss-rel/notes130.md`; this file).
-- [ ] T4 Live check on the owner's PC, only with the owner's go-ahead: install through AMDLSS, game renders with DLSS,
-      remove restores the folder.
+- [x] T4 Live check on the owner's PC, only with the owner's go-ahead: install through AMDLSS, game renders with DLSS,
+      remove restores the folder (2026-10-17, NVIDIA layout; see Progress).
+- [ ] T5 Frame dump: a TSR dump taken after DLAA ran earlier in the same session is all zeros while the log says
+      "0 failed" (launch B, 2026-10-17). A pure-TSR session dumps fine. Fix, and make an all-zero readback count as failed.
+- [ ] T6 AMD layout on a real Radeon card (the Ryzen iGPU cannot run the game: 4 GPU resets on 2026-10-16).
+- [ ] T7 Remove prints no log line in the window (remove_game returned no notes in the live run).
 
 ## Progress
 
@@ -67,3 +71,15 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
     bytes identical to the build, both selftests exit 0); `pytest` 556 passed, 9 skipped before the docs commit.
   - Environment: on a fresh worktree `probe/dx12/build.sh` fails inside Docker ("Cross-device link" moving the xwin
     splat), so `probe/dx12/third_party` and `probe/dx12/dlss/third_party` were copied from `dx12-probe/` (both gitignored).
+- 2026-10-17 live check (T4), RTX 4070, title screen, Steam launch, no input sent:
+  - Scan from source (same code as the binaries): Echoes -> route `inject12`, rhi `dx12` (SM6 cache in the Proton prefix).
+    Install placed the NVIDIA layout with Luma's `nvngx_dlss.dll` 310.9.1.0 and `render_scale=quality`; NGX evaluates
+    returned `NVSDK_NGX_Result_Success`, so 310.9.1.0 works with the add-on.
+  - Performance at 2560x1440 output (5 s windows): native TSR 100% 61.3-66.9 fps (launches B and D); DLSS Quality
+    1708x961 87.7-93.3 fps, about 91 median (launch C): +38%. At 1920x1080 output (launch A, side monitor) DLSS Quality
+    101-113 vs TSR at the same 66.7% render 107-121: DLSS costs a few percent more than TSR at equal render size.
+  - Image quality (`seq_quality.py`, 30 frames each, title-screen camera drift): DLSS Quality vs native TSR 1440p: edge
+    flicker 0.85x, all-pixel flicker 0.75x, stair-stepping 1.12x. DLSS Quality vs TSR at the same 66.7% render (1080p):
+    edge flicker 0.77x, all-pixel 0.86x, stair-stepping 0.79x. Dumps in `~/Downloads/dx12-spike/dump_seq-20261017/`.
+  - Remove restored the folder: dxgi.dll, the add-on, its ini, nvngx_dlss.dll and `HelixSR\` gone; ReShade.ini/.log
+    and `dump_seq\` stay (by design). The owner's hand layout was then put back.
