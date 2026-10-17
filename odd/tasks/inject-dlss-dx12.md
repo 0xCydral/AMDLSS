@@ -53,9 +53,13 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
     beside it. Not run on a Radeon.
   - Routing (`games.unreal_rhi`, used by `mark_inject`): `DefaultGraphicsRHI` in a loose `DefaultEngine.ini`; else the
     graphics DLLs the shipping `.exe` imports (`pe.imports`, import and delay-load tables: only `d3d12.dll` = DX12, only
-    `d3d11.dll` = DX11); else a `*_PCD3D_SM6*` pipeline cache under `Content/PipelineCaches` or `Saved` = DX12. Anything
-    else shows both routes with the reason. Not validated against the real Echoes of Aincrad `.exe` (the brief forbids
-    touching that folder): `python3 -c "from amdlss import pe; print(pe.imports(r'<exe>'))"` is a read-only check.
+    `d3d11.dll` = DX11); else a `*_PCD3D_SM6*` pipeline cache = DX12, looked for in `Content/PipelineCaches`, the project's `Saved`, and the
+    player's `Saved` (`%LOCALAPPDATA%\\<Project>\\Saved`, or inside the game's Steam Proton prefix on Linux, found with
+    `crashes.unreal_saved_dirs`). Anything else shows both routes with the reason.
+  - QA fix (2026-10-17): Echoes' exe imports both `d3d11.dll` and `d3d12.dll`, and its SM6 cache is only in the Proton
+    prefix (`.../compatdata/2244210/pfx/.../Local/EchoesofAincrad/Saved/EchoesofAincrad_PCD3D_SM6.upipelinecache`), so the
+    first version routed it to Luma. Read-only run on the real files now gives `('dx12', 'the game has a Shader Model 6
+    pipeline cache, which only DirectX 12 makes')` and `mark_inject` -> `inject12`, no switch.
   - Packaging: `release.sh` builds the add-on first and stops if that fails; `release.sh`, `build-linux.sh` and `build.sh`
     bundle both files as `dx12dlss/`; `check_build.py` compares the bundled add-on with the build byte for byte; the
     selftest checks presence, size and the `MZ` header.

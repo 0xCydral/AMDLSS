@@ -384,3 +384,47 @@ def test_an_unreadable_exe_is_never_claimed_and_anti_cheat_still_refuses(tmp_pat
     placed = unreal(tmp_path, ['d3d12.dll'], name='Placed')                           # an install is there: Remove stays
     placed.anticheat = ['BattlEye']
     assert games.mark_inject(placed, placed=True).route == games.INJECT12 and placed.reason == ''
+
+
+def steam_game(tmp_path, imports=(['d3d11.dll'], ['d3d12.dll'])):
+    """A Steam Unreal game (Echoes of Aincrad's shape: both graphics DLLs linked, nothing cached in the game folder)
+    under <library>/steamapps/common, with its manifest; returns (game, the Proton prefix's Local folder)."""
+    library = tmp_path / 'lib' / 'steamapps'
+    root = library / 'common' / 'Echoes'
+    exe = root / 'EchoesofAincrad' / 'Binaries' / 'Win64'
+    exe.mkdir(parents=True)
+    (exe / 'EchoesofAincrad-Win64-Shipping.exe').write_bytes(with_imports(build_dll(), *imports))
+    (library / 'appmanifest_2244210.acf').write_text('"appid" "2244210"\n"installdir" "Echoes"\n"name" "Echoes"\n')
+    local = library / 'compatdata' / '2244210' / 'pfx' / 'drive_c' / 'users' / 'steamuser' / 'AppData' / 'Local'
+    game = games.Game(name='Echoes', folder=str(root), exe_folder=str(exe), reason=games.NO_UPSCALER)
+    return game, local
+
+
+def test_a_sm6_cache_in_the_players_proton_prefix_makes_it_dx12(tmp_path):
+    game, local = steam_game(tmp_path)
+    assert games.unreal_rhi(game)[0] == ''                                         # both DLLs, nothing cached yet
+    saved = local / 'EchoesofAincrad' / 'Saved'
+    saved.mkdir(parents=True)
+    (saved / 'EchoesofAincrad_PCD3D_SM5.upipelinecache').write_bytes(b'x')
+    assert games.unreal_rhi(game)[0] == ''                                         # SM5 says nothing
+    (saved / 'EchoesofAincrad_PCD3D_SM6.upipelinecache').write_bytes(b'x')
+    rhi, why = games.unreal_rhi(game)
+    assert rhi == games.RHI_DX12 and 'Shader Model 6' in why
+    games.mark_inject(game)
+    assert game.route == games.INJECT12 and not game.inject_choice
+    other = local / 'OtherProject' / 'Saved'                                       # another project's cache is not ours
+    other.mkdir(parents=True)
+    (saved / 'EchoesofAincrad_PCD3D_SM6.upipelinecache').unlink()
+    (other / 'Other_PCD3D_SM6.upipelinecache').write_bytes(b'x')
+    assert games.unreal_rhi(game)[0] == ''
+
+
+def test_a_sm6_cache_in_local_appdata_is_found_on_windows(tmp_path, monkeypatch):
+    game, _local = steam_game(tmp_path)
+    appdata = tmp_path / 'AppData' / 'Local'
+    (appdata / 'EchoesofAincrad' / 'Saved').mkdir(parents=True)
+    (appdata / 'EchoesofAincrad' / 'Saved' / 'EchoesofAincrad_PCD3D_SM6.upipelinecache').write_bytes(b'x')
+    monkeypatch.setattr(games.host, 'is_windows', lambda windows=None: True if windows is None else bool(windows))
+    monkeypatch.setenv('LOCALAPPDATA', str(appdata))
+    monkeypatch.setattr(games.host, 'path_module', lambda windows=None: __import__('posixpath'))   # tmp paths are posix
+    assert games.unreal_rhi(game)[0] == games.RHI_DX12

@@ -485,19 +485,26 @@ RHI_DX11, RHI_DX12 = 'dx11', 'dx12'
 # file is rarely loose, but when it is, it is the engine's own answer.
 _DEFAULT_RHI = re.compile(rb'^[ \t]*DefaultGraphicsRHI[ \t]*=[ \t]*DefaultGraphicsRHI_DX(11|12)\b', re.I | re.M)
 CACHE_SM6 = '_pcd3d_sm6'    # Unreal names a pipeline cache after its shader format: SM6 only exists on DirectX 12
-CACHE_FOLDERS = ('Content/PipelineCaches', 'Saved')
 CACHE_DEPTH = 3
 GRAPHICS_DLLS = ('d3d11.dll', 'd3d12.dll')
 
 
-def _has_sm6_cache(project):
-    """True when a Shader Model 6 pipeline cache is in the project's shipped caches or its Saved folder (depth
-    CACHE_DEPTH, links not followed)."""
-    for sub in CACHE_FOLDERS:
-        base = os.path.join(project, *sub.split('/'))
-        for root, folders, names in os.walk(base):
+def _cache_folders(game, project):
+    """Where a Shader Model 6 pipeline cache can be: the project's shipped caches, its own Saved folder, and the
+    player's Saved folder for the project (%LOCALAPPDATA%\\<Project>\\Saved, or the same inside the game's Steam Proton
+    prefix on Linux), the place an installed shipping game writes the one it builds. amdlss.crashes already knows
+    where that is."""
+    from . import crashes   # lazy: crashes imports this module
+    saved = crashes.unreal_saved_dirs(game)[1]
+    return [os.path.join(project, 'Content', 'PipelineCaches'), *map(str, saved)]
+
+
+def _has_sm6_cache(folders):
+    """True when a Shader Model 6 pipeline cache is in one of `folders` (depth CACHE_DEPTH, links not followed)."""
+    for base in folders:
+        for root, subdirs, names in os.walk(base):
             if os.path.relpath(root, base).count(os.sep) >= CACHE_DEPTH - 1:
-                folders[:] = []
+                subdirs[:] = []
             if any(CACHE_SM6 in name.lower() for name in names):
                 return True
     return False
@@ -507,7 +514,8 @@ def unreal_rhi(game):
     """(api, why): 'dx12' or 'dx11' when the game's files say which API an Unreal game runs, else ''. Three signals,
     strongest first: DefaultEngine.ini's DefaultGraphicsRHI when the file is loose; the graphics DLLs the shipping
     .exe links (an engine built with one RHI links one of d3d11.dll and d3d12.dll; with both it links both and
-    says nothing); a Shader Model 6 pipeline cache, which only DirectX 12 makes. Nothing is run."""
+    says nothing); a Shader Model 6 pipeline cache, which only DirectX 12 makes (in the game's files or in the player's Saved folder
+    for the project). Nothing is run."""
     path = host.path_module()
     exe_folder = path.normpath(str(game.exe_folder or ''))
     project = path.dirname(path.dirname(exe_folder))            # <game>\<Project>\Binaries\Win64
@@ -527,7 +535,7 @@ def unreal_rhi(game):
         return RHI_DX12, 'the game links Direct3D 12 and not Direct3D 11'
     if linked == {'d3d11.dll'}:
         return RHI_DX11, 'the game links Direct3D 11 and not Direct3D 12'
-    if _has_sm6_cache(project):
+    if _has_sm6_cache(_cache_folders(game, project)):
         return RHI_DX12, 'the game has a Shader Model 6 pipeline cache, which only DirectX 12 makes'
     if linked:
         return '', 'the game can run in either DirectX 11 or DirectX 12 and its files do not say which it starts in'
