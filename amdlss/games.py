@@ -17,11 +17,11 @@ SENTINEL = 'AMDLSS-GAMES '  # the bridge prints one line: this prefix and a JSON
 
 STATE_TEXT = {'none': 'not installed', 'direct': 'FSR drop-in', 'optiscaler': 'OptiScaler',
               'dlss': 'DLSS loader (experimental)', 'fsr4': 'FSR 4.1.1 drop-in', 'unknown': 'installed',
-              'inject': 'DLSS injected (Luma UE)'}
+              'inject': 'DLSS injected (Luma UE)', 'inject12': 'DLSS injected (DirectX 12 add-on)'}
 # What to pick in the game's menu, as HelixSR's setup reports it (helixsr_install.in_game). The injected route has no
 # entry of its own in the game: what it runs is chosen in Luma's own overlay.
 IN_GAME = {'direct': 'AMD FSR', 'optiscaler': 'DLSS', 'dlss': 'DLSS', 'fsr4': 'AMD FSR',
-           'inject': "DLSS in Luma's menu (press Home)"}
+           'inject': "DLSS in Luma's menu (press Home)", 'inject12': "the DLSS tab of ReShade's menu (press Home)"}
 
 
 @dataclass
@@ -43,6 +43,8 @@ class Game:
     streamline: bool = True     # the game offers DLSS Frame Generation (Streamline or NGX); scan_streamline()
     upscaler: str = ''          # 'fsr4' when AMD's FSR 4.1.1 is what runs in the game (amdlss.fsr4.mark), else ''
     fsr4: object = None         # amdlss.fsr4.Availability: can this game use FSR 4.1.1; None until judged
+    rhi: str = ''               # the graphics API an injectable game runs: 'dx11', 'dx12', or '' when the files do not say
+    rhi_why: str = ''           # what the files say about it (unreal_rhi), for the window
 
     @property
     def framegen_reason(self):
@@ -67,6 +69,12 @@ class Game:
     def can_install(self):
         # The experimental DLSS loader is never offered: a game already on it can only be removed.
         return self.state != 'dlss' and not self.reason
+
+    @property
+    def inject_choice(self):
+        """True when the files do not say whether an injectable game runs DirectX 11 or 12: both injections are
+        offered (nothing installed yet) and the user picks."""
+        return self.route in INJECTS and not self.rhi and not self.installed
 
     @property
     def route_choice(self):
@@ -432,6 +440,8 @@ def scan_streamline(folder, depth=9):
 # it only fits an Unreal shipping build: the mod hooks the engine's own temporal pass, so nothing else can be told
 # from the files. The DirectX 11 requirement Luma UE has cannot be detected either (amdlss.luma's texts say so).
 INJECT = 'inject'
+INJECT12 = 'inject12'   # the DirectX 12 add-on (amdlss.dx12inject): the same games, told apart by the API they run
+INJECTS = (INJECT, INJECT12)
 INJECT_ANTICHEAT = 'anti-cheat: DLSS injection is not offered'
 SHIPPING_SUFFIXES = ('-win64-shipping.exe', '-wingdk-shipping.exe')
 UNREAL_BINARIES = ('win64', 'wingdk')
@@ -470,12 +480,68 @@ def inject_layout(game):
         return False
 
 
+RHI_DX11, RHI_DX12 = 'dx11', 'dx12'
+# DefaultEngine.ini's project setting: which API the game starts in. A shipped game keeps it inside its .pak, so the
+# file is rarely loose, but when it is, it is the engine's own answer.
+_DEFAULT_RHI = re.compile(rb'^[ \t]*DefaultGraphicsRHI[ \t]*=[ \t]*DefaultGraphicsRHI_DX(11|12)\b', re.I | re.M)
+CACHE_SM6 = '_pcd3d_sm6'    # Unreal names a pipeline cache after its shader format: SM6 only exists on DirectX 12
+CACHE_FOLDERS = ('Content/PipelineCaches', 'Saved')
+CACHE_DEPTH = 3
+GRAPHICS_DLLS = ('d3d11.dll', 'd3d12.dll')
+
+
+def _has_sm6_cache(project):
+    """True when a Shader Model 6 pipeline cache is in the project's shipped caches or its Saved folder (depth
+    CACHE_DEPTH, links not followed)."""
+    for sub in CACHE_FOLDERS:
+        base = os.path.join(project, *sub.split('/'))
+        for root, folders, names in os.walk(base):
+            if os.path.relpath(root, base).count(os.sep) >= CACHE_DEPTH - 1:
+                folders[:] = []
+            if any(CACHE_SM6 in name.lower() for name in names):
+                return True
+    return False
+
+
+def unreal_rhi(game):
+    """(api, why): 'dx12' or 'dx11' when the game's files say which API an Unreal game runs, else ''. Three signals,
+    strongest first: DefaultEngine.ini's DefaultGraphicsRHI when the file is loose; the graphics DLLs the shipping
+    .exe links (an engine built with one RHI links one of d3d11.dll and d3d12.dll; with both it links both and
+    says nothing); a Shader Model 6 pipeline cache, which only DirectX 12 makes. Nothing is run."""
+    path = host.path_module()
+    exe_folder = path.normpath(str(game.exe_folder or ''))
+    project = path.dirname(path.dirname(exe_folder))            # <game>\<Project>\Binaries\Win64
+    try:
+        with open(os.path.join(project, 'Config', 'DefaultEngine.ini'), 'rb') as stream:
+            found = _DEFAULT_RHI.search(stream.read(1 << 20))
+    except OSError:
+        found = None
+    if found:
+        return f'dx{found.group(1).decode()}', f"its DefaultEngine.ini sets DefaultGraphicsRHI_DX{found.group(1).decode()}"
+    exe = shipping_exe(exe_folder)
+    try:
+        linked = set(GRAPHICS_DLLS) & pe.imports(exe) if exe else set()
+    except pe.PEError:
+        linked = set()
+    if linked == {'d3d12.dll'}:
+        return RHI_DX12, 'the game links Direct3D 12 and not Direct3D 11'
+    if linked == {'d3d11.dll'}:
+        return RHI_DX11, 'the game links Direct3D 11 and not Direct3D 12'
+    if _has_sm6_cache(project):
+        return RHI_DX12, 'the game has a Shader Model 6 pipeline cache, which only DirectX 12 makes'
+    if linked:
+        return '', 'the game can run in either DirectX 11 or DirectX 12 and its files do not say which it starts in'
+    return '', "nothing in the game's files says which of DirectX 11 and DirectX 12 it runs"
+
+
 def mark_inject(game, placed=False):
     """An Unreal x64 shipping game that ships no upscaler of its own takes AMDLSS's DLSS injection: it is offered (no
-    reason) with the route 'inject'. Anti-cheat files refuse it, with a reason of its own - but only while AMDLSS has
-    not injected into it yet (`placed` says it has, from amdlss.luma's record): an install that is there must stay
-    offered, so Remove stays reachable, the way a game HelixSR already runs in always passes. Everything else keeps
-    the plain "no DLSS, FSR 3.1 or XeSS found" and stays hidden. Called once the anti-cheat scan has run
+    reason) with the route 'inject' (Luma UE, DirectX 11) or 'inject12' (the DirectX 12 add-on), by the API its files
+    say it runs (unreal_rhi). When they do not say, the route stays 'inject' and the game's `inject_choice` is true:
+    the window offers both. Anti-cheat files refuse it, with a reason of its own - but only while AMDLSS has
+    not injected into it yet (`placed` says it has, from the record of either route): an install that is there must
+    stay offered, so Remove stays reachable, the way a game HelixSR already runs in always passes. Everything else
+    keeps the plain "no DLSS, FSR 3.1 or XeSS found" and stays hidden. Called once the anti-cheat scan has run
     (app.refresh_games): classify() cannot know its files yet."""
     if game.reason not in ('', NO_UPSCALER) or not (game.folder and game.exe_folder):
         return game
@@ -487,7 +553,8 @@ def mark_inject(game, placed=False):
         if game.reason:
             game.reason = INJECT_ANTICHEAT
         return game
-    game.reason, game.route = '', INJECT
+    game.rhi, game.rhi_why = unreal_rhi(game)
+    game.reason, game.route = '', INJECT12 if game.rhi == RHI_DX12 else INJECT
     return game
 
 

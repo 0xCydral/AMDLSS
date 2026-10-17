@@ -28,6 +28,7 @@ class _Image:
     def __init__(self, stream, size):
         self.stream, self.size = stream, size
         self.sections = []
+        self.table = 0   # where the data directories start (set by _headers)
 
     def read(self, offset, length):
         if offset < 0 or length < 0 or offset + length > self.size:
@@ -62,6 +63,7 @@ def _headers(image):
         raise PEError('not a Windows program file (unknown optional header)')
     is_64 = magic == 0x20b
     table = optional + (112 if is_64 else 96)
+    image.table = table
     directories = image.unpack('<' + 'II' * 3, table)   # export, import, resource
     if count > 96:
         raise PEError('too many sections')
@@ -127,6 +129,37 @@ def inspect(path):
             image = _Image(stream, os.fstat(stream.fileno()).st_size)
             is_64, export_dir, resource_dir = _headers(image)
             return Info(is_64, _exports(image, export_dir), _version(image, resource_dir))
+    except (OSError, struct.error) as error:
+        raise PEError(f'cannot read {path}: {error}')
+
+
+MAX_IMPORTS = 2048
+# (data directory index, descriptor size, offset of the DLL-name RVA in it): the import table and the delay-load one.
+IMPORT_TABLES = ((1, 20, 12), (13, 32, 4))
+
+
+def imports(path):
+    """The DLL names (lower case) a program imports, from its import table and its delay-load table; PEError when it
+    is not a readable PE file. Nothing is loaded or run. AMDLSS reads which graphics DLLs an Unreal .exe links."""
+    try:
+        with open(path, 'rb') as stream:
+            image = _Image(stream, os.fstat(stream.fileno()).st_size)
+            _headers(image)
+            (count,) = image.unpack('<I', image.table - 4)
+            names = set()
+            for index, size, name_at in IMPORT_TABLES:
+                if index >= count:
+                    continue
+                rva, _length = image.unpack('<II', image.table + 8 * index)
+                if not rva:
+                    continue
+                start = image.to_offset(rva)
+                for number in range(MAX_IMPORTS):
+                    (name,) = image.unpack('<I', start + size * number + name_at)
+                    if not name:
+                        break
+                    names.add(image.text(name).lower())
+            return frozenset(names)
     except (OSError, struct.error) as error:
         raise PEError(f'cannot read {path}: {error}')
 
