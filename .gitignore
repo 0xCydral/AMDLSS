@@ -4,3 +4,6 @@ __pycache__/
 out/
 dist/
 *.spec
+probe/dx12/third_party/
+probe/dx12/out/
+probe/dx12/dlss/third_party/
