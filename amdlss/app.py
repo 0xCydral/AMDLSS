@@ -977,7 +977,10 @@ class App:
         return f'✓ HelixSR {version} is installed and built ({short_path(self.helixsr_folder)})'
 
     def outdated(self, game):
-        """True when `game` runs an older HelixSR than the one AMDLSS runs (either version unknown: no)."""
+        """True when `game` runs an older HelixSR than the one AMDLSS runs (either version unknown: no), or an older
+        DirectX 12 add-on than the one this AMDLSS carries."""
+        if game.route == gamelist.INJECT12 and dx12inject.addon_outdated(game.exe_folder):
+            return True
         return game.installed and helixsr.older(game.helixsr, self.helixsr_version)
 
     # ---- covers ---------------------------------------------------------------------------------

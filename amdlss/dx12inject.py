@@ -121,6 +121,14 @@ def _load(exe_folder):
         return None
 
 
+def addon_outdated(exe_folder):
+    """True when the add-on AMDLSS placed in the game is not the one this AMDLSS carries, so the card asks for Update.
+    No install, no record entry or no shipped add-on: False."""
+    record, shipped = _load(exe_folder) if installed(exe_folder) else None, bundled(ADDON)
+    placed = next((item for item in (record or {}).get('created', []) if item.get('name') == ADDON), None)
+    return placed is not None and shipped is not None and placed.get('sha256') != helixsr.sha256_of(shipped)
+
+
 def install_into(exe_folder, items, record):
     """Places `items` ([(name, source)] where source is a Path to copy or the bytes to write) in `exe_folder`, keeping
     every game file that had to give way in the HelixSR folder's backup, and fills record['moved']/record['created']."""

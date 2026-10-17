@@ -187,6 +187,17 @@ def test_update_on_the_other_layout_and_a_card_change_leave_one_consistent_insta
     assert tree(exe) == before
 
 
+def test_an_add_on_older_than_the_shipped_one_asks_for_update(tmp_path, bundle):
+    client, entry, data, exe = world(tmp_path)
+    assert not dx12inject.addon_outdated(exe)                                      # nothing installed
+    dx12inject.install_game(client, entry, [], data, cards=[NVIDIA_CARD])
+    assert not dx12inject.addon_outdated(exe)                                      # just installed: current
+    (bundle / dx12inject.ADDON).write_bytes(b'STAND-IN add-on, next release')
+    assert dx12inject.addon_outdated(exe)                                          # AMDLSS carries a newer one
+    dx12inject.install_game(client, entry, [], data, cards=[NVIDIA_CARD])
+    assert not dx12inject.addon_outdated(exe)                                      # Update placed it
+
+
 def test_kept_scale_ignores_junk_and_ini_bytes_touch_only_that_line(tmp_path):
     exe = tmp_path
     assert dx12inject.kept_scale(exe) == b'quality'                                # no ini yet
