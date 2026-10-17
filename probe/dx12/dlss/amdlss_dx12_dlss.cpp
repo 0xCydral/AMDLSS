@@ -13,6 +13,9 @@
  * and kept as a pending snapshot; DLSS runs at the resolve, into the resolve's output. UpdateHistory is skipped only once
  * a previous two-pass frame was fully replaced (logic::TwoPassGate); until then it runs and only the resolve is replaced.
  *
+ * A trigger file next to the add-on (amdlss_dx12_dlss.dump) captures the next N upscale outputs, DLSS or the game's TSR, to
+ * dump_seq/ as DDS files (see "frame-sequence dump" below and the README); seq_quality.py measures them.
+ *
  * Known gaps, logged once: translucency u4 is not used and u2 (history metadata) is not written. u1, TSR's half-size
  * output that bloom and eye adaptation read, is filled from the DLSS output (ini fill_half_res).
  */
@@ -33,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -416,11 +420,17 @@ bool on_copy_descriptor_tables(device *dev, uint32_t count, const descriptor_tab
 // Two-pass mode: an UpdateHistory whose resolve never came (defined with the pending snapshots below; g_mutex held).
 void drop_pending_locked(const command_list *cmd_list, const char *why);
 
+// The frame-sequence dump's side of a reset (defined with the dump below); takes its own locks, so g_mutex must not be held.
+void dump_cmd_reset(const command_list *cmd_list);
+
 void on_reset_command_list(command_list *cmd_list)
 {
-	std::lock_guard<std::mutex> lock(g_mutex);
-	g_cmds.erase(cmd_list);
-	drop_pending_locked(cmd_list, "the command list was reset or destroyed");
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		g_cmds.erase(cmd_list);
+		drop_pending_locked(cmd_list, "the command list was reset or destroyed");
+	}
+	dump_cmd_reset(cmd_list);
 }
 
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
@@ -1941,10 +1951,657 @@ void finish_resolve(bool replaced, const Snapshot &s)
 			s.update_skipped ? " on the stale history of an earlier frame" : "");
 }
 
+// ---- frame-sequence dump (trigger file) --------------------------------------------------------------------------------
+//
+// A file named amdlss_dx12_dlss.dump next to the add-on (first line: a frame count 1..120, default 30) is picked up from the
+// present hook at most once a second and deleted; the next N upscale outputs are then copied to dump_seq/<stamp>-<DLSS|TSR>-<WxH>/
+// frame_NNN.dds (the real DXGI format in a DX10 header) with an index.txt. When DLSS replaced the pass the copy is recorded
+// right after the evaluate; when the game's TSR ran (enabled=0 or any fallback) there is no after-dispatch event, so it is
+// recorded at the first event that follows the dispatch on the same list (barrier, draw, dispatch, close), where u0 has been
+// written and the game has not touched it yet. The copies go to a ring of readback buffers; a fence signalled from the
+// present hook tells a worker thread when the GPU is done, and only that thread maps and writes files. Nothing waits on the GPU.
+//
+// Locks: g_dump.m guards the sequence and may take g_mutex (resource create and destroy events do). g_dump_pend_m is a leaf lock
+// for the TSR bookkeeping, so the dispatch path (g_mutex held) can use it. Nothing takes g_dump.m while holding g_mutex.
+
+constexpr const char *kDumpTrigger = "amdlss_dx12_dlss.dump";
+constexpr uint32_t kDumpRing = 8;       // readback buffers for the outputs; one more slot holds the first frame's scene color
+constexpr double kDumpStallSeconds = 30; // a copy whose list is never submitted, or whose fence never completes, is given up
+
+struct DumpFrameInfo
+{
+	const char *upscaler = "TSR";
+	uint32_t rw = 0, rh = 0;
+	bool have_jitter = false;
+	float jx = 0, jy = 0;
+	int cut = -1; // -1: unknown
+};
+
+struct DumpJob
+{
+	enum class State { free, recorded, submitted, signalled, writing, dead } state = State::free;
+	resource buf = { 0 };
+	bool own_buf = false; // made for this one copy (the scene color), destroyed after the write
+	const command_list *cmd_list = nullptr;
+	command_queue *queue = nullptr;
+	ID3D12Fence *fence = nullptr;
+	uint64_t fence_last = 0, fence_value = 0;
+	uint32_t submitted_present = 0;
+	LONGLONG since = 0;
+	int frame = 0; // -1 for the scene color
+	format fmt = format::unknown;
+	uint32_t texel = 0, width = 0, height = 0, stride = 0;
+	uint64_t size = 0;
+	std::string file, prefix; // prefix: the index row up to the file column
+};
+
+struct DumpSeq
+{
+	std::mutex m;
+	logic::DumpCounter counter;
+	bool started = false; // the folder and the ring exist
+	device *dev = nullptr;
+	std::string dir, header;
+	format fmt = format::unknown;
+	uint32_t texel = 0, width = 0, height = 0, stride = 0;
+	uint64_t size = 0;
+	DumpJob jobs[kDumpRing + 1]; // [kDumpRing] is the scene color
+	bool input_taken = false;
+	uint32_t written = 0, dropped = 0, failed = 0;
+	std::map<int, std::string> lines; // index rows by frame, -1 first
+} g_dump;
+std::atomic<bool> g_dump_on { false };   // a trigger is waiting for or taking upscale outputs
+std::atomic<bool> g_dump_live { false }; // the folder exists and the worker runs
+std::atomic<uint32_t> g_presents { 0 };
+
+struct DumpPending
+{
+	Tex out, in;
+	bool have_in = false;
+	DumpFrameInfo fi;
+};
+struct DumpNote // what the game's two-pass UpdateHistory was given: the resolve has no constants of its own worth reading
+{
+	bool ok = false;
+	logic::TsrConstants tsr;
+	Tex color;
+};
+std::mutex g_dump_pend_m;
+std::unordered_map<const command_list *, DumpPending> g_dump_pending; // the game's TSR dispatch ran; the copy is recorded at the next event
+std::unordered_map<const command_list *, DumpNote> g_dump_notes;
+std::atomic<uint32_t> g_dump_pending_n { 0 };
+
+bool dump_format_of(const Tex &t, format &fmt, uint32_t &texel)
+{
+	const format rf = t.res_format, vf = t.view_format;
+	const bool view_ok = vf != format::unknown && !format_is_typeless(vf) && format_row_pitch(vf, 1) == format_row_pitch(rf, 1);
+	const format f = view_ok ? vf : format_to_default_typed(rf);
+	if (f == format::unknown || format_is_typeless(f) || format_is_block_compressed(f) || format_row_pitch(f, 1) == 0)
+		return false;
+	fmt = f;
+	texel = format_row_pitch(f, 1);
+	return true;
+}
+
+resource_usage dump_state(const Tex &t)
+{
+	return t.uav_view ? resource_usage::unordered_access : resource_usage::shader_resource_non_pixel;
+}
+
+// Copy of the probe's DDS writer: DX10 header, rows without the readback padding.
+bool dump_write_dds(const std::string &path, const DumpJob &j, const uint8_t *data)
+{
+	FILE *f = fopen(path.c_str(), "wb");
+	if (f == nullptr)
+		return false;
+	const uint32_t header[37] = {
+		0x20534444, 124, 0x100F, j.height, j.width, j.width * j.texel, 0, 1,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // reserved1[11]
+		32, 0x4, 0x30315844, 0, 0, 0, 0, 0, // pixel format: fourCC 'DX10'
+		0x1000, 0, 0, 0, 0, // caps, caps2-4, reserved2
+		static_cast<uint32_t>(j.fmt), 3, 0, 1, 0, // DX10 header: DXGI format, TEXTURE2D, misc, array size, misc2
+	};
+	bool ok = fwrite(header, sizeof(header), 1, f) == 1;
+	const size_t row = static_cast<size_t>(j.width) * j.texel;
+	for (uint32_t y = 0; ok && y < j.height; ++y)
+		ok = fwrite(data + static_cast<size_t>(y) * j.stride, 1, row, f) == row;
+	return fclose(f) == 0 && ok;
+}
+
+bool dump_make_buffer(device *dev, uint64_t size, resource &out)
+{
+	return dev->create_resource(resource_desc(size, memory_heap::readback, resource_usage::copy_dest), nullptr, resource_usage::copy_dest, &out) && out.handle != 0;
+}
+
+std::string dump_index_text_locked()
+{
+	std::string text = g_dump.header;
+	for (const auto &[frame, line] : g_dump.lines)
+		text += line + "\n";
+	return text;
+}
+
+void dump_write_text(const std::string &path, const std::string &text)
+{
+	if (FILE *f = fopen(path.c_str(), "wb"))
+	{
+		fwrite(text.data(), 1, text.size(), f);
+		fclose(f);
+	}
+}
+
+// Worker thread: waits for the fences, maps the readback buffers, writes the files and the index, then cleans up. One per sequence.
+void dump_worker()
+{
+	const LONGLONG freq = qpc_freq();
+	for (;;)
+	{
+		DumpJob job;
+		int slot = -1;
+		std::string index;
+		bool give_up_logged = false;
+		{
+			std::lock_guard<std::mutex> lock(g_dump.m);
+			const LONGLONG now = qpc_now();
+			for (int i = 0; i <= static_cast<int>(kDumpRing); ++i)
+			{
+				DumpJob &j = g_dump.jobs[i];
+				if (j.state == DumpJob::State::signalled && slot < 0 && j.fence->GetCompletedValue() >= j.fence_value && g_presents >= j.submitted_present + 2)
+				{
+					j.state = DumpJob::State::writing;
+					job = j;
+					slot = i;
+				}
+				else if ((j.state == DumpJob::State::recorded || j.state == DumpJob::State::submitted || j.state == DumpJob::State::signalled) &&
+					static_cast<double>(now - j.since) > kDumpStallSeconds * freq)
+				{
+					j.state = DumpJob::State::dead; // its buffer may still be written by the GPU: never reused or freed
+					++g_dump.failed;
+					g_dump.lines[j.frame] = j.prefix + "failed: the copy never completed (command list not submitted or fence never reached)";
+					give_up_logged = true;
+				}
+			}
+			if (give_up_logged)
+				index = dump_index_text_locked();
+		}
+		if (give_up_logged)
+		{
+			log_line("frame dump: gave up on a copy that never completed (see index.txt)");
+			dump_write_text(g_dump.dir + "\\index.txt", index);
+		}
+
+		if (slot >= 0)
+		{
+			void *data = nullptr;
+			std::string why;
+			bool ok = false;
+			if (!g_dump.dev->map_buffer_region(job.buf, 0, job.size, map_access::read_only, &data) || data == nullptr)
+				why = "cannot map the readback buffer";
+			else
+			{
+				ok = dump_write_dds(g_dump.dir + "\\" + job.file, job, static_cast<const uint8_t *>(data));
+				g_dump.dev->unmap_buffer_region(job.buf);
+				if (!ok)
+					why = "cannot write " + job.file;
+			}
+			if (job.own_buf)
+				g_dump.dev->destroy_resource(job.buf);
+			{
+				std::lock_guard<std::mutex> lock(g_dump.m);
+				DumpJob &j = g_dump.jobs[slot];
+				if (ok)
+					++g_dump.written;
+				else
+					++g_dump.failed;
+				g_dump.lines[job.frame] = job.prefix + (ok ? job.file : "failed: " + why);
+				if (j.own_buf)
+					j.buf = { 0 };
+				j.state = DumpJob::State::free;
+				index = dump_index_text_locked();
+			}
+			dump_write_text(g_dump.dir + "\\index.txt", index);
+			if (!ok)
+				log_line("frame dump: %s", why.c_str());
+			continue;
+		}
+
+		bool done = false;
+		{
+			std::lock_guard<std::mutex> lock(g_dump.m);
+			done = !g_dump.counter.active() && !g_dump_on;
+			for (const DumpJob &j : g_dump.jobs)
+				done = done && (j.state == DumpJob::State::free || j.state == DumpJob::State::dead);
+		}
+		if (done)
+			break;
+		Sleep(4);
+	}
+
+	std::vector<resource> buffers;
+	std::string index, dir;
+	uint32_t written, dropped, failed;
+	int frames;
+	{
+		std::lock_guard<std::mutex> lock(g_dump.m);
+		for (DumpJob &j : g_dump.jobs)
+		{
+			if (j.state == DumpJob::State::free && j.buf.handle != 0)
+				buffers.push_back(j.buf);
+			if (j.fence != nullptr && j.state != DumpJob::State::dead)
+				j.fence->Release();
+		}
+		index = dump_index_text_locked();
+		dir = g_dump.dir;
+		written = g_dump.written;
+		dropped = g_dump.dropped;
+		failed = g_dump.failed;
+		frames = g_dump.counter.taken;
+	}
+	for (const resource &r : buffers)
+		g_dump.dev->destroy_resource(r);
+	dump_write_text(dir + "\\index.txt", index);
+	log_line("frame dump: complete, %u of %d frames written to %s (%u dropped, %u failed)", written, frames, dir.c_str(), dropped, failed);
+	{
+		std::lock_guard<std::mutex> lock(g_dump.m);
+		for (DumpJob &j : g_dump.jobs)
+			j = DumpJob();
+		g_dump.started = g_dump.input_taken = false;
+		g_dump.written = g_dump.dropped = g_dump.failed = 0;
+		g_dump.lines.clear();
+		g_dump_live = false;
+	}
+}
+
+// First frame of a sequence; g_dump.m held. Creates the folder and the ring and starts the worker.
+bool dump_begin_locked(device *dev, const Tex &out, format fmt, uint32_t texel, const DumpFrameInfo &fi)
+{
+	SYSTEMTIME t;
+	GetLocalTime(&t);
+	char stamp[32];
+	snprintf(stamp, sizeof(stamp), "%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+	CreateDirectoryA((g_dir + "dump_seq").c_str(), nullptr);
+	const std::string dir = g_dir + "dump_seq\\" + logic::dump_dir_name(stamp, fi.upscaler, fi.rw, fi.rh);
+	if (!CreateDirectoryA(dir.c_str(), nullptr))
+	{
+		log_line("frame dump: cannot create %s (error %lu); the trigger is dropped", dir.c_str(), GetLastError());
+		return false;
+	}
+	g_dump.width = out.width;
+	g_dump.height = out.height;
+	g_dump.fmt = fmt;
+	g_dump.texel = texel;
+	g_dump.stride = texel * ((out.width + 255) & ~255u); // whole rows padded to 256 texels keep the pitch 256-byte aligned
+	g_dump.size = static_cast<uint64_t>(g_dump.stride) * out.height;
+	for (uint32_t i = 0; i < kDumpRing; ++i)
+		if (!dump_make_buffer(dev, g_dump.size, g_dump.jobs[i].buf))
+		{
+			for (uint32_t k = 0; k < i; ++k)
+			{
+				dev->destroy_resource(g_dump.jobs[k].buf);
+				g_dump.jobs[k].buf = { 0 };
+			}
+			log_line("frame dump: cannot create %u readback buffers of %llu bytes; the trigger is dropped", kDumpRing, static_cast<unsigned long long>(g_dump.size));
+			return false;
+		}
+	g_dump.dev = dev;
+	g_dump.dir = dir;
+	char head[256];
+	snprintf(head, sizeof(head), "# amdlss_dx12_dlss frame sequence; files are DDS with a DX10 header, dxgi format %u, output texture %ux%u\n"
+		"# present = the add-on's present counter when the frame was recorded\nframe | present | upscaler | render | output | jitter | camera_cut | file\n",
+		static_cast<unsigned>(fmt), out.width, out.height);
+	g_dump.header = head;
+	g_dump.started = true;
+	g_dump_live = true;
+	log_line("frame dump: started, %d frames of %s output %ux%u dxgi format %u (render %ux%u) to %s", g_dump.counter.left, fi.upscaler, out.width, out.height,
+		static_cast<unsigned>(fmt), fi.rw, fi.rh, dir.c_str());
+	std::thread(dump_worker).detach();
+	return true;
+}
+
+void dump_copy(command_list *cmd_list, resource src, resource_usage state, resource dst, uint32_t row_length)
+{
+	const resource_usage to = resource_usage::copy_source;
+	cmd_list->barrier(1, &src, &state, &to);
+	cmd_list->copy_texture_to_buffer(src, 0, nullptr, dst, 0, row_length, 0);
+	cmd_list->barrier(1, &src, &to, &state);
+}
+
+// Takes the next frame of the running sequence (if any) and records its copy onto cmd_list. Every failure is logged or indexed and the
+// game goes on. `in` (the scene color) is copied for the first frame only.
+void dump_record(command_list *cmd_list, const Tex &out, resource_usage out_state, const Tex *in, resource_usage in_state, const DumpFrameInfo &fi)
+{
+	if (!g_dump_on)
+		return;
+	std::lock_guard<std::mutex> lock(g_dump.m);
+	if (!g_dump.counter.active())
+		return;
+	device *dev = cmd_list->get_device();
+	format fmt = format::unknown;
+	uint32_t texel = 0;
+	const bool fmt_ok = out.ok && dump_format_of(out, fmt, texel);
+	if (!g_dump.started && (!fmt_ok || !dump_begin_locked(dev, out, fmt, texel, fi)))
+	{
+		if (!fmt_ok)
+			log_line("frame dump: cannot capture the upscale output (%s); the trigger is dropped", describe("u0 output", out).c_str());
+		g_dump.counter = logic::DumpCounter();
+		g_dump_on = false;
+		return;
+	}
+	const int n = g_dump.counter.take();
+	g_dump_on = g_dump.counter.active();
+	char label[16];
+	snprintf(label, sizeof(label), "%03d", n);
+	const auto prefix = [&](const char *name, uint32_t w, uint32_t h) {
+		return logic::dump_index_line(name, g_presents, fi.upscaler, fi.rw, fi.rh, w, h, fi.have_jitter, fi.jx, fi.jy, fi.cut, "");
+	};
+
+	if (!fmt_ok || out.width != g_dump.width || out.height != g_dump.height || fmt != g_dump.fmt)
+	{
+		++g_dump.failed;
+		g_dump.lines[n] = prefix(label, out.width, out.height) + "failed: the output texture changed size or format during the sequence";
+		return;
+	}
+	int slot = -1;
+	for (uint32_t i = 0; i < kDumpRing && slot < 0; ++i)
+		if (g_dump.jobs[i].state == DumpJob::State::free)
+			slot = static_cast<int>(i);
+	if (slot < 0)
+	{
+		++g_dump.dropped;
+		g_dump.lines[n] = prefix(label, out.width, out.height) + "dropped: all readback buffers busy";
+		return;
+	}
+	DumpJob &j = g_dump.jobs[slot];
+	j.state = DumpJob::State::recorded;
+	j.cmd_list = cmd_list;
+	j.queue = nullptr;
+	j.since = qpc_now();
+	j.frame = n;
+	j.fmt = fmt;
+	j.texel = texel;
+	j.width = g_dump.width;
+	j.height = g_dump.height;
+	j.stride = g_dump.stride;
+	j.size = g_dump.size;
+	j.file = logic::dump_file_name("frame", n);
+	j.prefix = prefix(label, out.width, out.height);
+	dump_copy(cmd_list, out.res, out_state, j.buf, g_dump.stride / texel);
+
+	if (n == 0 && in != nullptr && !g_dump.input_taken)
+	{
+		g_dump.input_taken = true;
+		format ifmt = format::unknown;
+		uint32_t itexel = 0;
+		DumpJob &ij = g_dump.jobs[kDumpRing];
+		if (!in->ok || !dump_format_of(*in, ifmt, itexel))
+			log_line("frame dump: the scene color is not copyable (%s); only the outputs are captured", describe("u3 color", *in).c_str());
+		else
+		{
+			ij.fmt = ifmt;
+			ij.texel = itexel;
+			ij.width = in->width;
+			ij.height = in->height;
+			ij.stride = itexel * ((in->width + 255) & ~255u);
+			ij.size = static_cast<uint64_t>(ij.stride) * in->height;
+			if (!dump_make_buffer(dev, ij.size, ij.buf))
+				log_line("frame dump: cannot create the readback buffer for the scene color; only the outputs are captured");
+			else
+			{
+				ij.own_buf = true;
+				ij.state = DumpJob::State::recorded;
+				ij.cmd_list = cmd_list;
+				ij.queue = nullptr;
+				ij.since = j.since;
+				ij.frame = -1;
+				ij.file = logic::dump_file_name("input", 0);
+				ij.prefix = logic::dump_index_line("input", g_presents, fi.upscaler, in->width, in->height, in->width, in->height, fi.have_jitter, fi.jx, fi.jy, fi.cut, "");
+				dump_copy(cmd_list, in->res, in_state, ij.buf, ij.stride / itexel);
+			}
+		}
+	}
+}
+
+// ---- the game's TSR ran: find u0 now, copy it at the next event on the list ----
+
+// UpdateHistory of the two-pass mode ran (replaced or not): remember its constants and scene color for the resolve. g_mutex held.
+void dump_note_update(command_list *cmd_list, const CmdState &cs, uint64_t hash)
+{
+	if (!g_dump_on)
+		return;
+	DumpNote n;
+	Bindings b;
+	std::string why;
+	if (find_bindings(cmd_list->get_device(), cs, b, why, false))
+		n.color = b.color;
+	n.ok = read_tsr_constants(cmd_list->get_device(), cs, logic::tsr_layout_for_hash(hash), n.tsr, why);
+	std::lock_guard<std::mutex> lock(g_dump_pend_m);
+	g_dump_notes[cmd_list] = n;
+}
+
+// The game's single-pass TSR or its two-pass resolve is about to run. g_mutex held.
+void dump_arm_tsr(command_list *cmd_list, const CmdState &cs, uint64_t hash, bool single)
+{
+	if (!g_dump_on)
+		return;
+	device *dev = cmd_list->get_device();
+	Bindings b;
+	std::string why;
+	if (!find_bindings(dev, cs, b, why, false))
+	{
+		if (first_n("dump-tsr-bindings", 3))
+			log_line("frame dump: the game's TSR output cannot be found (%s); this frame is not captured", why.c_str());
+		return;
+	}
+	DumpNote n;
+	if (single)
+	{
+		n.color = b.color;
+		n.ok = read_tsr_constants(dev, cs, logic::tsr_layout_for_hash(hash), n.tsr, why);
+	}
+	else
+	{
+		std::lock_guard<std::mutex> lock(g_dump_pend_m);
+		const auto it = g_dump_notes.find(cmd_list);
+		if (it != g_dump_notes.end())
+			n = it->second;
+	}
+	DumpPending p;
+	p.out = b.output;
+	if (n.ok)
+	{
+		p.fi.rw = static_cast<uint32_t>(n.tsr.input_size[0] + 0.5f);
+		p.fi.rh = static_cast<uint32_t>(n.tsr.input_size[1] + 0.5f);
+		p.fi.have_jitter = true;
+		p.fi.jx = n.tsr.jitter[0];
+		p.fi.jy = n.tsr.jitter[1];
+		p.fi.cut = n.tsr.camera_cut != 0;
+	}
+	else if (n.color.ok)
+	{
+		p.fi.rw = n.color.width;
+		p.fi.rh = n.color.height;
+	}
+	if (n.color.ok)
+	{
+		p.in = n.color;
+		p.have_in = true;
+	}
+	std::lock_guard<std::mutex> lock(g_dump_pend_m);
+	g_dump_pending[cmd_list] = p;
+	g_dump_pending_n = static_cast<uint32_t>(g_dump_pending.size());
+}
+
+// Any event on a command list: if the game's TSR dispatch was the last thing recorded on it, copy its output now. The barrier event
+// fires after the barrier, so a transition of u0 or the scene color tells the state they are in now.
+void dump_post_event(command_list *cmd_list, uint32_t count = 0, const resource *res = nullptr, const resource_usage *new_states = nullptr)
+{
+	if (g_dump_pending_n == 0 || t_busy)
+		return;
+	DumpPending p;
+	{
+		std::lock_guard<std::mutex> lock(g_dump_pend_m);
+		const auto it = g_dump_pending.find(cmd_list);
+		if (it == g_dump_pending.end())
+			return;
+		p = it->second;
+		g_dump_pending.erase(it);
+		g_dump_pending_n = static_cast<uint32_t>(g_dump_pending.size());
+	}
+	resource_usage out_state = resource_usage::unordered_access, in_state = dump_state(p.in);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		if (new_states[i] == resource_usage::undefined)
+			continue;
+		if (res[i].handle == p.out.res.handle)
+			out_state = new_states[i];
+		if (p.have_in && res[i].handle == p.in.res.handle)
+			in_state = new_states[i];
+	}
+	dump_record(cmd_list, p.out, out_state, p.have_in ? &p.in : nullptr, in_state, p.fi);
+}
+
+// DLSS wrote u0 (and the add-on put every input back in its state): copy it right here.
+void dump_dlss_frame(command_list *cmd_list, const Snapshot &s)
+{
+	DumpFrameInfo fi;
+	fi.upscaler = "DLSS";
+	fi.rw = static_cast<uint32_t>(s.tsr.input_size[0] + 0.5f);
+	fi.rh = static_cast<uint32_t>(s.tsr.input_size[1] + 0.5f);
+	fi.have_jitter = true;
+	fi.jx = s.jitter_x;
+	fi.jy = s.jitter_y;
+	fi.cut = s.tsr.camera_cut != 0;
+	const uint32_t ow = static_cast<uint32_t>(s.tsr.history_size[0] + 0.5f), oh = static_cast<uint32_t>(s.tsr.history_size[1] + 0.5f);
+	if ((ow != s.b.output.width || oh != s.b.output.height) && first_time("dump-viewport"))
+		log_line("frame dump: the DLSS output viewport %ux%u is smaller than its texture %ux%u; the whole texture is captured", ow, oh, s.b.output.width, s.b.output.height);
+	dump_record(cmd_list, s.b.output, resource_usage::unordered_access, s.b.color.ok ? &s.b.color : nullptr, dump_state(s.b.color), fi);
+}
+
+// A reset or destroyed list: whatever was waiting on it will never run.
+void dump_cmd_reset(const command_list *cmd_list)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_dump_pend_m);
+		g_dump_pending.erase(cmd_list);
+		g_dump_notes.erase(cmd_list);
+		g_dump_pending_n = static_cast<uint32_t>(g_dump_pending.size());
+	}
+	if (!g_dump_live)
+		return;
+	std::lock_guard<std::mutex> lock(g_dump.m);
+	for (DumpJob &j : g_dump.jobs)
+		if (j.state == DumpJob::State::recorded && j.cmd_list == cmd_list)
+		{
+			j.state = DumpJob::State::free; // never submitted, so the GPU never touches its buffer; it is destroyed at the end
+			++g_dump.failed;
+			g_dump.lines[j.frame] = j.prefix + "failed: the command list was reset before it was submitted";
+		}
+}
+
+void on_execute_command_list(command_queue *queue, command_list *cmd_list)
+{
+	if (!g_dump_live)
+		return;
+	std::lock_guard<std::mutex> lock(g_dump.m);
+	for (DumpJob &j : g_dump.jobs)
+		if (j.state == DumpJob::State::recorded && j.cmd_list == cmd_list)
+		{
+			j.state = DumpJob::State::submitted;
+			j.queue = queue;
+			j.submitted_present = g_presents;
+		}
+}
+
+// Reads the trigger file (at most once a second, from the present thread), deletes it and starts a sequence.
+void dump_check_trigger()
+{
+	static LONGLONG last = 0;
+	const LONGLONG now = qpc_now();
+	if (last != 0 && now - last < qpc_freq())
+		return;
+	last = now;
+	const std::string path = g_dir + kDumpTrigger;
+	FILE *f = fopen(path.c_str(), "rb");
+	if (f == nullptr)
+		return;
+	char buf[64] = {};
+	const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	if (!DeleteFileA(path.c_str()))
+	{
+		if (first_n("dump-trigger-delete", 3))
+			log_line("frame dump: cannot delete the trigger file %s (error %lu), ignoring it", path.c_str(), GetLastError());
+		return;
+	}
+	const int frames = logic::parse_dump_count(std::string(buf, n));
+	std::lock_guard<std::mutex> lock(g_dump.m);
+	if (g_dump.started)
+	{
+		log_line("frame dump: trigger ignored, a sequence is still being captured or written");
+		return;
+	}
+	g_dump.counter.start(frames);
+	g_dump_on = true;
+}
+
+// Present: count it, look for the trigger, and signal a fence for every copy whose list has been submitted since the last present.
+void dump_present()
+{
+	++g_presents;
+	dump_check_trigger();
+	if (!g_dump_live)
+		return;
+	std::lock_guard<std::mutex> lock(g_dump.m);
+	for (DumpJob &j : g_dump.jobs)
+	{
+		if (j.state != DumpJob::State::submitted || g_presents <= j.submitted_present)
+			continue;
+		if (j.fence == nullptr)
+			reinterpret_cast<ID3D12Device *>(g_dump.dev->get_native())->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void **>(&j.fence));
+		const HRESULT hr = j.fence != nullptr ? reinterpret_cast<ID3D12CommandQueue *>(j.queue->get_native())->Signal(j.fence, j.fence_last + 1) : E_FAIL;
+		if (FAILED(hr))
+		{
+			j.state = DumpJob::State::dead;
+			++g_dump.failed;
+			g_dump.lines[j.frame] = j.prefix + "failed: no fence could be signalled";
+			log_line("frame dump: fence signal failed (0x%08x); that frame is lost", static_cast<unsigned>(hr));
+			continue;
+		}
+		j.fence_value = ++j.fence_last;
+		j.state = DumpJob::State::signalled;
+	}
+}
+
+// The dump needs an event after the dispatch: these are the ones that can come first on a list.
+void on_barrier(command_list *cmd_list, uint32_t count, const resource *res, const resource_usage *, const resource_usage *new_states)
+{
+	dump_post_event(cmd_list, count, res, new_states);
+}
+void on_close_command_list(command_list *cmd_list)
+{
+	dump_post_event(cmd_list);
+}
+bool on_draw(command_list *cmd_list, uint32_t, uint32_t, uint32_t, uint32_t)
+{
+	dump_post_event(cmd_list);
+	return false;
+}
+bool on_draw_indexed(command_list *cmd_list, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+{
+	dump_post_event(cmd_list);
+	return false;
+}
+bool on_indirect(command_list *cmd_list, indirect_command, resource, uint64_t, uint32_t, uint32_t)
+{
+	dump_post_event(cmd_list);
+	return false;
+}
+
 bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 {
 	if (t_busy)
 		return false;
+	dump_post_event(cmd_list);
 	Snapshot s;
 	logic::TsrPass pass = logic::TsrPass::none;
 	{
@@ -1962,19 +2619,31 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 		{
 			status_mode("single pass");
 			if (!begin_upscale_frame())
+			{
+				dump_arm_tsr(cmd_list, it->second, pipe->second, true);
 				return false;
+			}
 			const Prep prep = prepare_upscale(cmd_list, it->second, logic::tsr_layout_for_hash(pipe->second), s);
 			if (prep != Prep::replace)
+			{
+				if (prep == Prep::fallback)
+					dump_arm_tsr(cmd_list, it->second, pipe->second, true);
 				return prep == Prep::keep_previous;
+			}
 			break;
 		}
 		case logic::TsrPass::update_history:
+			dump_note_update(cmd_list, it->second, pipe->second);
 			return on_update_history(cmd_list, it->second, pipe->second);
 		case logic::TsrPass::resolve:
 		{
 			const Resolve r = take_resolve(cmd_list, it->second, s);
 			if (r != Resolve::replace)
+			{
+				if (r == Resolve::pass_through)
+					dump_arm_tsr(cmd_list, it->second, pipe->second, false);
 				return r == Resolve::skip;
+			}
 			break;
 		}
 		default:
@@ -1987,12 +2656,23 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 	t_busy = false;
 	if (pass == logic::TsrPass::resolve)
 		finish_resolve(replaced, s);
+	if (replaced)
+		dump_dlss_frame(cmd_list, s);
+	else
+	{
+		// replace_upscale failed after the checks passed: the game's pass runs, which is a TSR frame for the dump.
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (const auto it = g_cmds.find(cmd_list); it != g_cmds.end())
+			if (const auto pipe = g_pipelines.find(it->second.pipeline); pipe != g_pipelines.end())
+				dump_arm_tsr(cmd_list, it->second, pipe->second, pass == logic::TsrPass::single);
+	}
 	return replaced;
 }
 
 // Present: one timestamp per frame. When the window's wall time is over, its statistics are logged as one `perf:` line.
 void on_present(command_queue *, swapchain *, const rect *, const rect *, uint32_t, const rect *)
 {
+	dump_present();
 	const LONGLONG now = qpc_now(), freq = qpc_freq();
 	const uint32_t seconds = g_perf_seconds;
 	std::vector<double> ms;
@@ -2241,6 +2921,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		reshade::register_event<addon_event::bind_descriptor_tables>(on_bind_descriptor_tables);
 		reshade::register_event<addon_event::bind_render_targets_and_depth_stencil>(on_bind_render_targets);
 		reshade::register_event<addon_event::dispatch>(on_dispatch);
+		reshade::register_event<addon_event::barrier>(on_barrier);
+		reshade::register_event<addon_event::close_command_list>(on_close_command_list);
+		reshade::register_event<addon_event::execute_command_list>(on_execute_command_list);
+		reshade::register_event<addon_event::draw>(on_draw);
+		reshade::register_event<addon_event::draw_indexed>(on_draw_indexed);
+		reshade::register_event<addon_event::draw_or_dispatch_indirect>(on_indirect);
 		reshade::register_event<addon_event::present>(on_present);
 		break;
 	}

@@ -250,6 +250,24 @@ int main()
 	// Our own output is a fixed point for the same value and a BOM survives a removal.
 	assert(set_screen_percentage("\xEF\xBB\xBF[SystemSettings]\r\n" + kPair, 0) == "\xEF\xBB\xBF");
 
+	// Frame-sequence dump: the trigger file's first line is the count when it is an integer 1..120, else 30.
+	assert(parse_dump_count("") == 30 && parse_dump_count("\n12") == 30 && parse_dump_count("abc") == 30);
+	assert(parse_dump_count("1") == 1 && parse_dump_count("120") == 120 && parse_dump_count("45\r\nignored") == 45);
+	assert(parse_dump_count("0") == 30 && parse_dump_count("121") == 30 && parse_dump_count("-5") == 30 && parse_dump_count("1.5") == 30);
+	assert(parse_dump_count("  60 \n") == 60 && parse_dump_count("\xEF\xBB\xBF" "8") == 8 && parse_dump_count("99999999999") == 30);
+	DumpCounter dc;
+	assert(!dc.active() && dc.take() == -1);
+	dc.start(3);
+	assert(dc.active() && dc.take() == 0 && dc.take() == 1 && dc.active() && dc.take() == 2 && !dc.active() && dc.take() == -1);
+	dc.start(1);                                                                           // a new trigger restarts the numbering
+	assert(dc.take() == 0 && !dc.active());
+	assert(dump_dir_name("20261016-130501", "DLSS", 1552, 873) == "20261016-130501-DLSS-1552x873");
+	assert(dump_file_name("frame", 7) == "frame_007.dds" && dump_file_name("input", 0) == "input_000.dds");
+	assert(dump_index_line("007", 1234, "TSR", 1552, 873, 2560, 1440, true, 0.375f, -0.25f, 1, "frame_007.dds") ==
+		"007 | 1234 | TSR | 1552x873 | 2560x1440 | +0.37500,-0.25000 | 1 | frame_007.dds");
+	assert(dump_index_line("008", 1235, "TSR", 0, 0, 2560, 1440, false, 0, 0, -1, "dropped: ring full") ==
+		"008 | 1235 | TSR | 0x0 | 2560x1440 | n/a | n/a | dropped: ring full");
+
 	std::puts("dlss logic selftest ok");
 	return 0;
 }

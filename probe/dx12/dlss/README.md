@@ -120,6 +120,55 @@ two-pass TSR: DLSS could not replace the resolve (...): the game's resolve runs[
 not replacing the upscale pass: <reason> (the game renders normally)
 ```
 
+## Frame-sequence dump (image quality from files)
+
+To judge flicker and stair-stepping from files instead of screenshots, the add-on can write a run of consecutive upscale outputs.
+Create a file named `amdlss_dx12_dlss.dump` next to the add-on (no keyboard input needed). Its first line may be a frame count,
+an integer 1 to 120; anything else, or an empty file, means 30. The present hook looks for the file at most once a second,
+deletes it, and the next N upscale outputs are captured. A second trigger while a sequence is being captured or written is
+deleted and ignored (logged). It works in every mode: DLSS (single pass, or the two-pass resolve's output) and the game's TSR
+(`enabled=0` or any fallback: the texture the TSR pass wrote, the single-pass u0 or the two-pass resolve's u0).
+
+```
+dump_seq\<YYYYMMDD-HHMMSS>-<DLSS|TSR>-<render WxH>\frame_000.dds ...    final upscaled output, real DXGI format (r11g11b10_float live)
+dump_seq\...\input_000.dds                                              scene color u3 of the first frame, render size (when readable)
+dump_seq\...\index.txt                                                  frame | present | upscaler | render | output | jitter | camera_cut | file
+```
+
+`present` is the add-on's present counter when the frame was recorded (it can repeat: the render thread runs ahead). `jitter` is
+TSR's `InputJitter` (render pixels) and `camera_cut` its `bCameraCut`, both `n/a` when the constants could not be read. A frame
+that could not be kept has a reason instead of a file name (`dropped: all readback buffers busy`, `failed: ...`). The folder name
+carries the first frame's upscaler; each row has its own.
+
+How it stays off the game's critical path: DLSS frames are copied on the game's command list right after the evaluate; TSR frames
+at the first barrier, draw, dispatch or close that follows the TSR dispatch on the same list, from the state that event reports
+(no ReShade event exists after a dispatch). Each copy goes to one of 8 readback buffers allocated when the sequence starts (the one
+cost at the start); a fence signalled from the present hook, once the list has been submitted, tells a worker thread when the GPU is
+done, and only that thread maps the buffer and writes the file. Nothing waits on the GPU. A copy whose list is never submitted or
+whose fence never completes is given up after 30 s.
+
+Log lines:
+
+```
+frame dump: started, <N> frames of <DLSS|TSR> output <W>x<H> dxgi format <f> (render <w>x<h>) to <dir>
+frame dump: complete, <written> of <N> frames written to <dir> (<d> dropped, <f> failed)
+frame dump: <why>        (trigger ignored, output not copyable, folder or buffers not created, file not written, copy never completed)
+```
+
+`seq_quality.py` measures one folder, or compares two:
+
+```
+python3 -I probe/dx12/dlss/seq_quality.py dump_seq/<DLSS folder> dump_seq/<TSR folder> --labels DLSS,TSR --out quality
+python3 -I probe/dx12/dlss/seq_quality.py --selftest        # numpy and Pillow; or: uv run --no-project -q --with numpy --with pillow python -I ...
+```
+
+It tone-maps each frame (Reinhard then sRGB, a fixed operator) and reports, per sequence: temporal instability (median over frame
+pairs of the mean absolute luma difference left after the global camera translation is removed by phase correlation plus a
+Gauss-Newton refinement, over edge pixels and over all pixels; pairs across a gap or a camera cut are skipped) and a stair-stepping
+score (second derivative of luma along the edge direction divided by the gradient, on edge pixels). It writes the first, middle and
+last frame, a 3x crop of the region that flickers most, and `side_by_side.png` for two folders. Values are only comparable between
+sequences of the same scene and settings; the 8-bit quantisation floor of the instability is about 0.25.
+
 ## Build
 
 Needs `docker` and `git`; nothing is installed on the host.
@@ -141,7 +190,7 @@ It runs the probe build once if the ReShade headers or the MSVC toolchain (clang
   the add-on does not load without an ImGui-enabled ReShade;
 - compiles and runs `selftest.cpp` (TSR pass hashes and b0 layouts, the two-pass decisions, Halton, phase matching, preset
   choice, velocity decode, ini parsing and merging, render preset names, the `render_scale` parser and the Engine.ini
-  rewrite, frame-time statistics and the perf line) on the
+  rewrite, frame-time statistics and the perf line, the frame-dump trigger parser, counter and index rows) on the
   Linux side of the container;
 - compiles and links the add-on with clang-cl `/MT`, as for the probe.
 

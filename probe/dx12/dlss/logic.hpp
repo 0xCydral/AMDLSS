@@ -2,7 +2,7 @@
  * Pure logic of the DLSS add-on (no Windows, no ReShade, no NGX), so selftest.cpp can check it on the Linux host
  * inside the build container: which TSR pass a shader hash is, TSR constant layouts, two-pass decisions, Halton jitter,
  * jitter phase matching, preset choice, UE5 velocity decode, ini parsing and merging, DLSS render preset names,
- * frame-time statistics.
+ * frame-time statistics, the frame-sequence dump (trigger file parsing, counter, names, index rows).
  */
 #pragma once
 
@@ -617,5 +617,61 @@ inline std::string perf_line(double t, const FrameStats &s, const char *upscaler
 	snprintf(buf, sizeof(buf), "perf: t=%.1f frames=%llu avg_ms=%.2f fps=%.1f low1_fps=%.1f p99_ms=%.2f upscaler=%s render=%ux%u output=%ux%u ratio=%.3f",
 		t, static_cast<unsigned long long>(s.frames), s.avg_ms, s.fps, s.low1_fps, s.p99_ms, upscaler, rw, rh, ow, oh, ow != 0 ? static_cast<double>(rw) / ow : 0.0);
 	return buf;
+}
+
+// ---- frame-sequence dump (trigger file amdlss_dx12_dlss.dump) ------------------------------------------------------------
+
+constexpr int kDumpDefaultFrames = 30, kDumpMaxFrames = 120;
+
+// Frame count from the first line of the trigger file: a plain integer 1..120 (a UTF-8 BOM and blanks around it are
+// ignored); anything else, including an empty file, gives the default.
+inline int parse_dump_count(const std::string &text)
+{
+	std::string t = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? text.substr(3) : text;
+	t = t.substr(0, t.find_first_of("\r\n"));
+	const size_t a = t.find_first_not_of(" \t"), b = t.find_last_not_of(" \t");
+	if (a == std::string::npos)
+		return kDumpDefaultFrames;
+	t = t.substr(a, b - a + 1);
+	if (t.size() > 4 || t.find_first_not_of("0123456789") != std::string::npos)
+		return kDumpDefaultFrames;
+	const int n = std::atoi(t.c_str());
+	return n >= 1 && n <= kDumpMaxFrames ? n : kDumpDefaultFrames;
+}
+
+// How many upscale outputs a running sequence still has to take. take() hands out the 0-based frame number, -1 when done.
+struct DumpCounter
+{
+	int left = 0, taken = 0;
+	void start(int n) { left = n; taken = 0; }
+	bool active() const { return left > 0; }
+	int take() { return left > 0 ? (--left, taken++) : -1; }
+};
+
+// dump_seq/<stamp>-<DLSS|TSR>-<render WxH>, stamp = YYYYMMDD-HHMMSS.
+inline std::string dump_dir_name(const std::string &stamp, const char *upscaler, uint32_t rw, uint32_t rh)
+{
+	char buf[64];
+	snprintf(buf, sizeof(buf), "-%s-%ux%u", upscaler, rw, rh);
+	return stamp + buf;
+}
+
+inline std::string dump_file_name(const char *prefix, int n)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%s_%03d.dds", prefix, n);
+	return buf;
+}
+
+// One index.txt row: frame | present | upscaler | render | output | jitter | camera_cut | file-or-reason. `cut` is -1 when unknown.
+inline std::string dump_index_line(const char *frame, uint32_t present, const char *upscaler, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh,
+	bool have_jitter, float jx, float jy, int cut, const std::string &file)
+{
+	char jitter[48] = "n/a";
+	if (have_jitter)
+		snprintf(jitter, sizeof(jitter), "%+.5f,%+.5f", jx, jy);
+	char buf[320];
+	snprintf(buf, sizeof(buf), "%s | %u | %s | %ux%u | %ux%u | %s | %s | ", frame, present, upscaler, rw, rh, ow, oh, jitter, cut < 0 ? "n/a" : cut ? "1" : "0");
+	return buf + file;
 }
 } // namespace logic
