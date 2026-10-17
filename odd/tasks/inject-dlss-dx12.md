@@ -35,7 +35,7 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
 - [x] T4 Live check on the owner's PC, only with the owner's go-ahead: install through AMDLSS, game renders with DLSS,
       remove restores the folder (2026-10-17, NVIDIA layout; see Progress).
 - [ ] T5 Frame dump: a TSR dump taken after DLAA ran earlier in the same session is all zeros while the log says
-      "0 failed" (launch B, 2026-10-17). A pure-TSR session dumps fine. Fix, and make an all-zero readback count as failed.
+      "0 failed" (launch B, 2026-10-17). A pure-TSR session dumps fine; it also hit a DLSS dump through Scaler (launch E), so it is intermittent. Fix, and make an all-zero readback count as failed.
 - [ ] T6 AMD layout on a real Radeon card (the Ryzen iGPU cannot run the game: 4 GPU resets on 2026-10-16).
 - [ ] T7 Remove prints no log line in the window (remove_game returned no notes in the live run).
 
@@ -83,3 +83,12 @@ existing Inject DLSS route) is DirectX 11 only, and the 5 empty-Luma-tab reports
     edge flicker 0.77x, all-pixel 0.86x, stair-stepping 0.79x. Dumps in `~/Downloads/dx12-spike/dump_seq-20261017/`.
   - Remove restored the folder: dxgi.dll, the add-on, its ini, nvngx_dlss.dll and `HelixSR\` gone; ReShade.ini/.log
     and `dump_seq\` stay (by design). The owner's hand layout was then put back.
+- 2026-10-17 AMD (Scaler) layout through HelixSR, on the 4070 (launches E, F): installed with `install_game(cards=[AMD
+  card])` (Scaler 1.0.6 as dxgi.dll, ReShade64.dll, LoadReshade=true, `HelixSR\helixsr.dll` from the data folder's
+  HelixSR 1.9.0 build, no nvngx_dlss.dll), then `[DLSS] Enabled=false, HelixSR=true` to force what Scaler does on a card
+  without DLSS. OptiScaler.log: `NVNGXProxy::HelixSRDlss HelixSR DLSS upscaler: helixsr.dll in use`, 5630 evaluates.
+  1708x961 -> 2560x1440 at 87-94 fps (native TSR 61-67). Image vs native TSR: all-pixel flicker 0.80x, edge flicker
+  1.17x, stair-stepping 1.30x (HelixSR is rougher on edges than NVIDIA's DLSS, 0.85x / 1.12x). Remove cleared the whole
+  Scaler layout. Not a Radeon: HelixSR's speed on an AMD card is still unmeasured (T6).
+  - T5 seen again: launch E's first dump was blank (input 0.3% non-zero, output 0); launch F's two dumps were good.
+    Intermittent, not tied to DLAA.
