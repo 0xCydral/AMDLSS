@@ -12,8 +12,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import (VERSION, covers, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, luma, reports,
-               settings, update)
+from . import (VERSION, covers, dx12inject, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, luma,
+               reports, settings, update)
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
 
@@ -70,7 +70,9 @@ class App:
         self.route_var = tk.StringVar(value='optiscaler')
         self.fg_var = tk.StringVar(value='')   # the frame generation generator: '' or 'amd' ('dlss4': a leftover)
         self.upscaler_var = tk.StringVar(value='helixsr')   # helixsr or fsr4: what Install puts in the selected game
+        self.inject_var = tk.StringVar(value=gamelist.INJECT)   # inject or inject12: the pick when the files do not say
         self.gpu_class, self.source, self.dll_hint = None, None, ''   # the card, its FSR 4 DLL (fsr4.Source), a hint
+        self.cards = []            # the PC's graphics cards (gpu.Gpu), read with gpu_class
         self.show_all = tk.BooleanVar(value=False)   # also list the games that are not offered, greyed out
         # a beta user keeps getting betas unless they say no
         self.beta_var = tk.BooleanVar(value=settings.load_beta(self.data_dir, update.is_prerelease(update.current_version())))
@@ -189,6 +191,11 @@ class App:
         self.route_buttons = segmented(tk, self.look, self.route_row, (('DLSS (OptiScaler)', 'optiscaler'),
                                                               ('AMD FSR (drop-in)', 'direct')),
                                        self.route_var, self.update_buttons)
+        self.inject_row = tk.Frame(title, bg=CARD)   # the DirectX 11 / 12 pick, when the game's files do not say
+        self.label(self.inject_row, 'Inject with', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
+        self.inject_buttons = segmented(tk, self.look, self.inject_row, (('Luma UE (DirectX 11)', gamelist.INJECT),
+                                                                         ('DirectX 12 add-on', gamelist.INJECT12)),
+                                        self.inject_var, self.update_buttons)
         self.upscaler_row = tk.Frame(options, bg=CARD)
         self.label(self.upscaler_row, 'Upscaler', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
         self.upscaler_buttons = segmented(tk, self.look, self.upscaler_row, (('HelixSR', 'helixsr'),
@@ -389,8 +396,8 @@ class App:
             return 'direct'
         if game.installed:
             return game.state
-        if game.route == gamelist.INJECT:
-            return gamelist.INJECT   # no upscaler of its own: Luma UE and Scaler are the only route for it
+        if game.route in gamelist.INJECTS:   # no upscaler of its own: only an injection (Luma UE or the add-on)
+            return self.inject_var.get() if game.inject_choice else game.route
         if self.wants_fsr4(game):
             return self.route_var.get() if game.route_choice and len(game.fsr4.routes) > 1 else game.fsr4.routes[0]
         return self.route_var.get() if game.route_choice else game.route
@@ -402,7 +409,7 @@ class App:
     def upscaler_ok(self, game):
         """False when FSR 4.1.1 is picked for a game that cannot use it: Install waits for another pick. The injected
         route has no upscaler to pick, so it always passes."""
-        if self.route_of(game) == gamelist.INJECT:
+        if self.route_of(game) in gamelist.INJECTS:
             return True
         return self.upscaler_var.get() != 'fsr4' or self.wants_fsr4(game)
 
@@ -437,14 +444,18 @@ class App:
             if game:
                 self.upscaler_var.set(self.upscaler_default(game))
                 self.route_var.set(game.default_route if game.route_choice else game.route)
+                self.inject_var.set(game.route if game.route in gamelist.INJECTS else gamelist.INJECT)
                 self.fg_var.set(framegen.generator_of(game.exe_folder)
                                 if game.installed and game.exe_folder else '')
         self.route_row.pack_forget()
+        self.inject_row.pack_forget()
         self.upscaler_row.pack_forget()
         self.fg_row.pack_forget()
         if game and game.route_choice:
             self.route_row.pack(side='right')
-        if game and self.route_of(game) == gamelist.INJECT:
+        if game and game.inject_choice:
+            self.inject_row.pack(side='right')
+        if game and self.route_of(game) in gamelist.INJECTS:
             self.show_inject(game, idle)
         elif game:
             self.show_upscaler(game, idle)
@@ -464,7 +475,7 @@ class App:
             if note:
                 self.fg_note.configure(text=plain(note))
                 self.fg_note.pack(fill='x', padx=(self.look.px(24), 0), pady=(self.look.px(4), 0))
-        for widget in self.route_buttons:
+        for widget in self.route_buttons + self.inject_buttons:
             widget.configure(state='normal' if idle else 'disabled')
         for widget in self.fg_buttons:
             widget.configure(state='normal' if idle and offered else 'disabled')
@@ -502,7 +513,10 @@ class App:
             widget.configure(state='disabled')
         for widget in (self.dll_button, self.dll_forget):
             widget.pack_forget()
-        self.fsr4_note.configure(text=plain(luma.ROW_NOTE), fg=MUTED)
+        route = self.route_of(game)
+        note = (dx12inject.choice_note(game) if game.inject_choice
+                else dx12inject.ROW_NOTE if route == gamelist.INJECT12 else luma.ROW_NOTE)
+        self.fsr4_note.configure(text=plain(note), fg=MUTED)
         self.fsr4_note.pack(side='left', fill='x', expand=True, padx=(px(14), px(10)))
 
     def set_busy(self, busy, progress=None):
@@ -619,9 +633,10 @@ class App:
                         game.anticheat = gamelist.scan_anticheat(game.folder)
                     if offered:
                         game.streamline = gamelist.scan_streamline(game.folder)
-                gamelist.mark_inject(game, luma.installed(game.exe_folder))   # the injection's offer; the anti-cheat
-                fsr4.mark(game)   # scan above is what it needs. State of whatever is installed: Scaler, FSR 4, inject
-                luma.mark(game)
+                gamelist.mark_inject(game, luma.installed(game.exe_folder) or dx12inject.installed(game.exe_folder))
+                fsr4.mark(game)   # the injection's offer (the anti-cheat scan above is what it needs). State of
+                luma.mark(game)   # whatever is installed: Scaler, FSR 4, either injection
+                dx12inject.mark(game)
             self.judge(found)
             return found
 
@@ -631,7 +646,8 @@ class App:
         """Which card this is, which FSR 4 DLL it can use, and whether each game can use FSR 4.1.1. An RX 6000 card with
         no kept DLL looks for one each time (the games' folders, Downloads and the like) and keeps the best it finds."""
         if self.gpu_class is None:
-            self.gpu_class = gpu.classify(gpu.detect())
+            self.cards = gpu.detect()
+            self.gpu_class = gpu.classify(self.cards)
         if discover and self.gpu_class == gpu.RDNA2:
             result = fsr4.auto_find(found, user_dirs(), self.data_dir)
             self.dll_hint = result.hint
@@ -717,15 +733,18 @@ class App:
         if not (self.helixsr and game and game.can_install and self.upscaler_ok(game) and not self.busy):
             return
         route = self.route_of(game)
-        want = 'luma' if route == gamelist.INJECT else ('fsr4' if self.wants_fsr4(game) else 'helixsr')
+        want = ('luma' if route == gamelist.INJECT else 'dx12' if route == gamelist.INJECT12
+                else 'fsr4' if self.wants_fsr4(game) else 'helixsr')
         plan = luma.plan_text(game) if want == 'luma' \
+            else dx12inject.plan_text(game, self.cards) if want == 'dx12' \
             else fsr4.plan_text(game, route, self.source, self.data_dir) if want == 'fsr4' \
             else gamelist.plan_text(game, route)
         if not self.messagebox.askyesno(f'Install into {game.name}', plan, icon='warning', default='no'):
             return
         self.set_busy(True, None)
         self.progress.configure(text=plain(f'Installing into {game.name}…'))
-        what = luma.NAME if want == 'luma' else fsr4.NAME if want == 'fsr4' else 'HelixSR'
+        what = (luma.NAME if want == 'luma' else dx12inject.NAME if want == 'dx12'
+                else fsr4.NAME if want == 'fsr4' else 'HelixSR')
         self.set_status(f'• Installing {what} into {game.name}…')
         extras, source = list(self.extras), self.source
         pick = self.route_var.get() if game.route_choice else None
@@ -743,16 +762,24 @@ class App:
                 fallback = helixsr.NO_FG   # HelixSR has none any more: the file's own DLSS 4 mode is turned off, and
                 frame_gen = ''             # the text says why
         shown_route = (f'{route}, {luma.NAME}' if want == 'luma'       # the report page reads this heading
+                       else f'{route}, {dx12inject.NAME}' if want == 'dx12'
                        else f'{route}, {fsr4.NAME}' if want == 'fsr4' else route)
         record = self.game_log(game, f'{"update" if game.installed else "install"} ({shown_route})')
-        if game.folder and want != 'luma':   # the injection is not an upscaler pick: there is nothing to remember
+        if game.folder and want not in ('luma', 'dx12'):   # an injection is not an upscaler pick: nothing to remember
             settings.save_upscaler(self.data_dir, game.folder, want)
 
         def install():
             try:
                 if want == 'luma':
                     return (luma.install_game(self.helixsr, game, extras, self.data_dir, record,
-                                              lambda done, total: self.post(self.download_progress_inject, done, total)),
+                                              lambda done, total: self.post(self.download_progress_inject, done, total,
+                                                                            luma.download_text)),
+                            '', '')
+                if want == 'dx12':
+                    return (dx12inject.install_game(self.helixsr, game, extras, self.data_dir, record,
+                                                    lambda done, total: self.post(self.download_progress_inject, done,
+                                                                                  total, dx12inject.download_text),
+                                                    self.cards),
                             '', '')
                 after = fsr4.install_game(self.helixsr, game, extras, want, pick, source,
                                           fsr4.license_of(self.helixsr_folder, self.data_dir), self.data_dir, record,
@@ -788,11 +815,11 @@ class App:
         else:
             self.progress.configure(text=f"Downloading AMD's FSR loader: {done >> 10} of {total >> 10} KB")
 
-    def download_progress_inject(self, done, total):
-        """The injected route's downloads: Luma UE's own zip, then the HelixSR Scaler package. Their labels come from
-        luma.download_text, which tells the two apart by their pinned sizes."""
+    def download_progress_inject(self, done, total, text):
+        """An injected route's downloads: Luma UE's own zip, then (for the HelixSR Scaler layout) the Scaler package.
+        `text` is the route's download_text, which tells the two apart by their pinned sizes."""
         self.bar.set(done / total)
-        self.progress.configure(text=plain(luma.download_text(done, total)))
+        self.progress.configure(text=plain(text(done, total)))
 
     def game_log(self, game, action):
         """on_line for one action in `game`: the window's log, and the game's own log file for Collect logs."""
@@ -805,6 +832,8 @@ class App:
         self.refresh_helixsr_status()
         if game.state == gamelist.INJECT:
             text = luma.after_text(game)
+        elif game.state == gamelist.INJECT12:
+            text = dx12inject.after_text(game, dx12inject.layout(self.cards))
         elif game.upscaler == 'fsr4':
             text = fsr4.after_text(game, 'direct' if game.state == 'fsr4' else 'optiscaler', self.source, frame_gen,
                                    fallback)
@@ -817,8 +846,9 @@ class App:
         game = self.selected()
         if not (self.helixsr and game and game.installed and not game.reason and not self.busy):
             return
-        who = 'AMDLSS' if game.state in ('fsr4', gamelist.INJECT) else 'HelixSR'
-        what = luma.NAME if game.state == gamelist.INJECT else fsr4.NAME if game.upscaler == 'fsr4' else 'HelixSR'
+        who = 'AMDLSS' if game.state in ('fsr4', *gamelist.INJECTS) else 'HelixSR'
+        what = (luma.NAME if game.state == gamelist.INJECT else dx12inject.NAME if game.state == gamelist.INJECT12
+                else fsr4.NAME if game.upscaler == 'fsr4' else 'HelixSR')
         if not self.messagebox.askyesno(f'Remove from {game.name}',
                                         f"Close {game.name} first.\n\n{who} puts the game's original files back. "
                                         f'Remove {what}?', icon='warning', default='no'):
@@ -832,6 +862,8 @@ class App:
             try:
                 if game.state == gamelist.INJECT:
                     return luma.remove_game(self.helixsr, game, extras, self.data_dir, record)
+                if game.state == gamelist.INJECT12:
+                    return dx12inject.remove_game(self.helixsr, game, extras, self.data_dir, record)
                 return fsr4.remove_game(self.helixsr, game, extras, self.data_dir, record)
             except helixsr.HelixSRError as error:
                 record.fail(error)

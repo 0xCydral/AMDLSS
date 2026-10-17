@@ -240,6 +240,7 @@ def install_mode(game):
         return f'OptiScaler as {dll}' if dll else 'OptiScaler'
     return {'direct': 'drop-in DLL', 'fsr4': 'drop-in DLL', 'dlss': 'DLSS loader (experimental)',
             'inject': 'DLSS injected with Luma UE (OptiScaler as dxgi.dll)',
+            'inject12': 'DLSS injected with the DirectX 12 add-on (ReShade, plus OptiScaler on non-NVIDIA cards)',
             'none': 'none'}.get(game.state, 'unknown')
 
 

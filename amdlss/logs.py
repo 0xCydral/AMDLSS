@@ -45,7 +45,7 @@ PROTON_LOG = 'proton.log'
 # ReShade.log carries the add-on registration (Luma's own messages too) and ReShade.ini Luma's settings.
 PATTERNS = ('helixsr*.log', 'optiscaler*.log', 'fakenvapi*.log', 'reshade*.log', 'optiscaler*.ini',
             'fakenvapi*.ini', 'reshade*.ini', 'helixsr-install*.json', 'helixsr.ini', 'amdlss-fsr4*.json',
-            'amdlss-scaler*.json')
+            'amdlss-scaler*.json', 'amdlss-dx12dlss*.json', 'amdlss_dx12_dlss*.log', 'amdlss_dx12_dlss*.ini')
 # DLLs whose owner is worth saying: the upscalers and the files OptiScaler and HelixSR take their names.
 UPSCALER_PREFIXES = ('amd_fidelityfx', 'helixsr', 'nvngx', 'libxess', 'ffx_', 'fakenvapi', 'optiscaler')
 OPTI_NAMES = ('dxgi.dll', 'winmm.dll', 'version.dll', 'dbghelp.dll', 'd3d12.dll', 'wininet.dll', 'winhttp.dll')

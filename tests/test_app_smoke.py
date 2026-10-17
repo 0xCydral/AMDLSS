@@ -903,3 +903,66 @@ def test_a_game_on_an_older_helixsr_shows_update(window, monkeypatch):
     top.update()
     assert app.game_install.text == 'Update' and app.game_install.state == 'normal'
     assert not app.outdated(games.Game(name='x', state='none', helixsr='1.0.0'))  # nothing installed: nothing to update
+
+
+def test_a_directx_12_unreal_game_gets_the_add_on_and_an_unclear_one_offers_both(window, monkeypatch):
+    from tkinter import filedialog, font, ttk
+
+    from amdlss import dx12inject, games
+    from amdlss.app import App
+    from fake_luma import make as make_luma
+    from fake_scaler import make as make_scaler
+    from test_dx12inject import with_imports
+    from test_pe import build_dll
+    top, _make, tmp = window
+    shipped = tmp / 'shipped'
+    shipped.mkdir()
+    (shipped / dx12inject.ADDON).write_bytes(b'STAND-IN add-on')
+    (shipped / dx12inject.INI).write_bytes(b'enabled=1\nrender_scale=game\n')
+    monkeypatch.setattr(dx12inject, 'bundled', lambda name: shipped / name)
+    make_luma(tmp / 'data')
+    make_scaler(tmp / 'data')
+    rows = []
+    for name, imports in (('Twelve', (['d3d12.dll'])), ('Unsure', ['KERNEL32.dll'])):
+        exe = tmp / name / 'Project' / 'Binaries' / 'Win64'
+        exe.mkdir(parents=True)
+        (exe / 'Project-Win64-Shipping.exe').write_bytes(with_imports(build_dll(), imports))
+        rows.append({'name': name, 'folder': str(exe), 'fsr': False, 'inputs': []})
+    folder = make(tmp, rows)
+    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    (folder / helixsr.BUILT).write_text('{}')
+    monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
+    answers = Answers()
+    app = App(top, tk, ttk, filedialog, answers, font)
+    pump(top, app)
+    by_name = {game.name: game for game in app.games}
+    assert by_name['Twelve'].route == games.INJECT12 and by_name['Unsure'].route == games.INJECT
+    index = {app.tree.item(i, 'values')[0]: i for i in app.tree.get_children()}
+    app.tree.selection_set(index['Unsure'])      # the files do not say: both injections, Luma UE first
+    top.update()
+    assert shown(app.inject_row) and not shown(app.route_row) and app.route_of(app.selected()) == games.INJECT
+    assert 'cannot tell' in app.fsr4_note.cget('text')
+    app.inject_var.set(games.INJECT12)
+    assert app.route_of(app.selected()) == games.INJECT12
+    app.tree.selection_set(index['Twelve'])      # the files say DirectX 12: the add-on, no choice
+    top.update()
+    assert not shown(app.inject_row) and app.route_of(app.selected()) == games.INJECT12
+    assert 'runs DirectX 12' in app.fsr4_note.cget('text')
+    exe = tmp / 'Twelve' / 'Project' / 'Binaries' / 'Win64'
+    app.install_game()
+    assert 'DirectX 12 DLSS add-on' in answers.asked[0][1] and 'Echoes of Aincrad' in answers.asked[0][1]
+    end = time.time() + 10
+    while time.time() < end and not (answers.told and not app.busy):
+        top.update()
+        time.sleep(0.02)
+    assert dx12inject.installed(exe) and 'DLSS tab' in answers.told[0]
+    assert (exe / dx12inject.ADDON).is_file() and (exe / 'ReShade64.dll').is_file()   # no GeForce: Scaler layout
+    assert app.tree.item(index['Twelve'], 'values')[2] == games.STATE_TEXT[games.INJECT12]
+    app.tree.selection_set(index['Twelve'])
+    top.update()
+    app.remove_game()
+    while time.time() < end and len(answers.told) < 2:
+        top.update()
+        time.sleep(0.02)
+    assert not dx12inject.installed(exe) and not (exe / dx12inject.ADDON).exists()
+    assert sorted(p.name for p in exe.iterdir()) == ['Project-Win64-Shipping.exe']
