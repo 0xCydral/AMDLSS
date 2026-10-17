@@ -63,7 +63,7 @@ python tools/amdlss-logs.py fetch <code>
 ## Test
 
 ```bash
-node --test receiver/
+cd receiver && node --test
 ```
 
 No dependencies. The tests run the Worker against an in-memory stand-in for KV.
