@@ -64,4 +64,15 @@ The add-on only swaps TSR for DLSS at the render size the game picks (sg.AntiAli
   load wrote it back; the next launch rendered 1708x961 -> 2560x1440, ratio 0.667, DLSS MaxQuality. T4 done.
   Known: switching DLSS -> TSR live in two-pass mode shows a burst of bad frames (TSR resumes from a stale history),
   which the owner saw as pixelated flicker during the A/B runs.
+- 2026-10-16: T5 HelixSR path, run on the RTX 4070 with HelixSR Scaler 1.0.6 as `dxgi.dll`, ReShade as
+  `ReShade64.dll` (`[Plugins] LoadReshade=true`), `HelixSR\helixsr.dll` from the real HelixSR 1.9.3 build.
+  (a) Scaler defaults: NGX loaded its core from `Win64\nvngx.dll` (Scaler's hook), Scaler's `DLSSFeatureDx12`
+  created the feature with NVIDIA's `nvngx_dlss.dll` and logged `NVSDK_NGX_D3D12_EvaluateFeature` every frame.
+  (b) `[DLSS] Enabled=false`, `HelixSR=true` (what Scaler does by itself on a GPU without DLSS):
+  `HelixSR DLSS upscaler: helixsr.dll in use`, add-on `evaluate-ok=300` of 300 per report, about 120 fps at
+  1281x721 -> 1920x1080, no `[E]` lines in OptiScaler.log. So the add-on's NGX calls reach HelixSR through Scaler.
+  The Radeon iGPU run (`VKD3D_FILTER_DEVICE_NAME=RAPHAEL`, direct `proton run`) failed at startup with
+  `CreateDXGIFactory1 failed with error code E_FAIL` (the same direct launch without the filter works), so no run on
+  real AMD hardware yet; HelixSR's image was not inspected. Layout restored to the NVIDIA one afterwards; the test
+  ini and Scaler log are in `~/Downloads/dx12-spike/amd-layout-backup/`. T5 functionally done, AMD hardware open.
 - Owner rule (2026-10-16): no simulated keyboard or mouse input on the owner's PC; ask the owner to press keys.
