@@ -58,16 +58,14 @@ def game(tmp_path):
     return folder
 
 
-def helix_folder(tmp_path, fg=True):
+def helix_folder(tmp_path, old_fg=False):
+    """A built HelixSR folder; `old_fg` adds the helixsr-fg folder an earlier build (1.9.1 and before) had."""
     folder = tmp_path / 'HelixSR-1.9.0'
     folder.mkdir()
     (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
-    if fg:
-        fgdir = folder / helixsr.FG_FOLDER
-        fgdir.mkdir()
-        for name in helixsr.FG_DLLS:
-            (fgdir / name).write_bytes(f'MZ {name}'.encode())
-        (folder / helixsr.FG_SETUP).write_text('{}', encoding='utf-8')
+    if old_fg:
+        (folder / 'helixsr-fg').mkdir()
+        (folder / 'helixsr-fg' / 'nvngx_dlssg.dll').write_bytes(b'MZ nvngx_dlssg.dll')
     return folder
 
 
@@ -133,7 +131,7 @@ def test_locate_finds_the_override_then_the_data_folder(tmp_path):
 
 def test_install_places_the_listed_files_and_keeps_what_it_replaces(tmp_path, game):
     package = make_package(tmp_path)
-    helix = helix_folder(tmp_path)
+    helix = helix_folder(tmp_path, old_fg=True)
     (game / 'OptiScaler.ini').write_bytes(b'the settings the user already had')
     record_data = record(game)
     scaler.install_into(package, game, helix, 'dxgi.dll', record_data)
@@ -141,7 +139,7 @@ def test_install_places_the_listed_files_and_keeps_what_it_replaces(tmp_path, ga
     assert (game / 'OptiScaler' / 'streamline' / 'sl.dlss_g.dll').read_bytes() == b'STAND-IN OptiScaler/streamline/sl.dlss_g.dll'
     assert (game / 'Licenses' / 'OptiScaler_LICENSE.txt').is_file()
     assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (helix / helixsr.DLL).read_bytes()
-    assert (game / 'HelixSR' / 'helixsr-fg' / 'nvngx_dlssg.dll').is_file()
+    assert not (game / 'HelixSR' / 'helixsr-fg').exists()   # HelixSR 1.9.2+ has none; Scaler 1.0.6 ignores a leftover
     for name in UNLISTED:   # the download's own files: named by the list, never copied into the game
         assert not (game / name).exists()
     moved = record_data['moved']
@@ -152,12 +150,12 @@ def test_install_places_the_listed_files_and_keeps_what_it_replaces(tmp_path, ga
     assert all(sha(game / item['name']) == item['sha256'] for item in record_data['created'])
 
 
-def test_install_without_frame_generation_copies_no_fg_files(tmp_path, game):
+def test_install_copies_only_the_upscaling_dll_of_a_build_that_had_frame_generation(tmp_path, game):
     package = make_package(tmp_path)
-    helix = helix_folder(tmp_path, fg=False)
+    helix = helix_folder(tmp_path, old_fg=True)   # a 1.9.1 build not updated yet
     scaler.install_into(package, game, helix, 'dxgi.dll', record(game))
     assert (game / 'HelixSR' / 'helixsr.dll').is_file()
-    assert not (game / 'HelixSR' / helixsr.FG_FOLDER).exists()
+    assert not (game / 'HelixSR' / 'helixsr-fg').exists()
 
 
 def test_remove_puts_the_games_own_files_back(tmp_path, game):
@@ -197,7 +195,7 @@ def test_name_for_uses_scalers_own_order(tmp_path, game):
 
 def test_plan_text_names_the_package_and_what_remove_does(game):
     text = scaler.plan_text(type('G', (), {'exe_folder': str(game)})())
-    assert 'HelixSR Scaler 1.0.4' in text and 'OptiScaler 0.9.4' in text and scaler.BACKUP in text
+    assert f'HelixSR Scaler {scaler.VERSION}' in text and scaler.VERSION == '1.0.6' and 'OptiScaler 0.9.4' in text and scaler.BACKUP in text
 
 
 # --- install_game, the game's HelixSR folder and an earlier install ------------------------------------------------
@@ -247,18 +245,13 @@ def test_a_finished_install_says_what_it_placed(tmp_path):
     assert 'dxgi.dll' in lines[1] and 'HelixSR/helixsr.dll' in lines[1]   # what went next to the .exe
 
 
-def test_a_fresh_install_left_off_says_off_even_with_the_frame_generation_files_there(tmp_path):
-    """The reported trap: helixsr-fg is built and the user picked Off. Scaler reads the package's auto as "run
-    HelixSR's frame generation" in exactly that state, so the install must write the off values out, and switching a
-    generator on and off again must come back to those same bytes."""
+def test_a_fresh_install_left_off_says_off(tmp_path):
+    """The user picked Off: the install writes the off values out (the package says auto for most of them), no
+    HelixSR frame generation files travel with it, and switching a generator on and off again must come back to
+    those same bytes."""
     client, one, data = world(tmp_path)
-    fg = client.folder / helixsr.FG_FOLDER
-    fg.mkdir()
-    for name in helixsr.FG_DLLS:
-        (fg / name).write_bytes(b'MZ')
-    (client.folder / helixsr.FG_SETUP).write_text('{}')
     scaler.install_game(client, client.list_games()[0], [], data)
-    assert (one / scaler.FOLDER / helixsr.FG_FOLDER).is_dir()   # the game has HelixSR's frame generation files
+    assert not (one / scaler.FOLDER / 'helixsr-fg').exists()    # HelixSR 1.9.2+ has no frame generation to copy
     assert framegen.apply_generator(one, '', data)              # the app's step for the Off choice
     ini = (one / 'OptiScaler.ini').read_bytes()
     assert b'FrameGeneration=off' in ini and b'Enabled=false' in ini and b'FGInput=nofg' in ini
@@ -344,15 +337,10 @@ def test_a_move_that_does_not_hash_the_same_is_refused_and_undone(tmp_path, monk
 
 def test_updating_the_reported_wukong_state_moves_the_leftovers_and_leaves_frame_generation_off(tmp_path):
     """Exactly the reported state: AMDLSS's dxgi.dll and its record in place, a leftover OptiScaler pair
-    (d3d12.dll + ReShade64.dll), helixsr-fg built, an OptiScaler.ini still at Scaler's auto and no frame generation
-    record. Update must move the leftovers aside and leave frame generation explicitly off (or on for the generator
-    the user picked)."""
+    (d3d12.dll + ReShade64.dll), an OptiScaler.ini still at Scaler's auto and no frame generation record. Update
+    must move the leftovers aside and leave frame generation explicitly off (or on for the generator the user
+    picked)."""
     client, one, data = world(tmp_path)
-    fg = client.folder / helixsr.FG_FOLDER
-    fg.mkdir()
-    for name in helixsr.FG_DLLS:
-        (fg / name).write_bytes(b'MZ')
-    (client.folder / helixsr.FG_SETUP).write_text('{}')
     scaler.install_game(client, client.list_games()[0], [], data)   # 1.1.0's install: dxgi.dll, record, auto ini
     (one / 'd3d12.dll').write_bytes(build_dll(version=(0, 9, 4, 0),
                                               strings={'ProductName': 'OptiScaler',

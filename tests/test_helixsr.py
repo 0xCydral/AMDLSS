@@ -58,10 +58,10 @@ def test_a_failed_setup_reports_its_last_line(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('windows', [True, False])
 def test_a_run_with_the_network_built_keeps_the_record_and_runs_helixsrs_own_setup(tmp_path, monkeypatch, windows):
-    """HelixSR's own setup builds only what a folder is missing: with the network built it builds frame generation
-    alone (-Yes/--yes are the whole command line; the script passes --fg-only on itself) and does not write
-    helixsr_setup.json again. build() must keep that record (deleting it would report a failure after a good FG
-    run), on Windows and Linux alike, and say in the log that frame generation is still missing."""
+    """HelixSR's own setup builds only what a folder is missing: with the network built it has nothing to build
+    (-Yes/--yes are the whole command line) and does not write helixsr_setup.json again. build() must keep that
+    record (deleting it would report a failure after a good run), on Windows and Linux alike, and say nothing
+    about frame generation: HelixSR 1.9.2 and later have none."""
     commands = []
 
     def run(command, cwd, on_line=None, timeout=0, env=None):
@@ -73,15 +73,15 @@ def test_a_run_with_the_network_built_keeps_the_record_and_runs_helixsrs_own_set
     (tmp_path / helixsr.BUILT).write_text('{}')   # the network was built here
     lines = []
     helixsr.build(tmp_path, on_line=lambda text, final=True: lines.append(text), windows=windows)
-    assert (tmp_path / helixsr.BUILT).is_file()   # the FG-only run does not rewrite it: it must survive
+    assert (tmp_path / helixsr.BUILT).is_file()   # a run with nothing to build does not rewrite it: it must survive
     assert commands == [helixsr.setup_command(windows=windows)]
-    assert any('frame generation is not built' in line for line in lines)   # one clear line, with the reason
+    assert not any('frame generation' in line for line in lines)
 
 
 @pytest.mark.parametrize('windows', [True, False])
 def test_install_with_the_network_built_does_not_fetch_again(tmp_path, monkeypatch, windows):
-    """A built folder whose frame generation is missing (the button's Update): the install runs the setup in place,
-    which builds only the FG, and never downloads the zip again. Windows and Linux alike."""
+    """A built folder (the button's Build): the install runs the setup in place and never downloads the zip again.
+    Windows and Linux alike."""
     data = tmp_path / 'data'
     folder = helixsr.install_folder(data)
     (folder / 'setup').mkdir(parents=True)
@@ -127,13 +127,15 @@ def test_locate_prefers_the_override_then_the_data_folder(tmp_path):
 
 def test_locate_falls_back_to_the_newest_older_folder_and_prefers_the_pinned_one(tmp_path):
     for name in ('HelixSR-1.8.9', 'HelixSR-1.8.10', 'HelixSR-1.10.0', 'HelixSR-1.9.0', 'HelixSR-1.9.1',
-                 'HelixSR-2.0.0', 'HelixSR-nope', 'HelixSR-1.7.0'):
+                 'HelixSR-1.9.3', 'HelixSR-2.0.0', 'HelixSR-nope', 'HelixSR-1.7.0'):
         (tmp_path / name).mkdir()
         (tmp_path / name / helixsr.DLL).write_bytes(b'x')
     (tmp_path / 'HelixSR-1.8.5').mkdir()   # no DLL: not a HelixSR folder
-    assert helixsr.VERSION == '1.9.1' and helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.1'
+    assert helixsr.VERSION == '1.9.3' and helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.3'
+    (tmp_path / 'HelixSR-1.9.3' / helixsr.DLL).unlink()
+    assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.1'   # not updated yet: the newest below the pin
     (tmp_path / 'HelixSR-1.9.1' / helixsr.DLL).unlink()
-    assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.0'   # not updated yet: the newest below the pin
+    assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.9.0'
     (tmp_path / 'HelixSR-1.9.0' / helixsr.DLL).unlink()
     assert helixsr.locate(tmp_path) == tmp_path / 'HelixSR-1.8.10'   # numeric order; the newer ones are above the pin
     assert helixsr.older('1.9.0', '1.10.0') and not helixsr.older('1.10.0', '1.9.0') and not helixsr.older('?', '1.9.0')
@@ -356,7 +358,7 @@ def test_the_bridge_recognizes_and_removes_a_helixsr_installed_scaler(fake):
     scaler_install(Path(three.folder))
     listed = client.list_games()[2]
     assert listed.state == 'optiscaler' and listed.route == 'optiscaler' and listed.installed
-    assert listed.helixsr == '1.9.1'   # the HelixSR DLL copy in the game's HelixSR folder names the version
+    assert listed.helixsr == '1.9.3'   # the HelixSR DLL copy in the game's HelixSR folder names the version
     client.remove(listed)
     assert sorted(p.name for p in Path(three.folder).iterdir()) == []
 
@@ -437,7 +439,7 @@ def test_the_bridge_reports_the_helixsr_version_a_game_runs(fake):
     client, one, _two = fake
     assert [g.helixsr for g in client.list_games()] == ['', '', '']   # nothing installed
     client.install(client.list_games()[0])
-    assert client.list_games()[0].helixsr == '1.9.1'   # the direct install's record names it
+    assert client.list_games()[0].helixsr == '1.9.3'   # the direct install's record names it
     (one / 'helixsr-install.json').write_text('not json')
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'HELIX\x00HelixSR 1.8.1\x00')
     assert client.list_games()[0].helixsr == '1.8.1'   # no record: the DLL in the game is the fallback

@@ -118,22 +118,24 @@ def check_framegen():
         (Path(folder) / 'OptiScaler.ini').write_bytes(ini)
         assert framegen.apply(folder, True, folder) and framegen.is_on(folder)
         assert framegen.apply(folder, False, folder) and (Path(folder) / 'OptiScaler.ini').read_bytes() == ini
-    sc = (b'[HelixSR]\r\nFrameGeneration=auto\r\n[FrameGen]\r\nFGInput=auto\r\nFGNvngxReplacement=auto\r\n'
-          b'FGOutput=auto\r\n')   # the sections HelixSR Scaler's ini has; the DLSS 4 switch needs them
+    sc = (b'[HelixSR]\r\nFrameGeneration=off\r\n[FrameGen]\r\nFGInput=auto\r\nFGNvngxReplacement=auto\r\n'
+          b'FGOutput=auto\r\n')   # the sections HelixSR Scaler 1.0.6's ini has
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / 'OptiScaler.ini'
         path.write_bytes(sc)
         assert framegen.generator_of(folder) == ''
-        assert framegen.apply_generator(folder, framegen.DLSS4, folder)
+        # HelixSR 1.9.2 removed its DLSS 4 mode: a leftover of an earlier AMDLSS is recognised and switched off
+        assert framegen.apply(folder, True, folder, framegen.HELIX_FG) and framegen.apply(folder, True, folder,
+                                                                                          framegen.DLSS4_FG)
         assert framegen.generator_of(folder) == framegen.DLSS4 and b'FGNvngxReplacement=HelixSR' in path.read_bytes()
         assert framegen.apply_generator(folder, framegen.AMD, folder)
+        assert framegen.generator_of(folder) == framegen.AMD and b'nvngxfg' not in path.read_bytes()
         assert framegen.generator_of(folder) == framegen.AMD and b'FGInput=dlssg' in path.read_bytes()
         assert framegen.apply_generator(folder, '', folder)
         off = path.read_bytes()
-        # Scaler reads auto as "run HelixSR's frame generation": off must be written out, and be byte-exact again
+        # off is written out, never Scaler's auto, and asking for the removed DLSS 4 mode just means off
         assert b'FrameGeneration=off' in off and b'FGInput=nofg' in off and framegen.generator_of(folder) == ''
-        assert framegen.apply_generator(folder, framegen.DLSS4, folder)
-        assert framegen.apply_generator(folder, '', folder) and path.read_bytes() == off
+        assert not framegen.apply_generator(folder, framegen.DLSS4, folder) and path.read_bytes() == off
     assert framegen.name_of(framegen.DLSS4) == 'DLSS 4 (HelixSR)' and framegen.name_of('') == 'off'
 
 
@@ -252,16 +254,9 @@ def check_helixsr():
         assert not helixsr.built(folder)
         (Path(folder) / helixsr.BUILT).write_text('{}')
         assert helixsr.built(folder)
-        assert 'frame generation is not built' in helixsr.fg_reason(folder)   # the setup made none (or an older one)
-        (Path(folder) / helixsr.FG_SETUP).write_text('{}')
-        fg = Path(folder) / helixsr.FG_FOLDER
-        fg.mkdir()
-        for name in helixsr.FG_DLLS:
-            (fg / name).write_bytes(b'MZ')
-        assert helixsr.fg_reason(folder) == '' and helixsr.fg_folder(folder) == fg
         assert helixsr.install_helixsr(folder, consented=False) is None  # declined: nothing runs, nothing is written
         assert sorted(p.name for p in Path(folder).iterdir() if p.is_file()) == \
-            sorted([helixsr.DLL, helixsr.BUILT, helixsr.FG_SETUP])
+            sorted([helixsr.DLL, helixsr.BUILT])
 
 
 def check_scaler():
@@ -283,11 +278,8 @@ def check_scaler():
         helix = root / helixsr.TOP
         helix.mkdir()
         (helix / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
-        fg = helix / helixsr.FG_FOLDER
-        fg.mkdir()
-        for name in helixsr.FG_DLLS:
-            (fg / name).write_bytes(b'MZ')
-        (helix / helixsr.FG_SETUP).write_text('{}')
+        (helix / 'helixsr-fg').mkdir()   # a 1.9.1 build not updated yet: Scaler 1.0.6 ignores it, so it is not copied
+        (helix / 'helixsr-fg' / 'nvexec64.dll').write_bytes(b'MZ')
         game = root / 'Game'
         game.mkdir()
         (game / 'Game.exe').write_bytes(b'MZ')
@@ -298,7 +290,7 @@ def check_scaler():
         assert (game / 'dxgi.dll').read_bytes() == b'stand-in OptiScaler.dll'
         assert (game / 'OptiScaler' / 'streamline' / 'sl.dlss_g.dll').is_file()
         assert (game / 'HelixSR' / 'helixsr.dll').read_bytes().startswith(b'MZ')
-        assert (game / 'HelixSR' / 'helixsr-fg' / 'nvexec64.dll').is_file()
+        assert not (game / 'HelixSR' / 'helixsr-fg').exists()
         assert (game / 'OptiScaler.ini').read_bytes() == b'stand-in OptiScaler.ini'   # the game's own was kept
         assert record['moved'] and record['moved'][0]['name'] == 'OptiScaler.ini'
         assert not (game / 'README.txt').exists()      # not in the package list: never copied

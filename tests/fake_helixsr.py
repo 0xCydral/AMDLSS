@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """A stand-in for HelixSR's setup folder, so tests can run AMDLSS's whole path (bridge, list parsing, install and
 remove command lines) with no HelixSR and no game. make() writes setup/helixsr_install.py, which has the same
-module-level names and command line as HelixSR 1.9.1's installer (`games`, `install`, `uninstall`, `say`,
+module-level names and command line as HelixSR 1.9.3's installer (`games`, `install`, `uninstall`, `say`,
 `version_of`, `is_helixsr`, `original`, `FOLDER`/`MARKER`/`OWN`/`CORE`, Game.route/scaler_installed/old_install()/
 installed()/direct_installed()/current()/label()/ways(); `list`, `install N`, `uninstall N`, `--folder PATH`,
 `--fg on|off`). Like the real one: a game's route is 'direct' (FSR 3.1), 'scaler' (DLSS/XeSS/FSR 2, or Scaler
@@ -189,7 +189,7 @@ def uninstall_old(g):
 
 
 def uninstall_scaler(t):
-    """HelixSR 1.9.1's own Scaler uninstall: HelixSR-Scaler.files names the files it put there; the games own
+    """HelixSR 1.9.3's own Scaler uninstall: HelixSR-Scaler.files names the files it put there; the games own
     files come back out of HelixSR-Scaler-backup."""
     t, backup = Path(t), Path(t) / SCALER_BACKUP
     try:
@@ -221,21 +221,21 @@ def uninstall_scaler(t):
 
 
 def install_scaler(t):
-    """HelixSR 1.9.1's own Scaler install in its own layout: the DLL next to the game's .exe, HelixSR's DLL in its
+    """HelixSR 1.9.3's own Scaler install in its own layout: the DLL next to the game's .exe, HelixSR's DLL in its
     HelixSR folder, and HelixSR-Scaler.files, the record its uninstall reads (the real one also copies the whole
     package - OptiScaler/, streamline/, Licenses/; the bridge only ever reads the record)."""
     t = Path(t)
     (t / 'dxgi.dll').write_bytes(b'OPTISCALER 0.9.4')
     (t / 'OptiScaler.ini').write_bytes(INI.encode())
     (t / FOLDER).mkdir(parents=True, exist_ok=True)
-    (t / FOLDER / OWN).write_bytes(b'HELIX\\x00HelixSR 1.9.1\\x00')
-    (t / SCALER_FILES).write_text(json.dumps({'name': 'dxgi.dll', 'version': '1.0.4',
+    (t / FOLDER / OWN).write_bytes(b'HELIX\\x00HelixSR 1.9.3\\x00')
+    (t / SCALER_FILES).write_text(json.dumps({'name': 'dxgi.dll', 'version': '1.0.6',
                                               'files': ['dxgi.dll', 'OptiScaler.ini', 'HelixSR/helixsr.dll'],
                                               'by_hand': False}, indent=1))
 
 
 def install(g, here):
-    """HelixSR 1.9.1: the game's route picks the way - the FSR drop-in, or HelixSR Scaler where the game has no
+    """HelixSR 1.9.3: the game's route picks the way - the FSR drop-in, or HelixSR Scaler where the game has no
     FSR 3.1 DLL (or Scaler already was the way)."""
     route = g.route if g.route in ('direct', 'scaler') else ('direct' if g.fsr_targets else 'scaler')
     if route == 'direct' and not g.fsr_targets:
@@ -316,7 +316,7 @@ def make(root, games):
     (folder / 'setup').mkdir(parents=True)
     (folder / 'setup' / 'helixsr_install.py').write_text(STUB, encoding='utf-8')
     (folder / 'games.json').write_text(json.dumps(games), encoding='utf-8')
-    (folder / 'amd_fidelityfx_dx12.dll').write_bytes(b'MZ\x00HelixSR 1.9.1\x00')
+    (folder / 'amd_fidelityfx_dx12.dll').write_bytes(b'MZ\x00HelixSR 1.9.3\x00')
     (folder / 'helixsr_setup.json').write_text('{}', encoding='utf-8')
     return folder
 
@@ -342,7 +342,7 @@ def old_install(game_folder, route='optiscaler'):
 
 
 def scaler_install(game_folder):
-    """A HelixSR 1.9.1 Scaler install next to a game's .exe, the way its own setup records it: dxgi.dll,
+    """A HelixSR 1.9.3 Scaler install next to a game's .exe, the way its own setup records it: dxgi.dll,
     OptiScaler.ini, HelixSR\\helixsr.dll and HelixSR-Scaler.files (the record `uninstall N` reads). AMDLSS 1.0.0's
     older bridge recorded such installs in HelixSR\\helixsr-install.json instead (see old_install). Returns the
     record."""
@@ -351,8 +351,8 @@ def scaler_install(game_folder):
     folder.mkdir(parents=True, exist_ok=True)
     (target / 'dxgi.dll').write_bytes(b'OPTISCALER 0.9.4')
     (target / 'OptiScaler.ini').write_bytes(b'[FrameGen]\r\nFGInput=auto\r\n')
-    (folder / 'helixsr.dll').write_bytes(b'HELIX\x00HelixSR 1.9.1\x00')
-    record = {'name': 'dxgi.dll', 'version': '1.0.4',
+    (folder / 'helixsr.dll').write_bytes(b'HELIX\x00HelixSR 1.9.3\x00')
+    record = {'name': 'dxgi.dll', 'version': '1.0.6',
               'files': ['dxgi.dll', 'OptiScaler.ini', 'HelixSR/helixsr.dll'], 'by_hand': False}
     (target / 'HelixSR-Scaler.files').write_text(json.dumps(record, indent=1), encoding='utf-8')
     return record

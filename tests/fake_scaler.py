@@ -27,7 +27,7 @@ UNLISTED = ('README.txt', 'setup_windows.bat', 'setup_linux.sh')
 
 
 def make(root, listed=LISTED, unlisted=UNLISTED, ini=INI):
-    """The unpacked package under `root` (root/HelixSR-Scaler-1.0.3). Its list names the not-installed files too,
+    """The unpacked package under `root` (root/HelixSR-Scaler-1.0.6). Its list names the not-installed files too,
     like the real HelixSR-Scaler-package.txt; scaler.files() leaves those out. Returns its folder."""
     folder = Path(root) / TOP
     for rel in listed + unlisted:

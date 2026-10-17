@@ -15,11 +15,11 @@ cards. This module:
     in that same Python (it imports helixsr_install and prints JSON); if the bridge cannot run, the installer's printed
     `list` output is parsed instead.
   - installs the Scaler route (HelixSR's OptiScaler, for a game without an FSR 3.1 DLL) itself in amdlss.scaler:
-    the pinned HelixSR Scaler package next to the game's .exe, with AMDLSS's own record and backup. HelixSR's 1.9.1
-    installer installs Scaler the same way (its HelixSR-Scaler.files record); AMDLSS keeps its own path so FSR 4.1.1,
+    the pinned HelixSR Scaler package next to the game's .exe, with AMDLSS's own record and backup. HelixSR's installer (1.9.1
+    and later) installs Scaler the same way (its HelixSR-Scaler.files record); AMDLSS keeps its own path so FSR 4.1.1,
     Luma UE and Remove behave the same on both systems, and it recognises HelixSR's own installs through that record.
 
-The pinned files are HelixSR 1.9.1. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
+The pinned files are HelixSR 1.9.3. Nothing is bundled or redistributed: the zip comes from HelixSR's own release.
 """
 import hashlib
 import http.client
@@ -39,17 +39,18 @@ from pathlib import Path
 from . import games as gamelist
 from . import host
 
-VERSION = '1.9.1'
-ZIP_NAME = 'HelixSR-1.9.1.zip'
+VERSION = '1.9.3'
+ZIP_NAME = 'HelixSR-1.9.3.zip'
 ZIP_URL = f'https://github.com/lonewolf0622/HelixSR/releases/download/v{VERSION}/{ZIP_NAME}'
-ZIP_SIZE = 137494566
-ZIP_SHA256 = '9f329a8a4359bc21830b1e0b3f8211f52d851760faddc5cbde74e245cf5140ff'
+ZIP_SIZE = 136076974
+ZIP_SHA256 = '7094b7afd006ab56231c880fcd358f115b114ee0734baa19d497a3e42da0a1d1'
 TOP = f'HelixSR-{VERSION}'  # the folder the zip extracts to
 DLL = 'amd_fidelityfx_dx12.dll'
 BUILT = 'helixsr_setup.json'  # written beside the DLL when the setup has built the network
-FG_SETUP = 'helixsr_fg_setup.json'  # written beside it when the setup also built frame generation
-FG_FOLDER = 'helixsr-fg'            # frame generation's files (nvexec64, nvngx_dlssg, _nvngx, libxell)
-FG_DLLS = ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll')  # what DLSS 4 frame generation needs
+# HelixSR 1.9.2 removed its own frame generation (1.9.3 kept it out): the setup builds none, Scaler 1.0.6 ignores
+# any left in a game and redirects an old HelixSR provider choice to FFX. Said where a leftover is switched off.
+NO_FG = ("HelixSR 1.9.2 and later have no frame generation of their own. AMD FSR frame generation is still "
+         "available.")
 MARKER_FILE = 'helixsr-install.json'   # HelixSR's install record beside a drop-in DLL
 FSR4_MARKER = 'amdlss-fsr4.json'       # AMDLSS's own record of an FSR 4.1.1 drop-in (amdlss.fsr4)
 PACKAGE = 'helixsr-package.json'       # beside the extracted folder: which pinned zip its files came from
@@ -75,7 +76,7 @@ import helixsr_install as h
 def state(g):
     if g.dlss_installed:
         return 'dlss'
-    if getattr(g, 'scaler_installed', False) or g.opti_installed:  # 1.9.1 records Scaler in HelixSR-Scaler.files,
+    if getattr(g, 'scaler_installed', False) or g.opti_installed:  # 1.9.1+ records Scaler in HelixSR-Scaler.files,
         return 'optiscaler'                                        # an earlier version only in its HelixSR marker
     if any(h.original(t).exists() and h.is_helixsr(t) for t in g.fsr_targets):
         return 'direct'
@@ -159,8 +160,8 @@ except Exception as error:
 
 
 # HelixSR's own name for the Scaler route: 1.9.0's installer called it 'unsupported' (a game with DLSS, XeSS or
-# FSR 2 and no FSR 3.1), 1.9.1 calls it 'scaler' and refuses it ('blocked') in games with anti-cheat. All map to
-# AMDLSS's 'optiscaler': a not-yet-updated 1.9.0 folder and the pinned 1.9.1 both work, and 'blocked' keeps
+# FSR 2 and no FSR 3.1), 1.9.1 and later call it 'scaler' and refuse it ('blocked') in games with anti-cheat. All map to
+# AMDLSS's 'optiscaler': a not-yet-updated 1.9.0 folder and the pinned 1.9.3 both work, and 'blocked' keeps
 # AMDLSS's behaviour (a warning the player decides on).
 SCALER_ROUTES = ('unsupported', 'scaler', 'blocked')
 
@@ -234,28 +235,6 @@ def older(version, other):
     return a is not None and b is not None and a < b
 
 
-def fg_folder(folder):
-    """HelixSR's frame generation folder in `folder` (the setup's own layout), or None when there is none."""
-    for name in (FG_FOLDER, Path('dlss-loader') / FG_FOLDER):
-        if (Path(folder) / name).is_dir():
-            return Path(folder) / name
-    return None
-
-
-def fg_reason(folder):
-    """'' when `folder` holds HelixSR's frame generation, so DLSS 4 frame generation can be offered; else why not,
-    in plain words for the greyed choice. The setup writes helixsr_fg_setup.json and fills helixsr-fg when it built
-    it (with the two NVIDIA DLLs and nvexec64.dll)."""
-    folder = Path(folder)
-    fg = fg_folder(folder)
-    if not (folder / FG_SETUP).is_file() or fg is None:
-        return ("HelixSR's frame generation is not built: press Update HelixSR to build it (its setup gets the "
-                "files from NVIDIA once, about 400 MB).")
-    missing = [name for name in FG_DLLS if not (fg / name).is_file()]
-    if missing:
-        return (f"HelixSR's frame generation is incomplete ({missing[0]} is missing): press Update HelixSR to "
-                f"build it.")
-    return ''
 
 
 def locate(data_dir, override=''):
@@ -330,10 +309,8 @@ def consent_text(windows=None):
             f"github.com/lonewolf0622/HelixSR, checks their SHA-256, and runs HelixSR's own setup.\n\n"
             f"The setup downloads NVIDIA's DLSS 310.7.0 DLL from NVIDIA's GitHub. That DLL is NVIDIA's, under "
             f"NVIDIA's license:\n{NVIDIA_LICENSE_URL}\n\n"
-            f"The setup builds HelixSR's network on this PC from it (about a minute) and deletes the DLL. It also "
-            f"builds HelixSR's frame generation (for DLSS 4 games): that downloads about 400 MB from NVIDIA's "
-            f"download server once (Streamline 2.8.0's frame generation DLL and the NGX core out of NVIDIA's "
-            f"595.71.05 driver) and keeps only the two small DLLs it needs. It also {downloads} "
+            f"The setup builds HelixSR's network on this PC from it (about a minute) and deletes the DLL. "
+            f"It also {downloads} "
             f"The built network stays on this PC: do not share it.\n\n"
             f"Do you agree and want to continue?")
 
@@ -446,11 +423,9 @@ def package_current(data_dir):
 
 
 def forget_build(folder):
-    """Drops the build records of the files a fresh extraction just replaced (the network's and frame generation's),
-    so a failure of the coming build cannot let the replaced build pass for the new files. build() writes them
-    again; the extracted package carries neither."""
-    for name in (BUILT, FG_SETUP):
-        (Path(folder) / name).unlink(missing_ok=True)
+    """Drops the build record of the files a fresh extraction just replaced, so a failure of the coming build cannot
+    let the replaced build pass for the new files. build() writes it again; the extracted package carries none."""
+    (Path(folder) / BUILT).unlink(missing_ok=True)
 
 
 def fetch(target, progress=None):
@@ -590,8 +565,7 @@ class SetupLog:
 def build(folder, on_line=None, windows=None, data_dir=None):
     """Runs the setup in `folder`. Raises HelixSRError unless it ends with the network built. On Linux `data_dir`
     is where a wine wrapper may be written (see with_wine); it also gets the setup's output as SETUP_LOG. The
-    setup itself builds only what `folder` is missing (HelixSR's own scripts do): with the network built and
-    frame generation missing, this run builds frame generation alone."""
+    setup itself builds only what `folder` is missing (HelixSR's own scripts do)."""
     folder = Path(folder)
     log = SetupLog(data_dir, on_line)
     if not built(folder):
@@ -612,9 +586,6 @@ def build(folder, on_line=None, windows=None, data_dir=None):
         raise HelixSRError(f'HelixSR setup failed (exit {code}): {tail[-1] if tail else "no output"}{hint}')
     if not built(folder):
         raise HelixSRError(f'HelixSR setup finished but {BUILT} is missing in {folder}')
-    missing = fg_reason(folder)
-    if missing:
-        log(missing, True)   # the window and SETUP_LOG say that this run left frame generation missing
 
 
 def install_helixsr(data_dir, consented, progress=None, on_line=None, force=False):

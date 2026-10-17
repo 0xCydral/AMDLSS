@@ -2,7 +2,7 @@
 """The real thing, without a real game: HelixSR's own installer and HelixSR Scaler into a FAKE game folder.
 
 Skipped unless AMDLSS_TEST_HELIXSR names a built HelixSR folder (one that holds helixsr_setup.json) and
-AMDLSS_TEST_SCALER names the unpacked HelixSR Scaler package (HelixSR-Scaler-1.0.4, the one with OptiScaler.dll);
+AMDLSS_TEST_SCALER names the unpacked HelixSR Scaler package (HelixSR-Scaler-1.0.6, the one with OptiScaler.dll);
 the Python HelixSR's setup uses must be there (%LOCALAPPDATA%\\HelixSR\\python, or on Linux a python3 with numpy).
 The HelixSR folder is copied into the temp folder's amdlss-fake first, so HelixSR's own files are never written; the
 Scaler package is only read. The install goes only into the fake game there. AMDLSS_TEST_INSTALLER may name a newer
@@ -91,7 +91,7 @@ def test_install_and_remove_into_a_fake_game(fake_game):
 
 
 def test_the_scaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_path, monkeypatch):
-    # the OptiScaler route: AMDLSS downloads and places HelixSR Scaler 1.0.4 (the real package, read-only);
+    # the OptiScaler route: AMDLSS downloads and places HelixSR Scaler 1.0.6 (the real package, read-only);
     # OptiScaler's own streamline DLLs and HelixSR's built DLL go in, its ini gets AMDLSS's frame generation
     # switches, and Remove puts every game file back byte for byte
     copy, game = fake_game
@@ -135,30 +135,30 @@ def test_the_scaler_route_with_frame_generation_into_a_fake_game(fake_game, tmp_
     assert not (tmp_path / 'data' / framegen.RECORD).exists()
 
 
-def test_dlss4_frame_generation_on_the_real_scaler_ini(fake_game, tmp_path, monkeypatch):
-    # AMDLSS's DLSS 4 switch over the real OptiScaler.ini HelixSR Scaler ships, with the real build's FG files:
-    # [HelixSR] FrameGeneration=on, [FrameGen] FGInput=nvngxfg and FGNvngxReplacement=HelixSR, and every value
-    # back as it was
+def test_a_dlss4_leftover_is_switched_off_on_the_real_scaler_ini(fake_game, tmp_path, monkeypatch):
+    # HelixSR 1.9.2 removed its own frame generation: the real build has no helixsr-fg and writes no
+    # helixsr_fg_setup.json, and Scaler 1.0.6 ships [HelixSR] FrameGeneration=off. A DLSS 4 mode an earlier AMDLSS
+    # wrote into that ini ([HelixSR] FrameGeneration=on, [FrameGen] FGInput=nvngxfg and FGNvngxReplacement=HelixSR)
+    # is recognised, and Install/Update's step puts every value back
     copy, game = fake_game
     monkeypatch.setenv('AMDLSS_SCALER', SCALER_SOURCE)
-    assert helixsr.fg_reason(copy) == ''   # helixsr-fg (nvexec64, nvngx_dlssg, _nvngx) and helixsr_fg_setup.json
+    assert not (copy / 'helixsr-fg').exists() and not (copy / 'helixsr_fg_setup.json').exists()
     client = helixsr.HelixSR(copy)
     scaler.install_game(client, listed(client, game), [game], tmp_path / 'data')
     ini = (game / 'OptiScaler.ini').read_bytes()
-    assert b'FrameGeneration=auto' in ini and framegen.generator_of(game) == ''
+    assert b'FrameGeneration=off' in ini and framegen.generator_of(game) == ''
 
-    assert framegen.apply_generator(game, framegen.DLSS4, tmp_path / 'data')
+    assert framegen.apply(game, True, tmp_path / 'data', framegen.HELIX_FG)
+    assert framegen.apply(game, True, tmp_path / 'data', framegen.DLSS4_FG)
     data = (game / 'OptiScaler.ini').read_bytes()
     assert framegen.generator_of(game) == framegen.DLSS4
     assert b'FrameGeneration=on' in data and b'FGInput=nvngxfg' in data and b'FGNvngxReplacement=HelixSR' in data
 
-    assert framegen.apply_generator(game, framegen.AMD, tmp_path / 'data')
+    assert framegen.apply_generator(game, framegen.AMD, tmp_path / 'data')   # the leftover goes back first
     amd = (game / 'OptiScaler.ini').read_bytes()
     assert b'FGInput=dlssg' in amd and b'FGOutput=fsrfg' in amd and b'FrameGeneration=off' in amd
-    assert b'FGNvngxReplacement=auto' in amd
-    assert framegen.generator_of(game) == framegen.AMD
+    assert b'FGNvngxReplacement=auto' in amd and framegen.generator_of(game) == framegen.AMD
 
-    assert framegen.apply_generator(game, framegen.DLSS4, tmp_path / 'data')
     assert framegen.apply_generator(game, '', tmp_path / 'data')
     off = (game / 'OptiScaler.ini').read_bytes()
     assert b'FrameGeneration=off' in off and b'FGInput=nofg' in off and b'FGNvngxReplacement=auto' in off

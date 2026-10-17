@@ -57,16 +57,15 @@ def test_a_record_of_another_zip_or_folder_is_not_current(tmp_path):
     assert not helixsr.package_current(tmp_path)                       # another folder
 
 
-def test_fetch_drops_the_build_records_of_the_files_it_replaces(tmp_path, monkeypatch):
-    """Update over an earlier build: the extracted package carries no build records, so the replaced build's
-    records must go with the files they described. Else a failed build could pass for the new files."""
+def test_fetch_drops_the_build_record_of_the_files_it_replaces(tmp_path, monkeypatch):
+    """Update over an earlier build: the extracted package carries no build record, so the replaced build's
+    record must go with the files it described. Else a failed build could pass for the new files."""
     folder = tmp_path / helixsr.TOP
     folder.mkdir(parents=True)
     (folder / helixsr.BUILT).write_text('{}', encoding='utf-8')
-    (folder / helixsr.FG_SETUP).write_text('{}', encoding='utf-8')
     serve(monkeypatch, GOOD)
     helixsr.fetch(tmp_path)
-    assert not (folder / helixsr.BUILT).exists() and not (folder / helixsr.FG_SETUP).exists()
+    assert not (folder / helixsr.BUILT).exists()
     assert (folder / helixsr.DLL).is_file() and helixsr.package_current(tmp_path)
 
 
@@ -126,13 +125,13 @@ def test_consent_text_names_nvidia_and_its_license():
 
 
 def test_pinned_values_are_the_current_release():
-    assert helixsr.ZIP_SIZE == 137494566
-    assert helixsr.ZIP_SHA256 == '9f329a8a4359bc21830b1e0b3f8211f52d851760faddc5cbde74e245cf5140ff'
-    assert helixsr.ZIP_URL.endswith('/v1.9.1/HelixSR-1.9.1.zip')
-    assert helixsr.TOP == 'HelixSR-1.9.1'  # the zip extracts to the version
-    # HelixSR Scaler 1.0.4: the package the OptiScaler route installs now (amdlss.scaler)
+    assert helixsr.ZIP_SIZE == 136076974
+    assert helixsr.ZIP_SHA256 == '7094b7afd006ab56231c880fcd358f115b114ee0734baa19d497a3e42da0a1d1'
+    assert helixsr.ZIP_URL.endswith('/v1.9.3/HelixSR-1.9.3.zip')
+    assert helixsr.TOP == 'HelixSR-1.9.3'  # the zip extracts to the version
+    # HelixSR Scaler 1.0.6: the package the OptiScaler route installs now (amdlss.scaler)
     from amdlss import scaler
-    assert scaler.ZIP_SIZE == 132516449
-    assert scaler.ZIP_SHA256 == '7ad033590b9a138fc524160c4c9ff105f0b20320e4120a43fb7766392e62a86f'
-    assert scaler.ZIP_URL.endswith('/v1.9.1/HelixSR-Scaler-1.0.4.zip')
-    assert scaler.TOP == 'HelixSR-Scaler-1.0.4' and scaler.LIST == 'HelixSR-Scaler-package.txt'
+    assert scaler.ZIP_SIZE == 133228253
+    assert scaler.ZIP_SHA256 == '1256a5c51ba0db804d60c5ad896a06a17134f8b130a68fabda41621e8dc650af'
+    assert scaler.ZIP_URL.endswith('/v1.9.3/HelixSR-Scaler-1.0.6.zip')
+    assert scaler.TOP == 'HelixSR-Scaler-1.0.6' and scaler.LIST == 'HelixSR-Scaler-package.txt'

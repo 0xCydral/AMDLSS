@@ -2,16 +2,17 @@
 """HelixSR Scaler: OptiScaler 0.9.4 with HelixSR built in, for games without an FSR 3.1 DLL.
 
 HelixSR 1.9.0's own setup installed only the FSR drop-in and its installer reported a game without FSR 3.1 as
-'unsupported'; 1.9.1's setup installs HelixSR Scaler too ('scaler', or 'blocked' with anti-cheat), with the same
-package AMDLSS downloads. AMDLSS still places the package itself: FSR 4.1.1, Luma UE and AMDLSS's own
+'unsupported'; 1.9.1's and later setups install HelixSR Scaler too ('scaler', or 'blocked' with anti-cheat), with the
+same package AMDLSS downloads. AMDLSS still places the package itself: FSR 4.1.1, Luma UE and AMDLSS's own
 record/backup work the same on both systems, and Remove restores exactly what an install replaced. AMDLSS
 downloads the package (SHA-256 pinned), unpacks it and puts its files next to the game's .exe the way Scaler's own
 installers do:
 
   - every file its HelixSR-Scaler-package.txt names, with OptiScaler.dll renamed to the first free of Scaler's own
     names (dxgi.dll first);
-  - HelixSR's built amd_fidelityfx_dx12.dll as HelixSR\\helixsr.dll, and its helixsr-fg\\*.dll as
-    HelixSR\\helixsr-fg\\*.dll when the setup built frame generation;
+  - HelixSR's built amd_fidelityfx_dx12.dll as HelixSR\\helixsr.dll (HelixSR 1.9.2 and later have no frame
+    generation of their own, so there is no helixsr-fg folder to copy; an install of an earlier AMDLSS that holds one
+    is removed through its record as before);
   - every other OptiScaler copy next to the .exe (an older install, whatever it is called; its version resource or
     its bytes say so) is moved into HelixSR\\amdlss-scaler-backup too: the game loads whichever proxy it finds
     first, so a leftover would shadow ours;
@@ -32,11 +33,11 @@ from . import VERSION as APP_VERSION
 from . import helixsr, pe
 from .helixsr import HelixSRError
 
-VERSION = '1.0.4'
+VERSION = '1.0.6'
 ZIP_NAME = f'HelixSR-Scaler-{VERSION}.zip'
 ZIP_URL = f'https://github.com/lonewolf0622/HelixSR/releases/download/v{helixsr.VERSION}/{ZIP_NAME}'
-ZIP_SIZE = 132516449
-ZIP_SHA256 = '7ad033590b9a138fc524160c4c9ff105f0b20320e4120a43fb7766392e62a86f'
+ZIP_SIZE = 133228253
+ZIP_SHA256 = '1256a5c51ba0db804d60c5ad896a06a17134f8b130a68fabda41621e8dc650af'
 TOP = f'HelixSR-Scaler-{VERSION}'          # the folder the zip extracts to
 LIST = 'HelixSR-Scaler-package.txt'        # the package's own file list: what its installer copies
 DLL = 'OptiScaler.dll'
@@ -132,7 +133,7 @@ def _put(source, target):
 
 
 def install_into(package, exe_folder, helix_folder, name, record):
-    """Copies the package's files (and HelixSR's built DLL and frame generation) into `exe_folder`, keeping every
+    """Copies the package's files (and HelixSR's built DLL) into `exe_folder`, keeping every
     game file that had to give way in the backup, and fills record['moved']/record['created']. `name` is what
     OptiScaler.dll is called there."""
     exe_folder, backup = Path(exe_folder), Path(exe_folder) / FOLDER / BACKUP
@@ -152,10 +153,6 @@ def install_into(package, exe_folder, helix_folder, name, record):
     for rel in files(package):
         put(package / rel, name if rel == DLL else rel)
     put(Path(helix_folder) / helixsr.DLL, f'{FOLDER}/{OWN}')
-    fg = helixsr.fg_folder(helix_folder)
-    if fg:
-        for dll in sorted(fg.glob('*.dll')):
-            put(dll, f'{FOLDER}/{helixsr.FG_FOLDER}/{dll.name}')
 
 
 def _name_for(exe_folder):

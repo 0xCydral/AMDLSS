@@ -26,8 +26,6 @@ FOOTER = ('AMDLSS is unofficial and is not affiliated with HelixSR, NVIDIA or AM
           '(GPL-2.0-or-later); HelixSR is freeware under its own license.')
 MAX_LOG_LINES = 3000
 COVER_WORKERS = 4
-DLSS4_NOTE = ("HelixSR's own frame generation, experimental: it makes one generated frame. Turn on DLSS Frame "
-              'Generation in the game.')
 
 
 def card_of(game, steam_covers=None, update=False):
@@ -65,13 +63,12 @@ class App:
         self.helixsr = None        # a HelixSR once its network is built
         self.helixsr_version = ''  # its version, read once per refresh
         self.helixsr_stale = False  # built, but older than the pinned release or not from the pinned zip: update it
-        self.helixsr_fg_missing = False  # built, but HelixSR's frame generation is not: the button builds it
         self.games, self.shown = [], []
         self.failed = {}            # folder added by hand -> why it was not offered, until the next Rescan
         self.busy = False
         self.option_key = None      # (folder, state) of the game the route and frame generation boxes show
         self.route_var = tk.StringVar(value='optiscaler')
-        self.fg_var = tk.StringVar(value='')   # the frame generation generator: '', 'amd' or 'dlss4'
+        self.fg_var = tk.StringVar(value='')   # the frame generation generator: '' or 'amd' ('dlss4': a leftover)
         self.upscaler_var = tk.StringVar(value='helixsr')   # helixsr or fsr4: what Install puts in the selected game
         self.gpu_class, self.source, self.dll_hint = None, None, ''   # the card, its FSR 4 DLL (fsr4.Source), a hint
         self.show_all = tk.BooleanVar(value=False)   # also list the games that are not offered, greyed out
@@ -206,8 +203,7 @@ class App:
         line.pack(fill='x')
         self.label(line, 'Frame generation', 'small', MUTED, CARD).pack(side='left', padx=(0, px(12)))
         self.fg_buttons = segmented(tk, self.look, line,
-                                    (('Off', ''), ('AMD FSR frame generation', framegen.AMD),
-                                     ('DLSS 4 frame generation (HelixSR), experimental', framegen.DLSS4)),
+                                    (('Off', ''), ('AMD FSR frame generation', framegen.AMD)),
                                     self.fg_var, self.update_buttons)
         self.fg_note = self.label(self.fg_row, '', 'small', CAUTION, CARD, anchor='w', justify='left')
         self.fg_note.bind('<Configure>', lambda e: self.fg_note.configure(wraplength=max(e.width, 1)))
@@ -361,8 +357,7 @@ class App:
         game, idle = self.selected(), not self.busy
         self.update_options(game, idle)   # first: it sets the upscaler and route the buttons below follow
         ready = idle and self.helixsr is not None
-        self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale
-                                                                 or self.helixsr_fg_missing)
+        self.install_button.configure(state='normal' if idle and (self.helixsr is None or self.helixsr_stale)
                                       else 'disabled')
         self.rescan_button.configure(state='normal' if idle else 'disabled')   # before HelixSR is installed too
         self.add_button.configure(state='normal' if idle else 'disabled')
@@ -455,8 +450,6 @@ class App:
             self.show_upscaler(game, idle)
         self.fg_note.pack_forget()
         offered = not game or game.streamline
-        dlss4_off = (helixsr.fg_reason(self.helixsr_folder) if self.helixsr_folder
-                     else 'DLSS 4 frame generation needs HelixSR built first.')
         if game and game.exe_folder and self.route_of(game) == 'optiscaler':
             self.fg_row.pack(fill='x', pady=(self.look.px(6), 0))
             note = ''
@@ -465,21 +458,16 @@ class App:
                              else '')
                 self.fg_var.set('')
                 note = game.framegen_reason + turns_off
-            elif dlss4_off and self.fg_var.get() == framegen.DLSS4:
-                self.fg_var.set('')   # the built files are gone: Install/Update turns it off and says why
-                note = dlss4_off + ' Install or Update turns it off.'
-            elif dlss4_off:
-                note = dlss4_off                # the DLSS 4 choice is greyed: say why
             elif self.fg_var.get() == framegen.DLSS4:
-                note = DLSS4_NOTE
+                self.fg_var.set('')   # an earlier AMDLSS switched HelixSR's mode on: Install/Update turns it off
+                note = helixsr.NO_FG + ' Install or Update turns it off.'
             if note:
                 self.fg_note.configure(text=plain(note))
                 self.fg_note.pack(fill='x', padx=(self.look.px(24), 0), pady=(self.look.px(4), 0))
         for widget in self.route_buttons:
             widget.configure(state='normal' if idle else 'disabled')
         for widget in self.fg_buttons:
-            widget.configure(state='normal' if idle and offered
-                             and (widget.value != framegen.DLSS4 or not dlss4_off) else 'disabled')
+            widget.configure(state='normal' if idle and offered else 'disabled')
 
     def show_upscaler(self, game, idle):
         """The Upscaler row: HelixSR or FSR 4.1.1 (greyed with the reason when the game cannot use it), the line under
@@ -551,7 +539,7 @@ class App:
     def refresh_helixsr(self):
         override = os.environ.get('AMDLSS_HELIXSR', '')
         folder = helixsr.locate(self.data_dir, override)
-        self.helixsr_folder, self.helixsr, self.helixsr_stale, self.helixsr_fg_missing = folder, None, False, False
+        self.helixsr_folder, self.helixsr, self.helixsr_stale = folder, None, False
         if folder is None:
             self.set_status('✗ HelixSR is not installed. Install it once, then pick your games.')
             self.install_button.configure(text='Install HelixSR')
@@ -567,10 +555,8 @@ class App:
             self.helixsr_version = self.helixsr.version
             self.helixsr_stale = not override and (helixsr.older(self.helixsr_version, helixsr.VERSION)
                                                    or not helixsr.package_current(self.data_dir))
-            self.helixsr_fg_missing = bool(helixsr.fg_reason(folder))  # the note then says to press the button
             self.set_status(self.helixsr_text())
-            self.install_button.configure(text='Update HelixSR' if self.helixsr_stale or self.helixsr_fg_missing
-                                          else 'Install HelixSR')
+            self.install_button.configure(text='Update HelixSR' if self.helixsr_stale else 'Install HelixSR')
             self.refresh_games()
         self.update_buttons()
 
@@ -584,7 +570,7 @@ class App:
         def progress(done, total):
             self.post(self.download_progress, done, total)
 
-        force = self.helixsr_stale   # an update replaces the folder's files; a build (frame generation) does not fetch
+        force = self.helixsr_stale   # an update replaces the folder's files; a plain build does not fetch
         self.work(lambda: helixsr.install_helixsr(self.data_dir, consented, progress, self.on_line, force=force),
                   self.helixsr_done)
 
@@ -752,11 +738,10 @@ class App:
                 if frame_gen == framegen.DLSS4 or framegen.generator_of(game.exe_folder) == framegen.DLSS4:
                     fallback = game.framegen_reason
                 frame_gen = ''
-            elif frame_gen in ('', framegen.DLSS4) and helixsr.fg_reason(self.helixsr_folder) \
-                    and (frame_gen == framegen.DLSS4
-                         or framegen.generator_of(game.exe_folder) == framegen.DLSS4):
-                fallback = helixsr.fg_reason(self.helixsr_folder)   # the built FG files are gone: turn it off, and
-                frame_gen = ''                                      # say why (the picked one, or the file's own)
+            elif frame_gen == framegen.DLSS4 or (frame_gen == '' and framegen.generator_of(game.exe_folder)
+                                                 == framegen.DLSS4):
+                fallback = helixsr.NO_FG   # HelixSR has none any more: the file's own DLSS 4 mode is turned off, and
+                frame_gen = ''             # the text says why
         shown_route = (f'{route}, {luma.NAME}' if want == 'luma'       # the report page reads this heading
                        else f'{route}, {fsr4.NAME}' if want == 'fsr4' else route)
         record = self.game_log(game, f'{"update" if game.installed else "install"} ({shown_route})')
@@ -778,11 +763,10 @@ class App:
             generator = frame_gen or ''
             if after.state == 'optiscaler' and after.exe_folder:
                 changed = framegen.apply_generator(after.exe_folder, frame_gen, self.data_dir)
-                if helixsr.fg_reason(self.helixsr_folder):
-                    # the built FG files are gone: whatever of HelixSR's DLSS 4 values the ini still holds with no
-                    # record left to restore them through (a user or another tool wrote them) goes back to
-                    # OptiScaler's own auto, so nothing is left pointing at files that are not there
-                    changed = framegen.clear_dlss4(after.exe_folder, self.data_dir) or changed
+                # whatever of HelixSR's DLSS 4 values the ini still holds with no record left to restore them through
+                # (a user or another tool wrote them) goes back to OptiScaler's own auto: HelixSR has no frame
+                # generation any more, so nothing may point at it
+                changed = framegen.clear_dlss4(after.exe_folder, self.data_dir) or changed
                 generator = framegen.generator_of(after.exe_folder)
                 if fallback:
                     record(f'DLSS 4 frame generation is off: {fallback}')

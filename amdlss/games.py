@@ -395,7 +395,7 @@ def scan_anticheat(folder, depth=3):
 NO_DLSSG = "This game has no DLSS Frame Generation for AMDLSS to replace."
 STREAMLINE_DLLS = frozenset(('sl.interposer.dll', 'sl.dlss_g.dll'))
 # DLSS Frame Generation without Streamline: the NGX plugin the game runs (Black Myth: Wukong ships it, no sl.*
-# files at all). OptiScaler's nvngxfg input replaces exactly this DLL, so it is enough to offer HelixSR's.
+# files at all). OptiScaler's nvngxfg input replaces exactly this DLL, so it is enough to offer frame generation.
 NGX_DLSSG_DLL = 'nvngx_dlssg.dll'
 # Folders of the mod's own install: their Streamline copies (OptiScaler\streamline), HelixSR's files and its
 # helixsr-fg copies are the mod's, never the game's, so they do not count as the game offering DLSS Frame Generation.
@@ -517,22 +517,18 @@ def plan_text(game, route=None):
 FRAMEGEN_HINT = ("Turn on DLSS Frame Generation in the game; it runs AMD's frame generation. "
                  "Never pick the game's own FSR frame generation as well: two frame generators at once cause "
                  "ghosting and stutter.")
-FRAMEGEN_DLSS4_HINT = ("Turn on DLSS Frame Generation in the game; it runs HelixSR's own frame generation "
-                       '(experimental: it makes one generated frame).')
 
 
 def after_text(game, frame_gen='', fallback=''):
     """What to choose in the game's menu once HelixSR is installed, as HelixSR's setup reports it. `frame_gen` is
-    the frame generation AMDLSS left switched on (amdlss.framegen's AMD or DLSS4), or '' for none; `fallback` says
-    why DLSS 4 frame generation was turned off instead (never empty together with DLSS4)."""
+    the frame generation AMDLSS left switched on (amdlss.framegen's AMD), or '' for none; `fallback` says why
+    HelixSR's own DLSS 4 frame generation, which an earlier AMDLSS switched on in this game, was turned off."""
     from . import framegen   # lazy: framegen imports helixsr, which imports this module
     text = f"HelixSR is installed in {game.name}.\n\nIn the game's graphics settings choose {game.in_game()}."
     if game.active_route == 'optiscaler':
         text += " Press Insert in the game to open OptiScaler's menu."
         if frame_gen == framegen.AMD:
             text += '\n\n' + FRAMEGEN_HINT
-        elif frame_gen == framegen.DLSS4:
-            text += '\n\n' + FRAMEGEN_DLSS4_HINT
     if fallback:
         text += f'\n\nDLSS 4 frame generation is off: {fallback}'
     return text + ('\n\nIf it looks unchanged in game, press Collect logs and send the zip.'

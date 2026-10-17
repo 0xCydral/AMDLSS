@@ -35,6 +35,25 @@ def test_printed_list_is_parsed():
     assert rows[7].installed and rows[7].state == 'unknown'
 
 
+PRINTED_193 = '''Games found (and the way the setup picks for each):
+1. Echoes of Aincrad                             DLSS: HelixSR Scaler (select DLSS in the game)
+2. Far Cry 6                                     DLSS: HelixSR Scaler (select DLSS in the game)
+3. The Witcher 3                                 FSR 3.1: FSR drop-in (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)
+4. Where Winds Meet                              FSR 3.1: FSR drop-in (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)
+5. Wildlands                                     DLSS: HelixSR Scaler (select DLSS in the game)
+Close your games first.
+'''
+
+
+def test_the_list_printed_by_helixsr_193_parses_as_1_9_1_did():
+    """Verbatim from the setup of HelixSR 1.9.3 (a real run, 2026-10-16): its labels are 1.9.1's."""
+    rows = games.parse_list_output(PRINTED_193)
+    assert [(g.index, g.name, g.route) for g in rows] == [
+        (1, 'Echoes of Aincrad', 'optiscaler'), (2, 'Far Cry 6', 'optiscaler'), (3, 'The Witcher 3', 'direct'),
+        (4, 'Where Winds Meet', 'direct'), (5, 'Wildlands', 'optiscaler')]
+    assert rows[0].inputs == ['DLSS'] and rows[2].fsr31
+
+
 def test_unrecognised_or_empty_output_gives_no_games():
     assert games.parse_list_output('') == []
     assert games.parse_list_output('    1. Odd   something new HelixSR says') == []

@@ -221,54 +221,75 @@ def test_the_route_choice_and_frame_generation_boxes_follow_the_game(window, mon
     assert not shown(app.route_row) and shown(app.fg_row)
 
 
-def test_the_frame_generation_control_follows_the_streamline_dlls_and_the_built_files(window, monkeypatch):
+def test_the_frame_generation_control_follows_the_streamline_dlls(window, monkeypatch):
     top, app, _one = two_game_app(window, monkeypatch)
-    app.tree.selection_set('0')   # One ships Streamline DLSS-G in a subfolder; the stand-in build has no FG files
+    app.tree.selection_set('0')   # One ships Streamline DLSS-G in a subfolder
     top.update()
-    assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal', 'disabled']   # DLSS 4 greyed, with why
-    assert shown(app.fg_note) and 'frame generation is not built' in app.fg_note.cget('text')
+    assert len(app.fg_buttons) == 2   # Off and AMD FSR: HelixSR 1.9.2 and later have no frame generation to offer
+    assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal'] and not shown(app.fg_note)
     app.tree.selection_set('1')   # Three has none: the whole control is greyed, off, with the reason beside it
     top.update()
     assert shown(app.fg_row) and app.fg_var.get() == ''
-    assert [str(w.state) for w in app.fg_buttons] == ['disabled', 'disabled', 'disabled']
+    assert [str(w.state) for w in app.fg_buttons] == ['disabled', 'disabled']
     assert shown(app.fg_note) and 'no DLSS Frame Generation for AMDLSS to replace' in app.fg_note.cget('text')
     app.tree.selection_set('0')
     top.update()
-    assert str(app.fg_buttons[0].state) == 'normal' and str(app.fg_buttons[2].state) == 'disabled'
+    assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal'] and not shown(app.fg_note)
 
 
-def test_dlss4_is_offered_when_the_build_has_the_fg_files_and_written_into_the_ini(window, monkeypatch):
+def leave_dlss4(folder, data):
+    """What an AMDLSS that offered HelixSR's DLSS 4 mode left in a game's OptiScaler.ini, with its records."""
+    assert framegen.apply(folder, True, data, framegen.HELIX_FG) and framegen.apply(folder, True, data, framegen.DLSS4_FG)
+    assert framegen.generator_of(folder) == framegen.DLSS4
+
+
+def test_a_dlss4_leftover_is_turned_off_by_update_and_the_text_says_why(window, monkeypatch):
     answers = Answers()
     top, app, one = two_game_app(window, monkeypatch, answers)
-    helix = Path(os.environ['AMDLSS_HELIXSR'])
-    fg = helix / 'helixsr-fg'
-    fg.mkdir()
-    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
-        (fg / name).write_bytes(b'MZ')
-    (helix / 'helixsr_fg_setup.json').write_text('{}')
+    data = window[2] / 'data'
     app.tree.selection_set('0')
     top.update()
-    assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal', 'normal']   # all three offered now
-    app.fg_buttons[2].choose()   # DLSS 4 frame generation (HelixSR), experimental
-    top.update()
-    assert app.fg_var.get() == 'dlss4' and 'experimental' in app.fg_note.cget('text')
-    app.install_game()
+    app.install_game()                       # an install with frame generation Off
     wait(top, app, lambda: answers.told and not app.busy)
-    assert "HelixSR's own frame generation" in answers.told[0]
+    leave_dlss4(one, data)
     ini = (one / 'OptiScaler.ini').read_bytes()
     assert b'FrameGeneration=on' in ini and b'FGInput=nvngxfg' in ini and b'FGNvngxReplacement=HelixSR' in ini
-    assert b'FGInput=dlssg' not in ini and b'FGOutput=fsrfg' not in ini   # nothing of AMD FSR's switch stays
-    assert 'FGNvngxReplacement' in (window[2] / 'data' / 'framegen.json').read_text()   # the record keeps the old values
+    app.refresh_games()
+    wait(top, app, lambda: not app.busy)
     app.tree.selection_set('0')
     top.update()
-    assert app.fg_var.get() == 'dlss4'   # the file says so
-    app.fg_buttons[1].choose()           # back to AMD FSR frame generation
+    assert app.fg_var.get() == '' and [str(w.state) for w in app.fg_buttons] == ['normal', 'normal']
+    assert 'no frame generation of their own' in app.fg_note.cget('text')
+    assert 'Install or Update turns it off' in app.fg_note.cget('text')
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
     back = (one / 'OptiScaler.ini').read_bytes()
-    assert b'FGInput=dlssg' in back and b'FGOutput=fsrfg' in back
-    assert b'FrameGeneration=off' in back and b'FGNvngxReplacement=auto' in back   # off, never Scaler's auto
-    assert "it runs AMD's frame generation" in answers.told[1]
+    assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
+    assert b'nvngxfg' not in back and framegen.generator_of(one) == ''   # nothing points at HelixSR's frame generation
+    assert 'DLSS 4 frame generation is off: ' + helixsr.NO_FG in answers.told[1]
+    assert 'it runs' not in answers.told[1]   # and no hint that a generator is on
+
+
+def test_a_dlss4_leftover_without_a_record_is_cleared_on_update(window, monkeypatch):
+    answers = Answers()
+    top, app, one = two_game_app(window, monkeypatch, answers)
+    data = window[2] / 'data'
+    app.tree.selection_set('0')
+    top.update()
+    app.install_game()
+    wait(top, app, lambda: answers.told and not app.busy)
+    leave_dlss4(one, data)
+    (data / framegen.RECORD).unlink()   # e.g. a hand-edited ini, or another tool wrote the values
+    app.refresh_games()
+    wait(top, app, lambda: not app.busy)
+    app.tree.selection_set('0')
+    top.update()
+    assert app.fg_var.get() == ''
+    app.install_game()
+    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
+    back = (one / 'OptiScaler.ini').read_bytes()
+    assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
+    assert b'nvngxfg' not in back and 'DLSS 4 frame generation is off' in answers.told[1]
 
 
 def test_install_never_writes_frame_generation_on_without_streamline(window, monkeypatch):
@@ -282,7 +303,7 @@ def test_install_never_writes_frame_generation_on_without_streamline(window, mon
     wait(top, app, lambda: answers.told and not app.busy)
     ini = (three / 'OptiScaler.ini').read_bytes()
     assert b'FGInput=nofg\r\n' in ini and b'FGOutput=auto\r\n' in ini and 'Turn on DLSS' not in answers.told[0]
-    # off is written out, not left at Scaler's auto, which would run HelixSR's frame generation by itself
+    # off is written out, not left at Scaler's auto, the shipped ini says auto for most of it
     assert b'FrameGeneration=off\r\n' in ini and b'Enabled=false\r\n' in ini
     assert not (window[2] / 'data' / 'framegen.json').exists() or 'dlssg' not in (window[2] / 'data' / 'framegen.json').read_text()
 
@@ -319,7 +340,7 @@ def test_dlss4_off_is_named_only_when_it_was_really_on(window, monkeypatch):
     app.install_game()
     wait(top, app, lambda: answers.told and not app.busy)
     assert 'DLSS 4 frame generation is off' not in app.log.get('1.0', 'end')
-    framegen.apply_generator(three, framegen.DLSS4, window[2] / 'data')   # as an earlier install or tool left it
+    leave_dlss4(three, window[2] / 'data')   # as an earlier install or tool left it
     app.tree.selection_set('1')
     top.update()
     app.install_game()
@@ -328,79 +349,12 @@ def test_dlss4_off_is_named_only_when_it_was_really_on(window, monkeypatch):
     assert b'nvngxfg' not in (three / 'OptiScaler.ini').read_bytes()       # and nothing points at it any more
 
 
-def test_dlss4_falls_back_and_restores_when_the_fg_files_are_gone(window, monkeypatch):
-    answers = Answers()
-    top, app, one = two_game_app(window, monkeypatch, answers)
-    helix = Path(os.environ['AMDLSS_HELIXSR'])
-    fg = helix / 'helixsr-fg'
-    fg.mkdir()
-    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
-        (fg / name).write_bytes(b'MZ')
-    (helix / 'helixsr_fg_setup.json').write_text('{}')
-    app.tree.selection_set('0')
-    top.update()
-    app.fg_buttons[2].choose()   # DLSS 4 frame generation
-    app.install_game()
-    wait(top, app, lambda: answers.told and not app.busy)
-    assert b'FGNvngxReplacement=HelixSR' in (one / 'OptiScaler.ini').read_bytes()
-    shutil.rmtree(fg)   # e.g. an Install HelixSR whose setup could not get the NVIDIA files: the build is gone
-    (helix / 'helixsr_fg_setup.json').unlink()
-    app.refresh_games()
-    wait(top, app, lambda: not app.busy)
-    app.tree.selection_set('0')
-    top.update()
-    assert app.fg_var.get() == '' and 'Install or Update turns it off' in app.fg_note.cget('text')
-    app.install_game()
-    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
-    back = (one / 'OptiScaler.ini').read_bytes()
-    assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
-    assert b'nvngxfg' not in back   # nothing points at HelixSR's frame generation files any more
-    assert 'DLSS 4 frame generation is off' in answers.told[1]
-    assert 'it runs' not in answers.told[1]   # and no hint that a generator is on
-
-
-def test_stale_dlss4_values_without_a_record_are_cleared_on_update(window, monkeypatch):
-    answers = Answers()
-    top, app, one = two_game_app(window, monkeypatch, answers)
-    helix = Path(os.environ['AMDLSS_HELIXSR'])
-    fg = helix / 'helixsr-fg'
-    fg.mkdir()
-    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
-        (fg / name).write_bytes(b'MZ')
-    (helix / 'helixsr_fg_setup.json').write_text('{}')
-    app.tree.selection_set('0')
-    top.update()
-    app.fg_buttons[2].choose()
-    app.install_game()
-    wait(top, app, lambda: answers.told and not app.busy)
-    assert b'FGNvngxReplacement=HelixSR' in (one / 'OptiScaler.ini').read_bytes()
-    (window[2] / 'data' / framegen.RECORD).unlink()   # e.g. a hand-edited ini, or another tool wrote the values
-    shutil.rmtree(fg)
-    (helix / 'helixsr_fg_setup.json').unlink()
-    app.refresh_games()
-    wait(top, app, lambda: not app.busy)
-    app.tree.selection_set('0')
-    top.update()
-    assert app.fg_var.get() == ''
-    app.install_game()
-    wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
-    back = (one / 'OptiScaler.ini').read_bytes()
-    assert b'FrameGeneration=off' in back and b'FGInput=nofg' in back and b'FGNvngxReplacement=auto' in back
-    assert b'nvngxfg' not in back and 'DLSS 4 frame generation is off' in answers.told[1]
-
-
 def test_updating_the_reported_wukong_state_moves_the_leftover_and_leaves_frame_generation_off(window, monkeypatch):
     """Wukong's exact state after 1.1.0 (AMDLSS's dxgi.dll and record in place, a leftover d3d12.dll OptiScaler,
-    helixsr-fg built, the package's auto ini, no frame generation record): Update must move the leftover aside and
-    leave frame generation explicitly off, with the move in the game log."""
+    the package's auto ini, no frame generation record): Update must move the leftover aside and leave frame
+    generation explicitly off, with the move in the game log."""
     answers = Answers()
     top, app, one = two_game_app(window, monkeypatch, answers)
-    helix = Path(os.environ['AMDLSS_HELIXSR'])
-    fg = helix / 'helixsr-fg'
-    fg.mkdir()
-    for name in ('nvexec64.dll', 'nvngx_dlssg.dll', '_nvngx.dll'):
-        (fg / name).write_bytes(b'MZ')
-    (helix / 'helixsr_fg_setup.json').write_text('{}')
     app.tree.selection_set('0')
     top.update()
     app.install_game()                       # the install the tester already had
@@ -846,11 +800,6 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
         new = old.parent / helixsr.TOP
         shutil.copytree(old, new)
         (new / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
-        (new / helixsr.FG_SETUP).write_text('{}')          # the real update builds frame generation too
-        fg = new / helixsr.FG_FOLDER
-        fg.mkdir()
-        for name in helixsr.FG_DLLS:
-            (fg / name).write_bytes(b'MZ')
         helixsr.write_package_record(data_dir, new)   # the real fetch records the pinned zip after extracting
         return new
 
@@ -869,10 +818,9 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
     assert (old / helixsr.DLL).is_file()  # the old folder stays on disk
 
 
-def test_the_old_layout_build_without_frame_generation_offers_update(window, monkeypatch):
-    """The folder AMDLSS 1.0.0 built from the older HelixSR zip (old layout: amd-fsr, dlss-loader, my-fsr; no
-    helixsr-fg, no record of the pinned zip): it must count as outdated; the button must offer Update, enabled,
-    and the frame generation note must name that same button instead of a disabled one."""
+def test_the_old_layout_build_offers_update(window, monkeypatch):
+    """The folder AMDLSS 1.0.0 built from the older HelixSR zip (old layout: amd-fsr, dlss-loader, my-fsr; no record
+    of the pinned zip): it must count as outdated, and the button must offer Update, enabled."""
     from tkinter import filedialog, font, ttk
 
     from amdlss.app import App
@@ -886,7 +834,7 @@ def test_the_old_layout_build_without_frame_generation_offers_update(window, mon
     old = tmp / 'data' / helixsr.TOP
     old.parent.mkdir(exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(old)
-    (old / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())   # the older zip's build: same version, no FG
+    (old / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())   # the older zip's build: same version
     for name in ('amd-fsr', 'dlss-loader', 'fsr3-drop-in', 'manual-install', 'my-fsr', 'optiscaler'):
         (old / name).mkdir()
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
@@ -897,15 +845,13 @@ def test_the_old_layout_build_without_frame_generation_offers_update(window, mon
     assert app.install_button.text == 'Update HelixSR' and app.install_button.state == 'normal'
     app.tree.selection_set('0')
     top.update()
-    note = app.fg_note.cget('text')
-    assert 'frame generation is not built' in note and 'press Update HelixSR' in note   # the note names the button
+    assert not shown(app.fg_note)   # HelixSR has no frame generation to build: nothing to say about it
     assert [r[0] for r in rows_of(app)] == ['One']     # the old build still lists the games
 
 
-def test_a_built_helixsr_without_frame_generation_builds_it_without_a_refetch(window, monkeypatch):
-    """Built from the pinned zip, frame generation missing: the button is enabled with the label the note names,
-    and pressing it runs the setup in place -- HelixSR builds only the missing frame generation -- instead of
-    downloading the zip again."""
+def test_a_built_current_helixsr_has_nothing_to_update(window, monkeypatch):
+    """Built from the pinned zip: the button stays disabled. It used to stay enabled as Update while HelixSR's
+    frame generation was missing; HelixSR 1.9.2 and later have none, so a finished build is finished."""
     from tkinter import filedialog, font, ttk
 
     from amdlss.app import App
@@ -913,33 +859,20 @@ def test_a_built_helixsr_without_frame_generation_builds_it_without_a_refetch(wi
     one = tmp / 'One'
     one.mkdir()
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
-    (one / 'NVStreamline' / 'production').mkdir(parents=True)   # the game offers DLSS-G, so the FG box shows
-    for name in ('sl.interposer.dll', 'sl.dlss_g.dll'):
-        (one / 'NVStreamline' / 'production' / name).write_bytes(b'MZ')
     data = tmp / 'data'
     folder = data / helixsr.TOP
     folder.parent.mkdir(parents=True, exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(folder)
     (folder / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
-    helixsr.write_package_record(data, folder)   # the pinned zip was extracted here; only the FG is missing
+    helixsr.write_package_record(data, folder)   # the pinned zip was extracted here
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
-    installs = []
-
-    def fake_install(data_dir, consented, progress, on_line, force=False):
-        installs.append((consented, force))
-        return data_dir / helixsr.TOP
-
-    monkeypatch.setattr(helixsr, 'install_helixsr', fake_install)
     app = App(top, tk, ttk, filedialog, Answers(), font)
     pump(top, app)
     assert 'is installed and built' in app.status.cget('text')
-    assert app.install_button.text == 'Update HelixSR' and app.install_button.state == 'normal'   # not a dead end
+    assert app.install_button.text == 'Install HelixSR' and app.install_button.state == 'disabled'
     app.tree.selection_set('0')
     top.update()
-    assert 'press Update HelixSR' in app.fg_note.cget('text')   # the note and the button agree
-    app.install_helixsr()
-    wait(top, app, lambda: installs and not app.busy)
-    assert installs == [(True, False)]   # no fetch: the setup builds only the missing frame generation
+    assert 'Update HelixSR' not in app.fg_note.cget('text')   # no note sends the player to a button for FG files
 
 
 def test_a_game_on_an_older_helixsr_shows_update(window, monkeypatch):
