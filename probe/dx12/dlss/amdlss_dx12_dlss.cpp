@@ -171,6 +171,9 @@ std::string g_dir, g_log_path, g_ini_path;
 FILETIME g_ini_time = {};
 bool g_reset_next = false; // set when TSR ran in between or the ini changed: DLSS must not trust its history
 std::atomic<uint32_t> g_perf_seconds { 5 }; // perf_report_seconds (0 = off), written by load_ini, read on every present
+// Probe mode (ini probe=1): the present count and back buffer size on_present records, for the unknown-dispatch log.
+std::atomic<bool> g_probe { false };
+std::atomic<uint32_t> g_present_count { 0 }, g_bb_w { 0 }, g_bb_h { 0 };
 
 void log_line(const char *fmt, ...)
 {
@@ -317,6 +320,26 @@ void dump_tsr_bytecode(uint64_t hash, logic::TsrPass pass, const void *code, siz
 	log_line("TSR bytecode %016llx (%s, %zu bytes) %s %s", static_cast<unsigned long long>(hash), role, size, ok ? "written to" : "could not be written to", path.c_str());
 }
 
+// Probe mode: every compute shader's DXIL goes to probe/<hash>.dxil once, so an unknown pass can be disassembled (disasm.sh).
+void probe_note_pipeline(uint64_t hash, const void *code, size_t size)
+{
+	static std::unordered_set<uint64_t> noted;
+	static std::mutex m;
+	{
+		std::lock_guard<std::mutex> lock(m);
+		if (!noted.insert(hash).second)
+			return;
+	}
+	const std::string dir = g_dir + "probe";
+	CreateDirectoryA(dir.c_str(), nullptr);
+	const std::string path = dir + str_format("\\%016llx.dxil", static_cast<unsigned long long>(hash));
+	FILE *f = fopen(path.c_str(), "wb");
+	const bool ok = f != nullptr && fwrite(code, 1, size, f) == size;
+	if (f != nullptr)
+		fclose(f);
+	log_line("probe pipeline %016llx size=%zu%s", static_cast<unsigned long long>(hash), size, ok ? "" : " (could not be written)");
+}
+
 void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_subobject *subobjects, pipeline pipe)
 {
 	for (uint32_t i = 0; i < count; ++i)
@@ -327,6 +350,8 @@ void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_
 		const uint64_t hash = shader->code != nullptr ? fnv1a(shader->code, shader->code_size) : 0;
 		if (const logic::TsrPass pass = logic::tsr_pass_for_hash(hash); pass != logic::TsrPass::none)
 			dump_tsr_bytecode(hash, pass, shader->code, shader->code_size);
+		if (g_probe && hash != 0)
+			probe_note_pipeline(hash, shader->code, shader->code_size);
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_pipelines[pipe.handle] = hash;
 	}
@@ -742,6 +767,133 @@ bool read_tsr_constants(device *dev, const CmdState &st, const logic::TsrLayout 
 		return false;
 	}
 	return true;
+}
+
+// ---- probe mode (ini probe=1): find the upscale pass of a game this add-on has no hash for ---------------------------------
+
+// Calls f(param, range, register, entry) for every descriptor the compute pipeline's root signature binds: the ranges of each
+// descriptor table (read from the heap shadow, like find_bindings) and each root descriptor (root CBV). g_mutex held.
+template <class F>
+void probe_each_binding(device *dev, CmdState &st, F f)
+{
+	const auto layout = g_layouts.find(st.layout);
+	if (layout == g_layouts.end())
+		return;
+	for (uint32_t p = 0; p < layout->second.size(); ++p)
+	{
+		const LayoutParam &lp = layout->second[p];
+		if (lp.type == pipeline_layout_param_type::push_descriptors)
+		{
+			const auto push = st.pushes.find(p);
+			if (push == st.pushes.end() || lp.ranges.empty())
+				continue;
+			for (uint32_t k = 0; k < push->second.size(); ++k)
+				f(p, lp.ranges[0], lp.ranges[0].dx_register_index + k, push->second[k]);
+			continue;
+		}
+		const auto table = st.tables.find(p);
+		if (table == st.tables.end())
+			continue;
+		for (const descriptor_range &r : lp.ranges)
+		{
+			uint64_t heap;
+			uint32_t base;
+			const auto h = heap_offset(dev, table->second, r.binding, 0, heap, base) ? g_heaps.find(heap) : g_heaps.end();
+			if (h == g_heaps.end())
+				continue;
+			const uint32_t n = r.count == UINT32_MAX ? kUnboundedCap : r.count;
+			for (uint32_t j = 0; j < n && base + j < h->second.size(); ++j)
+			{
+				Entry &e = h->second[base + j];
+				if (!e.set || e.type == descriptor_type::sampler)
+					continue;
+				resolve(e);
+				f(p, r, r.dx_register_index + j, e);
+			}
+		}
+	}
+}
+
+logic::ProbeView probe_view_of(const Entry &e, const descriptor_range &r)
+{
+	logic::ProbeView v;
+	const Info &i = *e.info;
+	v.uav = r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view;
+	v.depth_usage = (i.desc.usage & resource_usage::depth_stencil) != static_cast<resource_usage>(0);
+	v.width = i.desc.texture.width;
+	v.height = i.desc.texture.height;
+	v.res_format = static_cast<uint32_t>(i.desc.texture.format);
+	v.view_format = static_cast<uint32_t>(i.view_format);
+	return v;
+}
+
+bool probe_is_texture(const Entry &e)
+{
+	return e.info != nullptr && !e.info->buffer_range && e.info->resource != 0 && e.info->desc.type != resource_type::buffer;
+}
+
+// The first 512 bytes of a constant buffer in an upload heap (the CPU wrote it before this dispatch), as float32 values.
+void probe_dump_cbv(device *dev, const Info &info)
+{
+	if (info.resource == 0 || g_live_buffers.count(info.resource) == 0 || info.desc.heap != memory_heap::upload || info.offset >= info.desc.buffer.size)
+		return;
+	uint64_t bytes = (std::min)(static_cast<uint64_t>(512), info.desc.buffer.size - info.offset);
+	if (info.range != 0 && info.range < bytes)
+		bytes = info.range;
+	bytes &= ~static_cast<uint64_t>(3);
+	void *data = nullptr;
+	if (bytes == 0 || !dev->map_buffer_region({ info.resource }, info.offset, bytes, map_access::read_only, &data) || data == nullptr)
+		return;
+	uint8_t copy[512];
+	memcpy(copy, data, static_cast<size_t>(bytes));
+	dev->unmap_buffer_region({ info.resource });
+	log_line("%s", logic::probe_float_lines(copy, static_cast<size_t>(bytes)).c_str());
+}
+
+// Called on a dispatch of a compute shader that is not UE5 TSR. g_mutex held. Logs at most one block per shader hash every
+// log_every_n_frames presents, and only for a dispatch that binds something an upscaler would (logic::probe_view_interesting).
+void probe_dispatch(device *dev, CmdState &st, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+	static std::unordered_map<uint64_t, uint32_t> last_logged; // hash -> present count of its last block
+	const uint32_t frame = g_present_count, bb_w = g_bb_w, bb_h = g_bb_h;
+	if (const auto it = last_logged.find(hash); it != last_logged.end() && (g_cfg.log_every == 0 || frame - it->second < g_cfg.log_every))
+		return;
+	bool interesting = false;
+	probe_each_binding(dev, st, [&](uint32_t, const descriptor_range &r, uint32_t, const Entry &e) {
+		if (probe_is_texture(e) && logic::probe_view_interesting(probe_view_of(e, r), bb_w, bb_h))
+			interesting = true;
+	});
+	if (!interesting)
+		return;
+	last_logged[hash] = frame;
+	log_line("probe dispatch %016llx groups=%ux%ux%u present=%u back_buffer=%ux%u", static_cast<unsigned long long>(hash), gx, gy, gz, frame, bb_w, bb_h);
+	probe_each_binding(dev, st, [&](uint32_t p, const descriptor_range &r, uint32_t reg, const Entry &e) {
+		const char kind = r.type == descriptor_type::constant_buffer || r.type == descriptor_type::constant_buffer_with_dynamic_offset ? 'b' :
+			r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view ? 'u' : 't';
+		char head[96];
+		snprintf(head, sizeof(head), "  %c%u space%u (root param %u)", kind, reg, r.dx_register_space, p);
+		if (e.info == nullptr)
+			log_line("%s: no creation snapshot", head);
+		else if (e.info->buffer_range)
+		{
+			log_line("%s: buffer %llx offset %llu range %llu size %llu heap %u", head, static_cast<unsigned long long>(e.info->resource), static_cast<unsigned long long>(e.info->offset),
+				static_cast<unsigned long long>(e.info->range), static_cast<unsigned long long>(e.info->desc.buffer.size), static_cast<unsigned>(e.info->desc.heap));
+			if (kind == 'b')
+				probe_dump_cbv(dev, *e.info);
+		}
+		else if (probe_is_texture(e))
+		{
+			const logic::ProbeView v = probe_view_of(e, r);
+			static const char *const kDims[] = { "unknown", "buffer", "texture_1d", "texture_1d_array", "texture_2d", "texture_2d_array", "texture_2d_multisample",
+				"texture_2d_multisample_array", "texture_3d", "texture_cube", "texture_cube_array", "acceleration_structure" };
+			const size_t dim = static_cast<size_t>(e.info->view_type);
+			log_line("%s: %ux%u x%u %s, format %s (%u), view format %s (%u)%s", head, v.width, v.height, static_cast<unsigned>(e.info->desc.texture.depth_or_layers),
+				dim < std::size(kDims) ? kDims[dim] : "?", logic::probe_format_name(v.res_format), v.res_format, logic::probe_format_name(v.view_format), v.view_format,
+				logic::probe_view_interesting(v, bb_w, bb_h) ? " <-- interesting" : "");
+		}
+		else
+			log_line("%s: view %llx, resource %llx is not a texture or buffer range", head, static_cast<unsigned long long>(e.handle), static_cast<unsigned long long>(e.info->resource));
+	});
 }
 
 // ---- native D3D12: decode pass, NGX, state restore -----------------------------------------------------------------
@@ -1272,6 +1424,9 @@ void load_ini(bool reload)
 	g_cfg.render_scale = scale_percent < 0 ? 0.0f : static_cast<float>(scale_percent);
 	const double perf_seconds = ini.number("perf_report_seconds", 5);
 	g_perf_seconds = perf_seconds > 0 ? static_cast<uint32_t>(perf_seconds) : 0;
+	g_probe = ini.number("probe", 0) != 0;
+	if (g_probe && !reload)
+		log_line("probe mode on: compute shaders go to %sprobe, unknown passes are logged", g_dir.c_str());
 
 	const std::string after = config_summary(g_cfg);
 	if (!reload)
@@ -2659,7 +2814,7 @@ bool on_indirect(command_list *cmd_list, indirect_command, resource, uint64_t, u
 	return false;
 }
 
-bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
+bool on_dispatch(command_list *cmd_list, uint32_t group_x, uint32_t group_y, uint32_t group_z)
 {
 	if (t_busy)
 		return false;
@@ -2709,6 +2864,8 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			break;
 		}
 		default:
+			if (g_probe)
+				probe_dispatch(cmd_list->get_device(), it->second, pipe->second, group_x, group_y, group_z);
 			return false;
 		}
 	}
@@ -2732,8 +2889,15 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 }
 
 // Present: one timestamp per frame. When the window's wall time is over, its statistics are logged as one `perf:` line.
-void on_present(command_queue *, swapchain *, const rect *, const rect *, uint32_t, const rect *)
+void on_present(command_queue *, swapchain *sc, const rect *, const rect *, uint32_t, const rect *)
 {
+	if (g_probe)
+	{
+		const resource_desc bb = sc->get_device()->get_resource_desc(sc->get_current_back_buffer());
+		g_bb_w = bb.texture.width;
+		g_bb_h = bb.texture.height;
+		++g_present_count;
+	}
 	dump_present();
 	const LONGLONG now = qpc_now(), freq = qpc_freq();
 	const uint32_t seconds = g_perf_seconds;

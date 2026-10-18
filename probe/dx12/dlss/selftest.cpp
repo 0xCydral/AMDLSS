@@ -268,6 +268,24 @@ int main()
 	assert(dump_index_line("008", 1235, "TSR", 0, 0, 2560, 1440, false, 0, 0, -1, "dropped: ring full") ==
 		"008 | 1235 | TSR | 0x0 | 2560x1440 | n/a | n/a | dropped: ring full");
 
+	// Probe mode: a UAV of the back buffer's size, an r16g16 texture or a depth SRV is interesting; a small color UAV is not.
+	{
+		ProbeView v;
+		v.uav = true; v.width = 2560; v.height = 1440; v.res_format = v.view_format = 10;
+		assert(probe_view_interesting(v, 2560, 1440) && !probe_view_interesting(v, 1920, 1080) && !probe_view_interesting(v, 0, 0));
+		v.width = 1552; v.height = 873; v.res_format = 39; v.view_format = 34;       // r16g16_float velocity
+		assert(probe_view_interesting(v, 2560, 1440));
+		v.view_format = 41;
+		assert(!probe_view_interesting(v, 2560, 1440));                                // an r32 UAV of render size
+		v.uav = false; v.res_format = 40;                                              // d32_float read as an SRV
+		assert(probe_view_interesting(v, 2560, 1440));
+		v.res_format = 39; v.depth_usage = true;
+		assert(probe_view_interesting(v, 2560, 1440));
+		assert(std::strcmp(probe_format_name(34), "r16g16_float") == 0 && std::strcmp(probe_format_name(999), "?") == 0);
+		const float f[9] = { 1, 2.5f, 3, 4, 5, 6, 7, 8, 9 };
+		assert(probe_float_lines(reinterpret_cast<const uint8_t *>(f), sizeof(f)) == "+0000: 1 2.5 3 4 5 6 7 8\n+0020: 9");
+	}
+
 	std::puts("dlss logic selftest ok");
 	return 0;
 }

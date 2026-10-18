@@ -674,4 +674,66 @@ inline std::string dump_index_line(const char *frame, uint32_t present, const ch
 	snprintf(buf, sizeof(buf), "%s | %u | %s | %ux%u | %ux%u | %s | %s | ", frame, present, upscaler, rw, rh, ow, oh, jitter, cut < 0 ? "n/a" : cut ? "1" : "0");
 	return buf + file;
 }
+
+// ---- probe mode (ini probe=1): which dispatches of an unknown compute shader are worth a log block ------------------------
+
+// Format numbers are DXGI's, the same values as reshade::api::format.
+inline const char *probe_format_name(uint32_t f)
+{
+	static const struct { uint32_t id; const char *name; } kNames[] = {
+		{ 2, "r32g32b32a32_float" }, { 10, "r16g16b16a16_float" }, { 11, "r16g16b16a16_unorm" }, { 16, "r32g32_float" },
+		{ 19, "r32g8x24_typeless" }, { 20, "d32_float_s8_uint" }, { 21, "r32_float_x8_uint" }, { 24, "r10g10b10a2_unorm" },
+		{ 26, "r11g11b10_float" }, { 27, "r8g8b8a8_typeless" }, { 28, "r8g8b8a8_unorm" }, { 29, "r8g8b8a8_unorm_srgb" },
+		{ 33, "r16g16_typeless" }, { 34, "r16g16_float" }, { 35, "r16g16_unorm" }, { 36, "r16g16_uint" }, { 37, "r16g16_snorm" },
+		{ 38, "r16g16_sint" }, { 39, "r32_typeless" }, { 40, "d32_float" }, { 41, "r32_float" }, { 42, "r32_uint" },
+		{ 44, "r24g8_typeless" }, { 45, "d24_unorm_s8_uint" }, { 46, "r24_unorm_x8_uint" }, { 49, "r8g8_unorm" },
+		{ 53, "r16_typeless" }, { 54, "r16_float" }, { 55, "d16_unorm" }, { 56, "r16_unorm" }, { 61, "r8_unorm" },
+		{ 87, "b8g8r8a8_unorm" }, { 91, "b8g8r8a8_unorm_srgb" },
+	};
+	for (const auto &n : kNames)
+		if (n.id == f)
+			return n.name;
+	return f == 0 ? "unknown" : "?";
+}
+
+inline bool probe_is_r16g16(uint32_t f) { return f >= 33 && f <= 38; }
+inline bool probe_is_depth_format(uint32_t f) { return f == 20 || f == 40 || f == 45 || f == 55; }
+
+// One texture bound to a dispatch. `depth_usage`: the resource allows depth-stencil use (a depth buffer read back as an SRV).
+struct ProbeView
+{
+	bool uav = false, depth_usage = false;
+	uint32_t width = 0, height = 0, res_format = 0, view_format = 0;
+};
+
+// The three things a UE4 TemporalAA pass should show: a UAV the size of the back buffer, a two-channel 16-bit texture
+// (velocity), a depth buffer read as an SRV.
+inline bool probe_view_interesting(const ProbeView &v, uint32_t bb_w, uint32_t bb_h)
+{
+	if (v.uav && bb_w != 0 && v.width == bb_w && v.height == bb_h)
+		return true;
+	if (probe_is_r16g16(v.res_format) || probe_is_r16g16(v.view_format))
+		return true;
+	return !v.uav && (v.depth_usage || probe_is_depth_format(v.res_format));
+}
+
+// `bytes` of a constant buffer as float32 values, 8 per line ("+0000: a b c ...", lines joined by newlines).
+inline std::string probe_float_lines(const uint8_t *data, size_t bytes)
+{
+	std::string out;
+	for (size_t at = 0; at + 4 <= bytes; at += 32)
+	{
+		char buf[24];
+		snprintf(buf, sizeof(buf), "%s+%04zx:", at == 0 ? "" : "\n", at);
+		out += buf;
+		for (size_t i = at; i < at + 32 && i + 4 <= bytes; i += 4)
+		{
+			float f;
+			std::memcpy(&f, data + i, 4);
+			snprintf(buf, sizeof(buf), " %g", static_cast<double>(f));
+			out += buf;
+		}
+	}
+	return out;
+}
 } // namespace logic
