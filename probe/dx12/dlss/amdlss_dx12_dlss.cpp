@@ -132,6 +132,7 @@ struct CmdState
 	std::map<uint32_t, descriptor_table> tables;
 	std::map<uint32_t, std::vector<Entry>> pushes;
 	std::map<uint32_t, std::vector<uint32_t>> consts;
+	std::vector<uint64_t> rts; // graphics only (probe mode): the bound render target views
 };
 
 std::mutex g_mutex;
@@ -140,6 +141,8 @@ std::unordered_map<uint64_t, std::vector<LayoutParam>> g_layouts;
 std::unordered_map<uint64_t, std::vector<Entry>> g_heaps;
 std::unordered_map<uint64_t, std::shared_ptr<const Info>> g_views;
 std::unordered_map<const command_list *, CmdState> g_cmds;
+std::unordered_map<uint64_t, uint64_t> g_ps_pipelines;     // probe mode: graphics pipeline -> hash of its pixel shader
+std::unordered_map<const command_list *, CmdState> g_gfx; // probe mode: the graphics side of each command list
 std::unordered_set<uint64_t> g_live_buffers; // never map or restore a destroyed buffer
 
 // While our own commands go through the game's list, ReShade calls our handlers again; they must ignore them.
@@ -320,30 +323,40 @@ void dump_tsr_bytecode(uint64_t hash, logic::TsrPass pass, const void *code, siz
 	log_line("TSR bytecode %016llx (%s, %zu bytes) %s %s", static_cast<unsigned long long>(hash), role, size, ok ? "written to" : "could not be written to", path.c_str());
 }
 
-// Probe mode: every compute shader's DXIL goes to probe/<hash>.dxil once, so an unknown pass can be disassembled (disasm.sh).
-void probe_note_pipeline(uint64_t hash, const void *code, size_t size)
+// Probe mode: every compute shader's DXIL goes to probe/<hash>.dxil once, and every pixel shader's to probe/ps_<hash>.dxil
+// (`prefix` "ps_"), so an unknown pass can be disassembled (disasm.sh).
+void probe_note_pipeline(uint64_t hash, const void *code, size_t size, const char *prefix = "")
 {
-	static std::unordered_set<uint64_t> noted;
+	static std::unordered_set<uint64_t> noted[2];
 	static std::mutex m;
 	{
 		std::lock_guard<std::mutex> lock(m);
-		if (!noted.insert(hash).second)
+		if (!noted[*prefix != 0].insert(hash).second)
 			return;
 	}
 	const std::string dir = g_dir + "probe";
 	CreateDirectoryA(dir.c_str(), nullptr);
-	const std::string path = dir + str_format("\\%016llx.dxil", static_cast<unsigned long long>(hash));
+	const std::string path = dir + str_format("\\%s%016llx.dxil", prefix, static_cast<unsigned long long>(hash));
 	FILE *f = fopen(path.c_str(), "wb");
 	const bool ok = f != nullptr && fwrite(code, 1, size, f) == size;
 	if (f != nullptr)
 		fclose(f);
-	log_line("probe pipeline %016llx size=%zu%s", static_cast<unsigned long long>(hash), size, ok ? "" : " (could not be written)");
+	log_line("probe %s %016llx size=%zu%s", *prefix != 0 ? "ps" : "pipeline", static_cast<unsigned long long>(hash), size, ok ? "" : " (could not be written)");
 }
 
 void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_subobject *subobjects, pipeline pipe)
 {
 	for (uint32_t i = 0; i < count; ++i)
 	{
+		if (g_probe && subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].count != 0)
+		{
+			const auto *ps = static_cast<const shader_desc *>(subobjects[i].data);
+			const uint64_t ps_hash = ps->code != nullptr ? fnv1a(ps->code, ps->code_size) : 0;
+			if (ps_hash != 0)
+				probe_note_pipeline(ps_hash, ps->code, ps->code_size, "ps_");
+			std::lock_guard<std::mutex> lock(g_mutex);
+			g_ps_pipelines[pipe.handle] = ps_hash;
+		}
 		if (subobjects[i].type != pipeline_subobject_type::compute_shader || subobjects[i].count == 0)
 			continue;
 		const auto *shader = static_cast<const shader_desc *>(subobjects[i].data);
@@ -360,6 +373,7 @@ void on_destroy_pipeline(device *, pipeline pipe)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_pipelines.erase(pipe.handle);
+	g_ps_pipelines.erase(pipe.handle);
 }
 
 void on_init_pipeline_layout(device *, uint32_t count, const pipeline_layout_param *params, pipeline_layout layout)
@@ -488,14 +502,35 @@ void on_reset_command_list(command_list *cmd_list)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_cmds.erase(cmd_list);
+		g_gfx.erase(cmd_list);
 		drop_pending_locked(cmd_list, "the command list was reset or destroyed");
 	}
 	dump_cmd_reset(cmd_list);
 }
 
+// Probe mode: the graphics side of a command list, kept apart from the compute state (D3D12 has one root signature for each).
+CmdState &gfx_state(command_list *cmd_list, pipeline_layout layout)
+{
+	CmdState &st = g_gfx[cmd_list];
+	if (st.layout != layout.handle)
+	{
+		st.layout = layout.handle;
+		st.tables.clear();
+		st.pushes.clear();
+	}
+	return st;
+}
+
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
 {
-	if (t_busy || (stages & pipeline_stage::compute_shader) == static_cast<pipeline_stage>(0))
+	if (t_busy)
+		return;
+	if (g_probe && (stages & pipeline_stage::all_graphics) != static_cast<pipeline_stage>(0))
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		g_gfx[cmd_list].pipeline = pipe.handle;
+	}
+	if ((stages & pipeline_stage::compute_shader) == static_cast<pipeline_stage>(0))
 		return;
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_cmds[cmd_list].pipeline = pipe.handle;
@@ -503,7 +538,17 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
 
 void on_push_descriptors(command_list *cmd_list, shader_stage stages, pipeline_layout layout, uint32_t param, const descriptor_table_update &update)
 {
-	if (t_busy || (stages & shader_stage::compute) == static_cast<shader_stage>(0))
+	if (t_busy)
+		return;
+	if (g_probe && (stages & shader_stage::all_graphics) != static_cast<shader_stage>(0))
+	{
+		std::vector<Entry> gfx_entries;
+		for (uint32_t k = 0; k < update.count; ++k)
+			gfx_entries.push_back(make_entry(cmd_list->get_device(), update.type, update.descriptors, k));
+		std::lock_guard<std::mutex> lock(g_mutex);
+		gfx_state(cmd_list, layout).pushes[param] = std::move(gfx_entries);
+	}
+	if ((stages & shader_stage::compute) == static_cast<shader_stage>(0))
 		return;
 	std::vector<Entry> entries;
 	for (uint32_t k = 0; k < update.count; ++k)
@@ -546,6 +591,12 @@ void on_bind_descriptor_tables(command_list *cmd_list, shader_stage stages, pipe
 		CmdState &cs = compute_state(cmd_list, layout);
 		for (uint32_t i = 0; i < count; ++i)
 			cs.tables[first + i] = tables[i];
+	}
+	if (g_probe && (stages & shader_stage::all_graphics) != static_cast<shader_stage>(0))
+	{
+		CmdState &gs = gfx_state(cmd_list, layout);
+		for (uint32_t i = 0; i < count; ++i)
+			gs.tables[first + i] = tables[i];
 	}
 }
 
@@ -618,8 +669,16 @@ constexpr size_t kDsvHistory = 32;
 std::vector<uint64_t> g_dsv_history;
 std::atomic<uint64_t> g_last_dsv { 0 };
 
-void on_bind_render_targets(command_list *, uint32_t, const resource_view *, resource_view dsv)
+void on_bind_render_targets(command_list *cmd_list, uint32_t count, const resource_view *rtvs, resource_view dsv)
 {
+	if (g_probe && !t_busy)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		std::vector<uint64_t> &rts = g_gfx[cmd_list].rts;
+		rts.clear();
+		for (uint32_t i = 0; i < count; ++i)
+			rts.push_back(rtvs[i].handle);
+	}
 	if (t_busy || dsv.handle == 0 || g_last_dsv.exchange(dsv.handle) == dsv.handle)
 		return;
 	std::lock_guard<std::mutex> lock(g_mutex);
@@ -850,23 +909,20 @@ void probe_dump_cbv(device *dev, const Info &info)
 	log_line("%s", logic::probe_float_lines(copy, static_cast<size_t>(bytes)).c_str());
 }
 
-// Called on a dispatch of a compute shader that is not UE5 TSR. g_mutex held. Logs at most one block per shader hash every
-// log_every_n_frames presents, and only for a dispatch that binds something an upscaler would (logic::probe_view_interesting).
-void probe_dispatch(device *dev, CmdState &st, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz)
+// True when something an upscaler would bind is bound: logic::probe_view_interesting on any texture. g_mutex held.
+bool probe_interesting(device *dev, CmdState &st, uint32_t bb_w, uint32_t bb_h)
 {
-	static std::unordered_map<uint64_t, uint32_t> last_logged; // hash -> present count of its last block
-	const uint32_t frame = g_present_count, bb_w = g_bb_w, bb_h = g_bb_h;
-	if (const auto it = last_logged.find(hash); it != last_logged.end() && (g_cfg.log_every == 0 || frame - it->second < g_cfg.log_every))
-		return;
 	bool interesting = false;
 	probe_each_binding(dev, st, [&](uint32_t, const descriptor_range &r, uint32_t, const Entry &e) {
 		if (probe_is_texture(e) && logic::probe_view_interesting(probe_view_of(e, r), bb_w, bb_h))
 			interesting = true;
 	});
-	if (!interesting)
-		return;
-	last_logged[hash] = frame;
-	log_line("probe dispatch %016llx groups=%ux%ux%u present=%u back_buffer=%ux%u", static_cast<unsigned long long>(hash), gx, gy, gz, frame, bb_w, bb_h);
+	return interesting;
+}
+
+// One log line per bound view or root descriptor, and the float dump of every CBV in an upload heap. g_mutex held.
+void probe_log_bindings(device *dev, CmdState &st, uint32_t bb_w, uint32_t bb_h)
+{
 	probe_each_binding(dev, st, [&](uint32_t p, const descriptor_range &r, uint32_t reg, const Entry &e) {
 		const char kind = r.type == descriptor_type::constant_buffer || r.type == descriptor_type::constant_buffer_with_dynamic_offset ? 'b' :
 			r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view ? 'u' : 't';
@@ -894,6 +950,62 @@ void probe_dispatch(device *dev, CmdState &st, uint64_t hash, uint32_t gx, uint3
 		else
 			log_line("%s: view %llx, resource %llx is not a texture or buffer range", head, static_cast<unsigned long long>(e.handle), static_cast<unsigned long long>(e.info->resource));
 	});
+}
+
+// False while `hash` was logged less than log_every_n_frames presents ago (or at all, when that is 0). g_mutex held.
+bool probe_due(const std::unordered_map<uint64_t, uint32_t> &last_logged, uint64_t hash, uint32_t frame)
+{
+	const auto it = last_logged.find(hash);
+	return it == last_logged.end() || (g_cfg.log_every != 0 && frame - it->second >= g_cfg.log_every);
+}
+
+// Called on a dispatch of a compute shader that is not UE5 TSR. g_mutex held. Logs at most one block per shader hash every
+// log_every_n_frames presents, and only for a dispatch that binds something an upscaler would (logic::probe_view_interesting).
+void probe_dispatch(device *dev, CmdState &st, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+	static std::unordered_map<uint64_t, uint32_t> last_logged;
+	const uint32_t frame = g_present_count, bb_w = g_bb_w, bb_h = g_bb_h;
+	if (!probe_due(last_logged, hash, frame) || !probe_interesting(dev, st, bb_w, bb_h))
+		return;
+	last_logged[hash] = frame;
+	log_line("probe dispatch %016llx groups=%ux%ux%u present=%u back_buffer=%ux%u", static_cast<unsigned long long>(hash), gx, gy, gz, frame, bb_w, bb_h);
+	probe_log_bindings(dev, st, bb_w, bb_h);
+}
+
+// "WxH format name (number)" of a render target view, from the view shadow.
+std::string probe_rt_text(uint64_t view)
+{
+	const auto v = g_views.find(view);
+	if (v == g_views.end() || v->second->resource == 0 || v->second->desc.type == resource_type::buffer)
+		return "unknown";
+	const uint32_t fmt = static_cast<uint32_t>(v->second->view_format != format::unknown ? v->second->view_format : v->second->desc.texture.format);
+	return str_format("%ux%u %s (%u)", v->second->desc.texture.width, v->second->desc.texture.height, logic::probe_format_name(fmt), fmt);
+}
+
+// Called on every draw in probe mode: UE4's TemporalAA may be a full-screen pixel shader. Same rule as probe_dispatch, keyed by the
+// pixel shader's hash, plus the render targets. The game's draw is never touched.
+void probe_draw(command_list *cmd_list, uint32_t vertices)
+{
+	static std::unordered_map<uint64_t, uint32_t> last_logged;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	const auto it = g_gfx.find(cmd_list);
+	if (it == g_gfx.end())
+		return;
+	const auto ps = g_ps_pipelines.find(it->second.pipeline);
+	if (ps == g_ps_pipelines.end() || ps->second == 0)
+		return;
+	const uint64_t hash = ps->second;
+	const uint32_t frame = g_present_count, bb_w = g_bb_w, bb_h = g_bb_h;
+	device *dev = cmd_list->get_device();
+	if (!probe_due(last_logged, hash, frame) || !probe_interesting(dev, it->second, bb_w, bb_h))
+		return;
+	last_logged[hash] = frame;
+	const std::vector<uint64_t> &rts = it->second.rts;
+	log_line("probe draw ps=%016llx vertices=%u rt0=%s present=%u back_buffer=%ux%u", static_cast<unsigned long long>(hash), vertices,
+		rts.empty() ? "none" : probe_rt_text(rts[0]).c_str(), frame, bb_w, bb_h);
+	for (size_t i = 0; i < rts.size(); ++i)
+		log_line("  rt%zu: %s", i, probe_rt_text(rts[i]).c_str());
+	probe_log_bindings(dev, it->second, bb_w, bb_h);
 }
 
 // ---- native D3D12: decode pass, NGX, state restore -----------------------------------------------------------------
@@ -2798,14 +2910,18 @@ void on_close_command_list(command_list *cmd_list)
 {
 	dump_post_event(cmd_list);
 }
-bool on_draw(command_list *cmd_list, uint32_t, uint32_t, uint32_t, uint32_t)
+bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t, uint32_t, uint32_t)
 {
 	dump_post_event(cmd_list);
+	if (g_probe && !t_busy)
+		probe_draw(cmd_list, vertices);
 	return false;
 }
-bool on_draw_indexed(command_list *cmd_list, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t, uint32_t, int32_t, uint32_t)
 {
 	dump_post_event(cmd_list);
+	if (g_probe && !t_busy)
+		probe_draw(cmd_list, indices);
 	return false;
 }
 bool on_indirect(command_list *cmd_list, indirect_command, resource, uint64_t, uint32_t, uint32_t)
