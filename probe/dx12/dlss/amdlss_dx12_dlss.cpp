@@ -2881,6 +2881,11 @@ void draw_overlay(reshade::api::effect_runtime *)
 		ImGui::Text("Now rendering %ux%u -> %ux%u, ratio %.3f (%s)", st.rw, st.rh, st.ow, st.oh, static_cast<double>(st.rw) / st.ow, logic::preset_name(st.mode));
 	else
 		ImGui::TextDisabled("Now rendering: no upscale pass seen yet");
+	// The game reads r.ScreenPercentage only at start, so a mode picked here changes nothing until a restart.
+	// "Game default" is 0 and asks for no particular scale.
+	if (st.rw != 0 && edit.render_scale > 0 && std::abs(100.0 * st.rw / st.ow - edit.render_scale) > 1.0)
+		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Restart the game to apply this mode: it still renders at %.0f%%, the mode asks for %s%%.",
+			100.0 * st.rw / st.ow, logic::percent_text(edit.render_scale).c_str());
 	ImGui::TextWrapped("Sets the game's render resolution (r.ScreenPercentage in its Engine.ini) so DLSS has fewer pixels to start from. "
 		"Takes effect the next time the game starts.");
 	const char *names[logic::kRenderPresetCount];
