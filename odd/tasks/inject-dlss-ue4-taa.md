@@ -19,8 +19,8 @@ add-on does not look in.
 ## Tasks
 
 - [ ] T1 Confirm Project Wingman runs with `-dx12` and capture the TAAU pass (pipeline, bindings, constants). Route: inline + game run on the owner's PC.
-- [ ] T2 Engine.ini: also resolve `Saved\Config\WindowsNoEditor`, and write `r.TemporalAA.Upsampling=1` next to `r.ScreenPercentage` for UE4.
-- [ ] T3 UE4 TAA adapter in the add-on: identify the TAAU dispatch, map color, depth, velocity, output, jitter; evaluate DLSS instead.
+- [ ] T2 Engine.ini: also resolve `Saved\Config\WindowsNoEditor` (done, `engine_ini_path`), and write `r.TemporalAA.Upsampling=1` next to `r.ScreenPercentage` for UE4 (pending: not done in this slice).
+- [ ] T3 UE4 TAA adapter in the add-on: identify the TAAU dispatch, map color, depth, velocity, output, jitter; evaluate DLSS instead. Code written and builds with `dlss logic selftest ok` (route: delegated, one writer); not run on the game. Stays open until T1/T5 show `DLSS: active` in Wingman.
 - [ ] T4 Launcher: offer Inject DLSS on UE4 DX12-capable games and add `-dx12` (or tell the user to).
 - [ ] T5 Measure on the owner's PC: TAA vs DLSS fps at equal and lower render scale, Radeon mode included.
 
@@ -42,3 +42,12 @@ add-on does not look in.
   u0 output rgba16f; cb0 29 vec4 (TAA params), cb1 145 vec4 (View). Decompile: DXBC -> vkd3d-compiler spirv ->
   spirv-cross GLSL (dxc cannot read DXBC). The game always renders at its menu scale (150% default, 2864x1612 at
   1080p, 3816x2148 at 1440p). Mapping cb0/cb1 offsets (in progress).
+- 2026-10-18: T3 code in `probe/dx12/dlss`: hash `5165782d00fcf560` maps to `TsrPass::ue4_taa`; bindings t1 color, t2 depth, t3 velocity,
+  u0 output are found from the pipeline layout (any root parameter), cb0/cb1 are found by register b0/b1 in root descriptors or
+  tables and read from upload heaps (`prepare_ue4_upscale`, parsers `parse_ue4_taa_constants` and `parse_ue4_view` in `logic.hpp`).
+  `camera_mv.hlsl` builds the motion vectors (velocity texture, or camera reprojection from depth for static pixels; ini
+  `ue4_mv_unjitter`, default 1). The pass is replaced only when render <= output; at the game's 150% default the game's TAA runs and
+  the log says "render larger than output (game resolution scale above 100%)". The frame-sequence dump skips this pass. Not run on
+  the game. First run: read the `UE4 TAAU root signature` and `UE4 TAAU constant buffers` log lines to confirm where cb0/cb1 sit
+  (the probe log showed no CBV for this shader, so they may be absent from the shadow) and whether cb1 is in an upload heap.
+  Unresolved: unjitter sign (test `ue4_mv_unjitter` 1 and 0 on a still camera), pre-exposure only reaches DLSS with auto_exposure=0.

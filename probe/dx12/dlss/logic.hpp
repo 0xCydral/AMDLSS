@@ -1,6 +1,6 @@
 /*
  * Pure logic of the DLSS add-on (no Windows, no ReShade, no NGX), so selftest.cpp can check it on the Linux host
- * inside the build container: which TSR pass a shader hash is, TSR constant layouts, two-pass decisions, Halton jitter,
+ * inside the build container: which TSR (or UE4 TemporalAA) pass a shader hash is, TSR and UE4 TAA constant layouts, two-pass decisions, Halton jitter,
  * jitter phase matching, preset choice, UE5 velocity decode, ini parsing and merging, DLSS render preset names,
  * frame-time statistics, the frame-sequence dump (trigger file parsing, counter, names, index rows).
  */
@@ -59,14 +59,17 @@ inline void predict_jitter(int phase, uint32_t frames_since_lock, uint32_t cycle
 }
 
 // ---- which TSR pass a compute shader is ------------------------------------------------------------------------------
-// FNV-1a hashes of the DXIL, found by the probe (odd/tasks/dx12-spike.md). With the history at 100% of the output TSR is one
+// FNV-1a hashes of the shader bytecode (DXIL for UE5; the UE4 one is DXBC, the hash only sees bytes), found by the probe
+// (odd/tasks/dx12-spike.md, odd/tasks/inject-dlss-ue4-taa.md). With the history at 100% of the output TSR is one
 // pass (UpdateHistory writes the output and the half-size target); with the history at 200% it is two: UpdateHistory writes
 // the 5120x2880 history, a resolve reads it and writes the 2560x1440 output and the half-size target.
 constexpr uint64_t kHashSinglePass = 0x1ff10c3ce95d3bcbull;
 constexpr uint64_t kHashUpdateHistory = 0xe32f96d4dc79be5bull;
 constexpr uint64_t kHashResolve = 0x0b1375003bfb8294ull;
+// UE4.27 TemporalAA, the TAAU permutation, as Project Wingman ships it (DXBC SM5, 8x8 threads).
+constexpr uint64_t kHashUe4Taa = 0x5165782d00fcf560ull;
 
-enum class TsrPass { none, single, update_history, resolve };
+enum class TsrPass { none, single, update_history, resolve, ue4_taa };
 
 inline TsrPass tsr_pass_for_hash(uint64_t hash)
 {
@@ -75,6 +78,7 @@ inline TsrPass tsr_pass_for_hash(uint64_t hash)
 	case kHashSinglePass: return TsrPass::single;
 	case kHashUpdateHistory: return TsrPass::update_history;
 	case kHashResolve: return TsrPass::resolve;
+	case kHashUe4Taa: return TsrPass::ue4_taa;
 	default: return TsrPass::none;
 	}
 }
@@ -151,6 +155,93 @@ inline bool parse_tsr_constants(const uint8_t *buf, size_t size, TsrConstants &o
 	if (!sane_scale(c.velocity_to_pixels[0]) || !sane_scale(c.velocity_to_pixels[1]))
 		return false;
 	out = c;
+	return true;
+}
+
+// ---- UE4 TemporalAA (TAAU) -------------------------------------------------------------------------------------------------
+// Byte offsets into the pass's own cbuffer cb0 (29 vec4) and into UE's View buffer cb1 (145 vec4), from the decompile of
+// shader 5165782d00fcf560 (taa-layout.md). All viewport fields are float except the camera cut flag.
+constexpr size_t kUe4CameraCut = 8;           // uint (c0.z)
+constexpr size_t kUe4InputBufferSize = 304;   // float2, the input texture size
+constexpr size_t kUe4OutputSize = 368;        // float2
+constexpr size_t kUe4OutputMin = 384;         // float2
+constexpr size_t kUe4OutputMax = 392;         // float2, exclusive
+constexpr size_t kUe4InputMin = 416;          // float2
+constexpr size_t kUe4InputSize = 432;         // float2
+constexpr size_t kUe4Jitter = 448;            // float2, input pixels (TemporalJitterPixels)
+constexpr size_t kUe4Cb0Bytes = 464;
+constexpr size_t kUe4ClipToPrevClip = 1952;   // 4 rows of float4 (cb1[122..125])
+constexpr size_t kUe4PreExposure = 2168;      // float (cb1[135].z)
+constexpr size_t kUe4ViewBytes = 2172;        // bytes of cb1 the add-on reads
+
+struct Ue4TaaConstants
+{
+	float input_min[2] = {}, input_size[2] = {}, input_buffer_size[2] = {};
+	float output_min[2] = {}, output_max[2] = {}, output_size[2] = {};
+	float jitter[2] = {};
+	uint32_t camera_cut = 0;
+};
+
+// False when the buffer is short or the values cannot be this pass's cb0: sizes outside 1..16384, a negative origin, an
+// output rect that is not output_size wide, jitter outside +-0.5 pixels. Those are the checks that tell a wrong slot map.
+inline bool parse_ue4_taa_constants(const uint8_t *buf, size_t size, Ue4TaaConstants &out)
+{
+	if (buf == nullptr || size < kUe4Cb0Bytes)
+		return false;
+	Ue4TaaConstants c;
+	for (int i = 0; i < 2; ++i)
+	{
+		c.input_min[i] = read_f32(buf, kUe4InputMin + 4 * i);
+		c.input_size[i] = read_f32(buf, kUe4InputSize + 4 * i);
+		c.input_buffer_size[i] = read_f32(buf, kUe4InputBufferSize + 4 * i);
+		c.output_min[i] = read_f32(buf, kUe4OutputMin + 4 * i);
+		c.output_max[i] = read_f32(buf, kUe4OutputMax + 4 * i);
+		c.output_size[i] = read_f32(buf, kUe4OutputSize + 4 * i);
+		c.jitter[i] = read_f32(buf, kUe4Jitter + 4 * i);
+	}
+	c.camera_cut = read_u32(buf, kUe4CameraCut);
+	const auto sane_size = [](float v) { return v >= 1.0f && v <= 16384.0f; };
+	const auto sane_origin = [](float v) { return v >= 0.0f && v <= 16384.0f; };
+	for (int i = 0; i < 2; ++i)
+	{
+		if (!sane_size(c.input_size[i]) || !sane_size(c.input_buffer_size[i]) || !sane_size(c.output_size[i]))
+			return false;
+		if (!sane_origin(c.input_min[i]) || !sane_origin(c.output_min[i]))
+			return false;
+		if (!(std::fabs(c.output_max[i] - c.output_min[i] - c.output_size[i]) <= 1.0f))
+			return false;
+		if (!(std::fabs(c.jitter[i]) <= 0.5f))
+			return false;
+	}
+	out = c;
+	return true;
+}
+
+// The fields of View (cb1) the add-on needs: ClipToPrevClip as 16 floats (row after row, UE's row vectors) and the
+// pre-exposure scale.
+struct Ue4View
+{
+	float clip_to_prev[16] = {};
+	float pre_exposure = 1.0f;
+};
+
+inline bool parse_ue4_view(const uint8_t *buf, size_t size, Ue4View &out)
+{
+	if (buf == nullptr || size < kUe4ViewBytes)
+		return false;
+	Ue4View v;
+	float sum = 0;
+	for (int i = 0; i < 16; ++i)
+	{
+		v.clip_to_prev[i] = read_f32(buf, kUe4ClipToPrevClip + 4 * i);
+		if (!std::isfinite(v.clip_to_prev[i]))
+			return false;
+		sum += std::fabs(v.clip_to_prev[i]);
+	}
+	v.pre_exposure = read_f32(buf, kUe4PreExposure);
+	if (sum == 0.0f || !std::isfinite(v.pre_exposure) || v.pre_exposure <= 0.0f)
+		return false;
+	out = v;
 	return true;
 }
 

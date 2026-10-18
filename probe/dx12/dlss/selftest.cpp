@@ -73,6 +73,58 @@ int main()
 	assert(tsr_pass_for_hash(0xe32f96d4dc79be5bull) == TsrPass::update_history);
 	assert(tsr_pass_for_hash(0x0b1375003bfb8294ull) == TsrPass::resolve);
 	assert(tsr_pass_for_hash(0x793b3ceb82f744ecull) == TsrPass::none && tsr_pass_for_hash(0) == TsrPass::none);
+	assert(tsr_pass_for_hash(0x5165782d00fcf560ull) == TsrPass::ue4_taa);     // UE4.27 TAAU in Project Wingman (DXBC)
+
+	// UE4 TAAU's cb0 (464 bytes) as the Wingman capture at a 2560x1440 window and a 3816x2148 render; offsets from taa-layout.md.
+	{
+		uint8_t buf[kUe4Cb0Bytes] = {};
+		const auto put_u = [&](size_t at, uint32_t v) { std::memcpy(buf + at, &v, 4); };
+		const auto put_f = [&](size_t at, float v) { std::memcpy(buf + at, &v, 4); };
+		put_u(8, 1);                                                     // c0.z camera cut
+		put_f(304, 3816.0f); put_f(308, 2148.0f);                        // c19.xy input buffer size
+		put_f(368, 2560.0f); put_f(372, 1440.0f);                        // c23.xy output viewport size
+		put_f(384, 0.0f); put_f(388, 0.0f);                              // c24.xy output viewport min
+		put_f(392, 2560.0f); put_f(396, 1440.0f);                        // c24.zw output viewport max
+		put_f(416, 2.0f); put_f(420, 3.0f);                              // c26.xy input viewport min
+		put_f(432, 3816.0f); put_f(436, 2148.0f);                        // c27.xy input viewport size
+		put_f(448, -0.25f); put_f(452, 0.4375f);                         // c28.xy jitter
+		Ue4TaaConstants c;
+		assert(parse_ue4_taa_constants(buf, sizeof(buf), c));
+		assert(c.camera_cut == 1 && c.input_buffer_size[0] == 3816.0f && c.input_buffer_size[1] == 2148.0f);
+		assert(c.output_size[0] == 2560.0f && c.output_size[1] == 1440.0f && c.output_min[0] == 0.0f && c.output_max[1] == 1440.0f);
+		assert(c.input_min[0] == 2.0f && c.input_min[1] == 3.0f && c.input_size[0] == 3816.0f && c.input_size[1] == 2148.0f);
+		assert(c.jitter[0] == -0.25f && c.jitter[1] == 0.4375f);
+
+		assert(!parse_ue4_taa_constants(buf, kUe4Cb0Bytes - 1, c) && !parse_ue4_taa_constants(nullptr, 0, c));
+		put_f(448, 0.75f);                                               // jitter outside +-0.5
+		assert(!parse_ue4_taa_constants(buf, sizeof(buf), c));
+		put_f(448, -0.25f);
+		put_f(392, 2000.0f);                                             // output max does not match min + size: wrong slot map
+		assert(!parse_ue4_taa_constants(buf, sizeof(buf), c));
+		put_f(392, 2560.0f);
+		put_f(432, 0.0f);                                                // an empty input viewport
+		assert(!parse_ue4_taa_constants(buf, sizeof(buf), c));
+	}
+
+	// UE4's View buffer (cb1): ClipToPrevClip rows at 1952..2015 and the pre-exposure at 2168.
+	{
+		uint8_t buf[kUe4ViewBytes] = {};
+		const auto put_f = [&](size_t at, float v) { std::memcpy(buf + at, &v, 4); };
+		for (int i = 0; i < 16; ++i)
+			put_f(1952 + 4 * i, static_cast<float>(i + 1));
+		put_f(2168, 0.5f);
+		Ue4View v;
+		assert(parse_ue4_view(buf, sizeof(buf), v));
+		assert(v.clip_to_prev[0] == 1.0f && v.clip_to_prev[4] == 5.0f && v.clip_to_prev[12] == 13.0f && v.clip_to_prev[15] == 16.0f && v.pre_exposure == 0.5f);
+		assert(!parse_ue4_view(buf, kUe4ViewBytes - 1, v));
+		put_f(2168, 0.0f);                                               // pre-exposure of zero is not a View buffer
+		assert(!parse_ue4_view(buf, sizeof(buf), v));
+		put_f(2168, 1.0f);
+		put_f(1960, std::nanf(""));
+		assert(!parse_ue4_view(buf, sizeof(buf), v));
+		std::memset(buf + 1952, 0, 64);                                  // an all-zero matrix
+		assert(!parse_ue4_view(buf, sizeof(buf), v));
+	}
 
 	// A per-hash layout moves the fields: the same bytes parse differently with shifted offsets, and a short buffer is judged
 	// against the layout's own size.
