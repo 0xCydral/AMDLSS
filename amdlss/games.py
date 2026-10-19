@@ -248,7 +248,7 @@ def _rescan(folder):
                     found.append(entry.path)
                 if low in _INPUT_DLLS:
                     inputs.add(_INPUT_DLLS[low])
-            elif level < 7 and entry.name != 'HelixSR' and entry.is_dir(follow_symlinks=False):
+            elif level < 7 and entry.name not in ('HelixSR', 'HelixSR-fsrfg') and entry.is_dir(follow_symlinks=False):
                 todo.append((entry.path, level + 1))
     targets = [p for p in found if p.lower().endswith(_FSR_DLLS[0])] or found
     return targets, [name for name in ('DLSS', 'XeSS', 'FSR 2') if name in inputs]
@@ -407,7 +407,7 @@ STREAMLINE_DLLS = frozenset(('sl.interposer.dll', 'sl.dlss_g.dll'))
 NGX_DLSSG_DLL = 'nvngx_dlssg.dll'
 # Folders of the mod's own install: their Streamline copies (OptiScaler\streamline), HelixSR's files and its
 # helixsr-fg copies are the mod's, never the game's, so they do not count as the game offering DLSS Frame Generation.
-MOD_FOLDERS = frozenset(('optiscaler', 'helixsr', 'amdlss-scaler-backup'))
+MOD_FOLDERS = frozenset(('optiscaler', 'helixsr', 'helixsr-fsrfg', 'amdlss-scaler-backup'))
 
 
 def scan_streamline(folder, depth=9):

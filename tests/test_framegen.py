@@ -152,9 +152,9 @@ def test_the_in_game_hint_follows_the_installed_route_and_the_generator():
     assert 'choose DLSS' in games.after_text(games.Game(name='G', state='optiscaler', route='direct'))  # state wins
 
 
-# --- HelixSR's own DLSS 4 mode: gone with HelixSR 1.9.2; only a leftover of an earlier AMDLSS is recognised --------
+# --- HelixSR's own DLSS 4 mode: not offered; only a leftover of an earlier AMDLSS is recognised ---------------------
 
-# The OptiScaler.ini HelixSR Scaler 1.0.6 ships: [HelixSR] FrameGeneration=off, FGNvngxReplacement=auto.
+# The OptiScaler.ini HelixSR Scaler 1.0.6 shipped: [HelixSR] FrameGeneration=off, FGNvngxReplacement=auto (the old shape).
 DLSS4_INI = (INI.replace(b'[FrameGen]\r\n', b'[FrameGen]\r\nFGNvngxReplacement=auto\r\n')
              .replace(b'[Upscalers]\r\n',
                       b'[HelixSR]\r\n; frame generation\r\nFrameGeneration=off\r\nInt8=auto\r\n\r\n[Upscalers]\r\n'))
@@ -210,8 +210,8 @@ def test_amd_frame_generation_replaces_a_leftover_and_comes_back_to_the_same_byt
 
 def test_dlss4_values_without_a_record_go_to_off(opti, tmp_path):
     # a hand-edited ini, or another tool's: the DLSS 4 values are in it and the record is not. They must not be left
-    # pointing at HelixSR's frame generation, which HelixSR 1.9.2 and later do not have (Scaler 1.0.6 would redirect
-    # the provider to FFX), so the off values are written.
+    # pointing at HelixSR's frame generation, which AMDLSS does not set up (no helixsr-fg folder), so the off
+    # values are written.
     leftover(opti, tmp_path)
     (tmp_path / framegen.RECORD).unlink()
     assert framegen.generator_of(opti) == framegen.DLSS4
@@ -231,3 +231,28 @@ def test_an_older_ini_without_the_dlss4_lines_is_left_alone(exe, tmp_path):
 def test_generator_names_for_reports():
     assert framegen.name_of(framegen.AMD) == 'AMD FSR' and framegen.name_of(framegen.DLSS4) == 'DLSS 4 (HelixSR)'
     assert framegen.name_of('') == 'off' and framegen.name_of('?') == 'off'
+
+
+# The OptiScaler.ini HelixSR Scaler 1.1.0 ships (the sections AMDLSS writes): no [HelixSR] FrameGeneration line any more.
+SCALER_110_INI = (b'[HelixSR]\r\nInt8=auto\r\nFGPreset=auto\r\n\r\n[FrameGen]\r\nEnabled=auto\r\nFGInput=auto\r\n'
+                  b'FGNvngxReplacement=auto\r\nFGOutput=auto\r\nPreserveSwapChain=auto\r\n')
+
+
+def test_scaler_110_has_no_helixsr_framegeneration_line_and_off_is_still_written(tmp_path):
+    folder = tmp_path / 'game'
+    folder.mkdir()
+    (folder / framegen.INI).write_bytes(SCALER_110_INI)
+    assert framegen.generator_of(folder) == ''
+    assert framegen.apply_generator(folder, '', tmp_path)
+    off = (folder / framegen.INI).read_bytes()
+    assert b'FGInput=nofg' in off and b'Enabled=false' in off and b'FrameGeneration' not in off
+    assert not framegen.clear_dlss4(folder, tmp_path)
+    assert framegen.apply_generator(folder, framegen.AMD, tmp_path) and framegen.generator_of(folder) == framegen.AMD
+    assert b'FGInput=dlssg' in (folder / framegen.INI).read_bytes()
+    assert framegen.apply_generator(folder, '', tmp_path) and (folder / framegen.INI).read_bytes() == off
+    # a HelixSR frame generation chosen in Scaler 1.1.0's own menu has no [HelixSR] marker: shown off, switched off
+    (folder / framegen.INI).write_bytes(SCALER_110_INI.replace(b'FGInput=auto', b'FGInput=nvngxfg')
+                                        .replace(b'FGNvngxReplacement=auto', b'FGNvngxReplacement=HelixSR'))
+    assert framegen.generator_of(folder) == ''
+    assert framegen.apply_generator(folder, '', tmp_path)
+    assert b'nvngxfg' not in (folder / framegen.INI).read_bytes()

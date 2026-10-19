@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """A stand-in for HelixSR's setup folder, so tests can run AMDLSS's whole path (bridge, list parsing, install and
-remove command lines) with no HelixSR and no game. make() writes setup/helixsr_install.py, which has the same
+remove command lines) with no HelixSR and no game. make() writes the HelixSR 2.0.0 layout: the DLL in HelixSR-fsrfg/,
+setup/helixsr_games.py (the game module AMDLSS's bridge imports) and setup/helixsr_bridge.py (the JSON command line
+that installs the drop-in and removes), and a setup/helixsr_install.py that refuses to run, like AMDLSS must never
+run the real one (its games step installs into every game under --yes and does not list). make(legacy=True) writes
+the HelixSR 1.9.3 layout instead (an older folder not updated yet): the DLL at the root and one
+setup/helixsr_install.py, which has the same
 module-level names and command line as HelixSR 1.9.3's installer (`games`, `install`, `uninstall`, `say`,
 `version_of`, `is_helixsr`, `original`, `FOLDER`/`MARKER`/`OWN`/`CORE`, Game.route/scaler_installed/old_install()/
 installed()/direct_installed()/current()/label()/ways(); `list`, `install N`, `uninstall N`, `--folder PATH`,
 `--fg on|off`). Like the real one: a game's route is 'direct' (FSR 3.1), 'scaler' (DLSS/XeSS/FSR 2, or Scaler
 already there), 'blocked' (those plus anti-cheat), 'dlss'/'optiscaler' (an earlier version's install, which can
 only be removed) or None. The drop-in is file renames plus the install record next to the game's FSR DLL; a Scaler
-game gets dxgi.dll, OptiScaler.ini and HelixSR\\helixsr.dll next to its .exe plus HelixSR-Scaler.files, the record
-`uninstall N` reads to put everything back - see scaler_install(), which writes one.
+game gets dxgi.dll, OptiScaler.ini and its HelixSR DLL (HelixSR-fsrfg\\amd_fidelityfx_dx12.dll in the 2.0.0 layout,
+HelixSR\\helixsr.dll in the 1.9.3 one) next to its .exe plus HelixSR-Scaler.files, the record `uninstall N` reads to
+put everything back - see scaler_install(), which writes one.
 """
 import json
 from pathlib import Path
@@ -16,6 +22,8 @@ from pathlib import Path
 STUB = '''
 import json, os, re, sys
 from pathlib import Path
+
+MODERN = @MODERN@   # the HelixSR 2.0.0 layout
 
 DLL = 'amd_fidelityfx_dx12.dll'
 DLL_SR = 'amd_fidelityfx_upscaler_dx12.dll'
@@ -214,10 +222,11 @@ def uninstall_scaler(t):
         except OSError:
             pass
     (t / SCALER_FILES).unlink(missing_ok=True)
-    try:
-        (t / FOLDER).rmdir()
-    except OSError:
-        pass
+    for folder in (t / FOLDER, t / 'HelixSR-fsrfg'):
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
 
 
 def install_scaler(t):
@@ -227,10 +236,11 @@ def install_scaler(t):
     t = Path(t)
     (t / 'dxgi.dll').write_bytes(b'OPTISCALER 0.9.4')
     (t / 'OptiScaler.ini').write_bytes(INI.encode())
-    (t / FOLDER).mkdir(parents=True, exist_ok=True)
-    (t / FOLDER / OWN).write_bytes(b'HELIX\\x00HelixSR 1.9.3\\x00')
-    (t / SCALER_FILES).write_text(json.dumps({'name': 'dxgi.dll', 'version': '1.0.6',
-                                              'files': ['dxgi.dll', 'OptiScaler.ini', 'HelixSR/helixsr.dll'],
+    own = 'HelixSR-fsrfg/' + DLL if MODERN else FOLDER + '/' + OWN
+    (t / own).parent.mkdir(parents=True, exist_ok=True)
+    (t / own).write_bytes(b'HELIX\\x00HelixSR ' + (b'2.0.0' if MODERN else b'1.9.3') + b'\\x00')
+    (t / SCALER_FILES).write_text(json.dumps({'name': 'dxgi.dll', 'version': '1.1.0' if MODERN else '1.0.6',
+                                              'files': ['dxgi.dll', 'OptiScaler.ini', own],
                                               'by_hand': False}, indent=1))
 
 
@@ -308,16 +318,65 @@ if __name__ == '__main__':
 '''
 
 
-def make(root, games):
+# HelixSR 2.0.0's helixsr_bridge.py, reduced to what AMDLSS runs: `RELEASE install --game DIR --way fsr` and
+# `RELEASE remove --game DIR`, one JSON object out ({protocol, ok, error, messages}), game found by its folder.
+BRIDGE_STUB = '''
+import json, sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import helixsr_games as h
+
+
+def main(argv):
+    out, messages = {'protocol': 1, 'ok': False}, []
+    h.say = lambda m: messages.append(str(m).strip())
+    try:
+        release, verb = Path(argv[0]), argv[1]
+        folder = Path(argv[argv.index('--game') + 1])
+        g = next((g for g in h.games([]) if Path(g.folder) == folder), None) or (h.games_from([str(folder)]) or [None])[0]
+        if g is None:
+            raise SystemExit(f'no game (.exe) found in {folder}')
+        if verb == 'install':
+            if argv[argv.index('--way') + 1] != 'fsr':
+                raise SystemExit('the fake bridge installs the FSR drop-in only')
+            g.route = 'direct'
+            h.install(g, release / 'HelixSR-fsrfg')
+        else:
+            h.uninstall(g)
+        out['ok'] = True
+    except SystemExit as error:
+        out['error'] = str(error.code)
+    out['messages'] = messages
+    print(json.dumps(out))
+    return 0 if out['ok'] else 1
+
+
+sys.exit(main(sys.argv[1:]))
+'''
+
+
+def make(root, games, legacy=False):
     """A fake HelixSR folder under `root`; `games` is a list of {name, folder, fsr, inputs[, anticheat]}. The
     folder holds a built DLL and helixsr_setup.json, so it doubles as the source Scaler copies HelixSR's DLL
-    from."""
+    from. `legacy` makes the 1.9.3 layout (DLL at the root, setup/helixsr_install.py is the module and the command
+    line) instead of 2.0.0's."""
     folder = Path(root) / 'HelixSR-fake'
     (folder / 'setup').mkdir(parents=True)
-    (folder / 'setup' / 'helixsr_install.py').write_text(STUB, encoding='utf-8')
     (folder / 'games.json').write_text(json.dumps(games), encoding='utf-8')
-    (folder / 'amd_fidelityfx_dx12.dll').write_bytes(b'MZ\x00HelixSR 1.9.3\x00')
     (folder / 'helixsr_setup.json').write_text('{}', encoding='utf-8')
+    stub = STUB.replace('@MODERN@', str(not legacy))
+    if legacy:
+        (folder / 'setup' / 'helixsr_install.py').write_text(stub, encoding='utf-8')
+        (folder / 'amd_fidelityfx_dx12.dll').write_bytes(b'MZ\x00HelixSR 1.9.3\x00')
+        return folder
+    (folder / 'setup' / 'helixsr_games.py').write_text(stub, encoding='utf-8')
+    (folder / 'setup' / 'helixsr_bridge.py').write_text(BRIDGE_STUB, encoding='utf-8')
+    (folder / 'setup' / 'helixsr_install.py').write_text(   # the games step: AMDLSS must never run it
+        "raise SystemExit('the 2.0 games step installs into every game under --yes: AMDLSS must not run it')\n",
+        encoding='utf-8')
+    (folder / 'HelixSR-fsrfg').mkdir()
+    (folder / 'HelixSR-fsrfg' / 'amd_fidelityfx_dx12.dll').write_bytes(b'MZ\x00HelixSR 2.0.0\x00')
     return folder
 
 
@@ -342,17 +401,37 @@ def old_install(game_folder, route='optiscaler'):
 
 
 def scaler_install(game_folder):
-    """A HelixSR 1.9.3 Scaler install next to a game's .exe, the way its own setup records it: dxgi.dll,
-    OptiScaler.ini, HelixSR\\helixsr.dll and HelixSR-Scaler.files (the record `uninstall N` reads). AMDLSS 1.0.0's
-    older bridge recorded such installs in HelixSR\\helixsr-install.json instead (see old_install). Returns the
-    record."""
+    """A HelixSR 2.0.0 Scaler install next to a game's .exe, the way its own setup records it: dxgi.dll,
+    OptiScaler.ini, HelixSR-fsrfg\\amd_fidelityfx_dx12.dll and HelixSR-Scaler.files (the record the bridge's remove
+    reads). AMDLSS 1.0.0's older bridge recorded such installs in HelixSR\\helixsr-install.json instead (see
+    old_install). Returns the record."""
     target = Path(game_folder)
-    folder = target / 'HelixSR'
+    folder = target / 'HelixSR-fsrfg'
     folder.mkdir(parents=True, exist_ok=True)
-    (target / 'dxgi.dll').write_bytes(b'OPTISCALER 0.9.4')
+    (target / 'dxgi.dll').write_bytes(b'OPTISCALER 10.0.0')
     (target / 'OptiScaler.ini').write_bytes(b'[FrameGen]\r\nFGInput=auto\r\n')
-    (folder / 'helixsr.dll').write_bytes(b'HELIX\x00HelixSR 1.9.3\x00')
-    record = {'name': 'dxgi.dll', 'version': '1.0.6',
-              'files': ['dxgi.dll', 'OptiScaler.ini', 'HelixSR/helixsr.dll'], 'by_hand': False}
+    (folder / 'amd_fidelityfx_dx12.dll').write_bytes(b'HELIX\x00HelixSR 2.0.0\x00')
+    record = {'name': 'dxgi.dll', 'version': '1.1.0',
+              'files': ['dxgi.dll', 'OptiScaler.ini', 'HelixSR-fsrfg/amd_fidelityfx_dx12.dll'], 'by_hand': False}
     (target / 'HelixSR-Scaler.files').write_text(json.dumps(record, indent=1), encoding='utf-8')
     return record
+
+
+def age(folder, version='1.8.1'):
+    """Turns a make() folder into one an earlier AMDLSS built and the window has not updated yet: the 1.9 layout (the
+    DLL at the root, setup/helixsr_install.py as the module and the command line, no bridge), at `version`."""
+    folder = Path(folder)
+    setup = folder / 'setup'
+    games = setup / 'helixsr_games.py'
+    if games.is_file():
+        (setup / 'helixsr_install.py').write_text(games.read_text(encoding='utf-8').replace('MODERN = True', 'MODERN = False'),
+                                                  encoding='utf-8')
+        games.unlink()
+        (setup / 'helixsr_bridge.py').unlink()
+    (folder / 'HelixSR-fsrfg' / 'amd_fidelityfx_dx12.dll').unlink(missing_ok=True)
+    try:
+        (folder / 'HelixSR-fsrfg').rmdir()
+    except OSError:
+        pass
+    (folder / 'amd_fidelityfx_dx12.dll').write_bytes(f'MZ\x00HelixSR {version}\x00'.encode())
+    return folder

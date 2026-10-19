@@ -18,7 +18,7 @@ def zip_bytes(entries):
     return stream.getvalue()
 
 
-GOOD = zip_bytes({f'{helixsr.TOP}/{helixsr.SETUP}': 'setup', f'{helixsr.TOP}/{helixsr.DLL}': 'dll'})
+GOOD = zip_bytes({f'{helixsr.TOP}/{helixsr.SETUP}': 'setup', f'{helixsr.TOP}/{helixsr.FSRFG}/{helixsr.DLL}': 'dll'})
 
 
 def serve(monkeypatch, data, size=None, sha=None):
@@ -66,7 +66,7 @@ def test_fetch_drops_the_build_record_of_the_files_it_replaces(tmp_path, monkeyp
     serve(monkeypatch, GOOD)
     helixsr.fetch(tmp_path)
     assert not (folder / helixsr.BUILT).exists()
-    assert (folder / helixsr.DLL).is_file() and helixsr.package_current(tmp_path)
+    assert (folder / helixsr.FSRFG / helixsr.DLL).is_file() and helixsr.package_current(tmp_path)
 
 
 def test_hash_mismatch_is_rejected(tmp_path, monkeypatch):
@@ -125,13 +125,18 @@ def test_consent_text_names_nvidia_and_its_license():
 
 
 def test_pinned_values_are_the_current_release():
-    assert helixsr.ZIP_SIZE == 136076974
-    assert helixsr.ZIP_SHA256 == '7094b7afd006ab56231c880fcd358f115b114ee0734baa19d497a3e42da0a1d1'
-    assert helixsr.ZIP_URL.endswith('/v1.9.3/HelixSR-1.9.3.zip')
-    assert helixsr.TOP == 'HelixSR-1.9.3'  # the zip extracts to the version
-    # HelixSR Scaler 1.0.6: the package the OptiScaler route installs now (amdlss.scaler)
+    assert helixsr.ZIP_SIZE == 136997025
+    assert helixsr.ZIP_SHA256 == '0d60686eddbb0abd680b27d12a088344b212464ebf0a2dc18d10387e1c817f52'
+    assert helixsr.ZIP_URL.endswith('/v2.0.0/HelixSR-2.0.0.zip')
+    assert helixsr.TOP == 'HelixSR-2.0.0'  # the zip extracts to the version
+    assert helixsr.FSRFG == 'HelixSR-fsrfg' and helixsr.BUILT == 'helixsr_setup.json'   # the layout of 2.0
+    # NVIDIA's DLSS 310.7.0 DLL, which the setup builds from (the values in HelixSR 2.0.0's own helixsr_setup.py)
+    assert helixsr.DLSS_SIZE == 58977904
+    assert helixsr.DLSS_SHA256 == 'be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e'
+    assert helixsr.DLSS_URL.endswith('/v310.7.0/lib/Windows_x86_64/rel/nvngx_dlss.dll')
+    # HelixSR Scaler 1.1.0: the package the OptiScaler route installs now (amdlss.scaler), a release asset of v2.0.0
     from amdlss import scaler
-    assert scaler.ZIP_SIZE == 133228253
-    assert scaler.ZIP_SHA256 == '1256a5c51ba0db804d60c5ad896a06a17134f8b130a68fabda41621e8dc650af'
-    assert scaler.ZIP_URL.endswith('/v1.9.3/HelixSR-Scaler-1.0.6.zip')
-    assert scaler.TOP == 'HelixSR-Scaler-1.0.6' and scaler.LIST == 'HelixSR-Scaler-package.txt'
+    assert scaler.ZIP_SIZE == 130590483
+    assert scaler.ZIP_SHA256 == '827547c368a8468f9d888419f8f11cda687d3df7959725234a4dce4d8b3fc5fd'
+    assert scaler.ZIP_URL.endswith('/v2.0.0/HelixSR-Scaler-1.1.0.zip')
+    assert scaler.TOP == 'HelixSR-Scaler-1.1.0' and scaler.LIST == 'HelixSR-Scaler-package.txt'

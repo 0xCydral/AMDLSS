@@ -35,11 +35,11 @@ def test_the_linux_data_folder_is_the_xdg_one(tmp_path, monkeypatch):
 # --- HelixSR's setup and its Python ----------------------------------------------------------------------------
 
 def test_the_linux_setup_is_the_shell_script_and_the_consent_says_so():
-    assert helixsr.setup_command(windows=False) == ['bash', 'helixsr-setup.sh', '--yes']
+    assert helixsr.setup_command(windows=False, dlss='n.dll') == ['bash', 'helixsr-setup.sh', '--no-fg', '--dlss', 'n.dll']
     linux, windows = helixsr.consent_text(windows=False), helixsr.consent_text(windows=True)
     assert 'portable' in linux and 'Proton' in linux and '%LOCALAPPDATA%' not in linux
     assert '%LOCALAPPDATA%\\HelixSR' in windows
-    assert helixsr.NVIDIA_LICENSE_URL in linux   # --yes accepts the download, so both texts ask first
+    assert helixsr.NVIDIA_LICENSE_URL in linux   # AMDLSS downloads NVIDIA's DLL for the setup, so both texts ask first
 
 
 @pytest.fixture
@@ -77,18 +77,21 @@ def test_without_a_usable_python_the_setup_takes_the_portable_route(tmp_path, mo
     def run(command, cwd, on_line=None, timeout=0, env=None):
         calls.append(([str(p) for p in command], env))
         (Path(cwd) / helixsr.BUILT).write_text('{}')
-        (Path(cwd) / helixsr.DLL).write_bytes(b'x')
+        (Path(cwd) / helixsr.FSRFG).mkdir(exist_ok=True)
+        (Path(cwd) / helixsr.FSRFG / helixsr.DLL).write_bytes(b'x')
         return 0, []
 
     monkeypatch.setattr(helixsr, 'run_streaming', run)
     monkeypatch.setattr(helixsr, 'find_python', lambda windows=None: None)
-    helixsr.build(tmp_path, windows=False)
-    # --yes would otherwise offer a sudo package install nobody can answer from the window
-    assert calls[-1][0] == ['bash', 'helixsr-setup.sh', '--yes'] and calls[-1][1]['HELIXSR_FORCE_PORTABLE'] == '1'
+    dlss = tmp_path / 'nvngx_dlss.dll'
+    helixsr.build(tmp_path, windows=False, dlss=dlss)
+    # a Python without numpy would otherwise offer a sudo package install nobody can answer from the window
+    assert calls[-1][0] == ['bash', 'helixsr-setup.sh', '--no-fg', '--dlss', str(dlss)]
+    assert calls[-1][1]['HELIXSR_FORCE_PORTABLE'] == '1'
     monkeypatch.setattr(helixsr, 'find_python', lambda windows=None: Path('python3'))
-    helixsr.build(tmp_path, windows=False)
+    helixsr.build(tmp_path, windows=False, dlss=dlss)
     assert 'HELIXSR_FORCE_PORTABLE' not in calls[-1][1]           # a usable Python: the script finds it itself
-    helixsr.build(tmp_path, windows=True)
+    helixsr.build(tmp_path, windows=True, dlss=dlss)
     assert calls[-1][0][0] == 'powershell' and 'HELIXSR_FORCE_PORTABLE' not in calls[-1][1]
 
 
@@ -361,11 +364,11 @@ def test_extract_keeps_the_executable_bit_the_linux_setup_needs(tmp_path):
     import zipfile
     part = tmp_path / 'h.zip'
     with zipfile.ZipFile(part, 'w') as archive:
-        for name, mode in ((helixsr.SETUP, 0o644), (helixsr.DLL, 0o644), ('setup/lib/model/launch_synth', 0o755)):
+        for name, mode in ((helixsr.SETUP, 0o644), (f'{helixsr.FSRFG}/{helixsr.DLL}', 0o644), ('setup/lib/model/launch_synth', 0o755)):
             info = zipfile.ZipInfo(f'{helixsr.TOP}/{name}')
             info.external_attr = mode << 16
             archive.writestr(info, b'x')
     helixsr.extract(part, tmp_path / 'out')
     top = tmp_path / 'out' / helixsr.TOP
     assert os.access(top / 'setup/lib/model/launch_synth', os.X_OK)
-    assert not os.access(top / helixsr.DLL, os.X_OK)
+    assert not os.access(top / helixsr.FSRFG / helixsr.DLL, os.X_OK)

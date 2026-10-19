@@ -58,14 +58,20 @@ def game(tmp_path):
     return folder
 
 
-def helix_folder(tmp_path, old_fg=False):
-    """A built HelixSR folder; `old_fg` adds the helixsr-fg folder an earlier build (1.9.1 and before) had."""
-    folder = tmp_path / 'HelixSR-1.9.0'
+def helix_folder(tmp_path, fg=False, legacy=False):
+    """A built HelixSR 2.0 folder (the DLL in HelixSR-fsrfg); `fg` adds the helixsr-fg folder a build with frame
+    generation has. `legacy` makes the 1.9 folder an update has not replaced yet: the DLL at the root."""
+    folder = tmp_path / ('HelixSR-1.9.3' if legacy else 'HelixSR-2.0.0')
     folder.mkdir()
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.0\x00')
-    if old_fg:
-        (folder / 'helixsr-fg').mkdir()
-        (folder / 'helixsr-fg' / 'nvngx_dlssg.dll').write_bytes(b'MZ nvngx_dlssg.dll')
+    if legacy:
+        (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.9.3\x00')
+        return folder
+    (folder / helixsr.FSRFG).mkdir()
+    (folder / helixsr.FSRFG / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 2.0.0\x00')
+    if fg:
+        (folder / helixsr.FSRFG / 'helixsr-fg').mkdir()
+        (folder / helixsr.FSRFG / 'helixsr-fg' / 'nvexec64.dll').write_bytes(b'MZ nvexec64.dll')
+        (folder / helixsr.FSRFG / 'helixsr-fg' / 'nvngx_dlssg.dll').write_bytes(b'MZ nvngx_dlssg.dll')
     return folder
 
 
@@ -131,15 +137,17 @@ def test_locate_finds_the_override_then_the_data_folder(tmp_path):
 
 def test_install_places_the_listed_files_and_keeps_what_it_replaces(tmp_path, game):
     package = make_package(tmp_path)
-    helix = helix_folder(tmp_path, old_fg=True)
+    helix = helix_folder(tmp_path, fg=True)
     (game / 'OptiScaler.ini').write_bytes(b'the settings the user already had')
     record_data = record(game)
     scaler.install_into(package, game, helix, 'dxgi.dll', record_data)
     assert (game / 'dxgi.dll').read_bytes() == b'STAND-IN OptiScaler.dll'
     assert (game / 'OptiScaler' / 'streamline' / 'sl.dlss_g.dll').read_bytes() == b'STAND-IN OptiScaler/streamline/sl.dlss_g.dll'
     assert (game / 'Licenses' / 'OptiScaler_LICENSE.txt').is_file()
-    assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (helix / helixsr.DLL).read_bytes()
-    assert not (game / 'HelixSR' / 'helixsr-fg').exists()   # HelixSR 1.9.2+ has none; Scaler 1.0.6 ignores a leftover
+    placed = game / 'HelixSR-fsrfg' / 'amd_fidelityfx_dx12.dll'   # where Scaler 1.1.0 finds HelixSR by itself
+    assert placed.read_bytes() == (helix / helixsr.FSRFG / helixsr.DLL).read_bytes()
+    assert not (game / 'HelixSR-fsrfg' / 'helixsr-fg').exists()   # frame generation's folder: AMDLSS does not offer it
+    assert not (game / 'HelixSR' / 'helixsr.dll').exists()          # and nothing in the 1.9 place
     for name in UNLISTED:   # the download's own files: named by the list, never copied into the game
         assert not (game / name).exists()
     moved = record_data['moved']
@@ -150,12 +158,20 @@ def test_install_places_the_listed_files_and_keeps_what_it_replaces(tmp_path, ga
     assert all(sha(game / item['name']) == item['sha256'] for item in record_data['created'])
 
 
-def test_install_copies_only_the_upscaling_dll_of_a_build_that_had_frame_generation(tmp_path, game):
+def test_install_copies_only_the_upscaling_dll_of_a_build_that_has_frame_generation(tmp_path, game):
     package = make_package(tmp_path)
-    helix = helix_folder(tmp_path, old_fg=True)   # a 1.9.1 build not updated yet
+    helix = helix_folder(tmp_path, fg=True)   # a 2.0 build the setup made frame generation for
     scaler.install_into(package, game, helix, 'dxgi.dll', record(game))
-    assert (game / 'HelixSR' / 'helixsr.dll').is_file()
-    assert not (game / 'HelixSR' / 'helixsr-fg').exists()
+    assert (game / 'HelixSR-fsrfg' / 'amd_fidelityfx_dx12.dll').is_file()
+    assert [p.name for p in (game / 'HelixSR-fsrfg').iterdir()] == ['amd_fidelityfx_dx12.dll']
+
+
+def test_a_not_yet_updated_19_folder_is_placed_in_the_layout_scaler_110_still_reads(tmp_path, game):
+    package = make_package(tmp_path)
+    helix = helix_folder(tmp_path, legacy=True)
+    scaler.install_into(package, game, helix, 'dxgi.dll', record(game))
+    assert (game / 'HelixSR' / 'helixsr.dll').read_bytes() == (helix / helixsr.DLL).read_bytes()
+    assert not (game / 'HelixSR-fsrfg').exists()
 
 
 def test_remove_puts_the_games_own_files_back(tmp_path, game):
@@ -181,7 +197,7 @@ def test_remove_keeps_a_file_the_user_changed(tmp_path, game):
     notes = scaler.remove(game)
     assert (game / 'dxgi.dll').read_bytes() == b'the user put another DLL here'   # kept, not deleted
     assert any('kept' in note and 'dxgi.dll' in note for note in notes), notes
-    assert not (game / 'HelixSR').exists()                                        # the rest is gone
+    assert not (game / 'HelixSR').exists() and not (game / 'HelixSR-fsrfg').exists()   # the rest is gone
 
 
 def test_name_for_uses_scalers_own_order(tmp_path, game):
@@ -195,7 +211,7 @@ def test_name_for_uses_scalers_own_order(tmp_path, game):
 
 def test_plan_text_names_the_package_and_what_remove_does(game):
     text = scaler.plan_text(type('G', (), {'exe_folder': str(game)})())
-    assert f'HelixSR Scaler {scaler.VERSION}' in text and scaler.VERSION == '1.0.6' and 'OptiScaler with HelixSR built in' in text and scaler.BACKUP in text
+    assert f'HelixSR Scaler {scaler.VERSION}' in text and scaler.VERSION == '1.1.0' and 'OptiScaler with HelixSR built in' in text and scaler.BACKUP in text
 
 
 # --- install_game, the game's HelixSR folder and an earlier install ------------------------------------------------
@@ -242,7 +258,7 @@ def test_a_finished_install_says_what_it_placed(tmp_path):
     assert lines[0] == f'HelixSR installed in One (OptiScaler, running as dxgi.dll) in {one}'
     record = json.loads((one / scaler.FOLDER / scaler.RECORD).read_text(encoding='utf-8'))
     assert lines[1].startswith(f"placed {len(record['created'])} files: ")
-    assert 'dxgi.dll' in lines[1] and 'HelixSR/helixsr.dll' in lines[1]   # what went next to the .exe
+    assert 'dxgi.dll' in lines[1] and 'HelixSR-fsrfg/amd_fidelityfx_dx12.dll' in lines[1]   # what went next to the .exe
 
 
 def test_a_fresh_install_left_off_says_off(tmp_path):
@@ -251,7 +267,7 @@ def test_a_fresh_install_left_off_says_off(tmp_path):
     those same bytes."""
     client, one, data = world(tmp_path)
     scaler.install_game(client, client.list_games()[0], [], data)
-    assert not (one / scaler.FOLDER / 'helixsr-fg').exists()    # HelixSR 1.9.2+ has no frame generation to copy
+    assert not (one / scaler.HELIX_DIR / 'helixsr-fg').exists()   # AMDLSS does not copy frame generation's folder
     assert framegen.apply_generator(one, '', data)              # the app's step for the Off choice
     ini = (one / 'OptiScaler.ini').read_bytes()
     assert b'FrameGeneration=off' in ini and b'Enabled=false' in ini and b'FGInput=nofg' in ini
@@ -389,11 +405,12 @@ def test_install_helixsr_fetches_the_scaler_package_too(tmp_path, monkeypatch):
     """AMD's FSR 4 DLL now lives in the Scaler package, so Install HelixSR fetches it as well and FSR 4.1.1 works
     right after it, without an OptiScaler install. A failed Scaler download must not undo the HelixSR install."""
     monkeypatch.setattr(helixsr, 'fetch', lambda target, progress=None: None)
-    monkeypatch.setattr(helixsr, 'build', lambda folder, on_line=None, data_dir=None: None)
-    monkeypatch.setattr(helixsr, 'install_folder', lambda target: tmp_path / 'HelixSR-1.9.0')
+    monkeypatch.setattr(helixsr, 'build', lambda folder, on_line=None, data_dir=None, dlss=None: None)
+    monkeypatch.setattr(helixsr, 'fetch_dlss', lambda target, progress=None: tmp_path / 'nvngx_dlss.dll')
+    monkeypatch.setattr(helixsr, 'install_folder', lambda target: tmp_path / 'HelixSR-2.0.0')
     serve(monkeypatch, package_bytes())
     data = tmp_path / 'data'
-    assert helixsr.install_helixsr(data, consented=True) == tmp_path / 'HelixSR-1.9.0'
+    assert helixsr.install_helixsr(data, consented=True) == tmp_path / 'HelixSR-2.0.0'
     assert scaler.extracted(data)   # the package is there: AMD's FSR 4 DLL has somewhere to come from
 
     def no_network(target, progress=None):
@@ -403,7 +420,7 @@ def test_install_helixsr_fetches_the_scaler_package_too(tmp_path, monkeypatch):
     lines = []
     folder = helixsr.install_helixsr(tmp_path / 'other', consented=True,
                                      on_line=lambda text, final=False: lines.append(text))
-    assert folder == tmp_path / 'HelixSR-1.9.0' and not scaler.extracted(tmp_path / 'other')
+    assert folder == tmp_path / 'HelixSR-2.0.0' and not scaler.extracted(tmp_path / 'other')
     assert lines == ['HelixSR Scaler was not downloaded (no network): FSR 4.1.1 will not be available until it is']
 
 

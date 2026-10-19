@@ -6,7 +6,7 @@ import pytest
 
 from amdlss import app as appmod, fsr4, gpu, helixsr
 from amdlss.ui import plain
-from fake_helixsr import make
+from fake_helixsr import age, make
 from fake_scaler import make as make_package
 from test_app_smoke import Answers, shown, wait, window, hidden_root  # noqa: F401 (fixtures)
 from test_pe import build_dll
@@ -40,7 +40,7 @@ def build_app(window, monkeypatch, card='rdna3', answers=None, downloads_files=N
     helix = make(tmp, [{'name': 'One', 'folder': str(folders['One']), 'fsr': True, 'inputs': ['DLSS']},
                        {'name': 'Three', 'folder': str(folders['Three']), 'fsr': False, 'inputs': ['XeSS']},
                        {'name': 'Four', 'folder': str(folders['Four']), 'fsr': True, 'inputs': []}])
-    (helix / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(helix)
     (helix / helixsr.BUILT).write_text('{}')
     (helix / 'amd-fsr').mkdir()
     (helix / 'amd-fsr' / fsr4.DLL).write_bytes(AMD)

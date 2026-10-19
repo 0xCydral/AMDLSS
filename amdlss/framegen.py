@@ -23,9 +23,10 @@ HelixSR's installer already puts the files that needs next to the game's .exe (O
 amd_fidelityfx_framegeneration_dx12.dll, and its [Libraries] path to the last one). This module edits only those
 values in the OptiScaler.ini HelixSR placed there; every other byte of the file stays as it was. The values the file
 held before are kept in AMDLSS's data folder (framegen.json), and a game with frame generation off has the off values
-written out (see OFF). HelixSR 1.9.2 removed its own frame generation, so Scaler 1.0.6 no longer runs it from an
-auto; the off values stay so that an install made by an AMDLSS that switched HelixSR's DLSS 4 mode on is switched
-off again, and nothing but AMD FSR frame generation can be chosen.
+written out (see OFF). HelixSR 2.0 has DLSS frame generation again (Scaler 1.1.0: FGInput=nvngxfg with
+FGNvngxReplacement=HelixSR, needing the helixsr-fg folder AMDLSS does not copy), but AMDLSS does not offer it: the off
+values stay so that an install made by an AMDLSS that switched HelixSR's DLSS 4 mode on is switched off again, and
+nothing but AMD FSR frame generation can be chosen.
 HelixSR's own uninstall restores or deletes OptiScaler.ini, so Remove needs no help from here beyond forget() dropping
 the records (and the OptiScaler.log that our logging switch made).
 """
@@ -50,15 +51,17 @@ LOGGING = Setting(b'Log', {'LogToFile': 'true', 'LogLevel': '2'}, '#log')
 RESHADE = Setting(b'Plugins', {'LoadReshade': 'true'}, '#reshade')
 # The frame generation generator: AMD FSR's (OptiScaler turns the game's DLSS Frame Generation into FSR frames). DLSS4
 # is HelixSR's own experimental mode that AMDLSS 1.2 could switch on (the game's DLSS Frame Generation ran HelixSR's
-# network from the helixsr-fg files; FGInput=nvngxfg makes OptiScaler leave FGOutput alone). HelixSR 1.9.2 removed
-# it: DLSS4 is only still recognised (generator_of), so Install and Update can switch a leftover off, never chosen.
+# network from the helixsr-fg files; FGInput=nvngxfg makes OptiScaler leave FGOutput alone). AMDLSS retired it
+# and HelixSR 2.0's own version of it is not offered either: DLSS4 is only recognised (generator_of), so Install and
+# Update can switch a leftover off, never chosen.
 AMD, DLSS4 = 'amd', 'dlss4'
 HELIX_FG = Setting(b'HelixSR', {'FrameGeneration': 'on'}, '#helixsrfg')
 DLSS4_FG = Setting(b'FrameGen', {'FGInput': 'nvngxfg', 'FGNvngxReplacement': 'HelixSR'}, '#dlss4')
 NAMES = {AMD: 'AMD FSR', DLSS4: 'DLSS 4 (HelixSR)'}   # for reports, the window and the game's log
-# What each switch says when frame generation is off (the ini Scaler 1.0.6 ships says FrameGeneration=off, and auto for
-# the others: FGInput's default is nofg, Enabled's is false). A game with no generator chosen says so, which also
-# turns off a HelixSR mode an earlier AMDLSS wrote.
+# What each switch says when frame generation is off (the ini Scaler 1.0.6 shipped says FrameGeneration=off, 1.1.0's has
+# no such line and both leave the others on auto: FGInput's default is nofg, Enabled's is false). A game with no
+# generator chosen says so, which also turns off a HelixSR mode an earlier AMDLSS wrote. A switch whose line the file
+# lacks is skipped.
 OFF = ((FRAMEGEN, {'Enabled': 'false'}),
        (HELIX_FG, {'FrameGeneration': 'off'}),
        (DLSS4_FG, {'FGInput': 'nofg'}))
@@ -138,7 +141,9 @@ def name_of(generator):
 
 def generator_of(exe_folder):
     """Which frame generation the game's OptiScaler.ini runs: 'dlss4' (HelixSR's own, left by an AMDLSS that could
-    switch it on; HelixSR 1.9.2 and later cannot run it), 'amd' (AMD FSR's), or '' when neither is switched on."""
+    switch it on; AMDLSS no longer offers it), 'amd' (AMD FSR's), or '' when neither is switched on. The marker is the
+    [HelixSR] FrameGeneration line of Scaler 1.0.6 and earlier: Scaler 1.1.0 has none, and a HelixSR frame generation
+    chosen in its menu shows as off here."""
     if is_on(exe_folder, HELIX_FG) and is_on(exe_folder, DLSS4_FG):
         return DLSS4
     return AMD if is_on(exe_folder, FRAMEGEN) else ''
@@ -185,7 +190,7 @@ def apply_generator(exe_folder, generator, data_dir):
 
 # What AMDLSS's DLSS 4 keys are put to when the file holds them but no record of what it held is left (a user or
 # another tool wrote them): each switch's own off values and the replacement back to the package's auto. They must
-# never be left pointing at HelixSR's frame generation, which HelixSR 1.9.2 and later do not have.
+# never be left pointing at HelixSR's frame generation, which AMDLSS does not set up (no helixsr-fg folder).
 DLSS4_OFF = ((HELIX_FG, off_values(HELIX_FG)),
              (DLSS4_FG, {'FGInput': 'nofg', 'FGNvngxReplacement': 'auto'}))
 

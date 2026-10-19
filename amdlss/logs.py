@@ -113,7 +113,8 @@ def places(game):
     the game's own folder is another game's and is never listed or collected; a drive root listed as the folder
     scopes everything to the .exe folder, so a bad folder cannot sweep a whole drive into a report."""
     exe = Path(game.exe_folder or game.folder)
-    found = [('exe-folder', exe), ('exe-folder/HelixSR', exe / 'HelixSR')]
+    found = [('exe-folder', exe), ('exe-folder/HelixSR', exe / 'HelixSR'),
+             ('exe-folder/HelixSR-fsrfg', exe / 'HelixSR-fsrfg')]
     scope = game.folder if game.folder and not gamelist.is_root_folder(game.folder) else str(exe)
     for number, target in enumerate(game.fsr_targets, 1):
         folder = Path(target).parent

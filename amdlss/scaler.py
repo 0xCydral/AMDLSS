@@ -10,9 +10,11 @@ installers do:
 
   - every file its HelixSR-Scaler-package.txt names, with OptiScaler.dll renamed to the first free of Scaler's own
     names (dxgi.dll first);
-  - HelixSR's built amd_fidelityfx_dx12.dll as HelixSR\\helixsr.dll (HelixSR 1.9.2 and later have no frame
-    generation of their own, so there is no helixsr-fg folder to copy; an install of an earlier AMDLSS that holds one
-    is removed through its record as before);
+  - HelixSR's built amd_fidelityfx_dx12.dll as HelixSR-fsrfg\\amd_fidelityfx_dx12.dll, the folder Scaler 1.1.0 finds by
+    itself and makes HelixSR the FidelityFX upscaler from (a HelixSR 1.9 folder, which has the DLL at its root, is
+    placed as HelixSR\\helixsr.dll, the layout Scaler 1.1.0 still reads). The helixsr-fg folder (HelixSR's frame
+    generation, which the setup builds only when asked) is not copied: AMDLSS does not offer it. An install of an
+    earlier AMDLSS is removed through its record as before;
   - every other OptiScaler copy next to the .exe (an older install, whatever it is called; its version resource or
     its bytes say so) is moved into HelixSR\\amdlss-scaler-backup too: the game loads whichever proxy it finds
     first, so a leftover would shadow ours;
@@ -33,17 +35,18 @@ from . import VERSION as APP_VERSION
 from . import helixsr, pe
 from .helixsr import HelixSRError
 
-VERSION = '1.0.6'
+VERSION = '1.1.0'
 ZIP_NAME = f'HelixSR-Scaler-{VERSION}.zip'
 ZIP_URL = f'https://github.com/lonewolf0622/HelixSR/releases/download/v{helixsr.VERSION}/{ZIP_NAME}'
-ZIP_SIZE = 133228253
-ZIP_SHA256 = '1256a5c51ba0db804d60c5ad896a06a17134f8b130a68fabda41621e8dc650af'
+ZIP_SIZE = 130590483
+ZIP_SHA256 = '827547c368a8468f9d888419f8f11cda687d3df7959725234a4dce4d8b3fc5fd'
 TOP = f'HelixSR-Scaler-{VERSION}'          # the folder the zip extracts to
 LIST = 'HelixSR-Scaler-package.txt'        # the package's own file list: what its installer copies
 DLL = 'OptiScaler.dll'
 NAMES = ('dxgi.dll', 'winmm.dll', 'version.dll', 'dbghelp.dll', 'd3d12.dll', 'wininet.dll', 'winhttp.dll')
-FOLDER = 'HelixSR'                         # the game's HelixSR folder: helixsr.dll, the record and the backup
-OWN = 'helixsr.dll'
+FOLDER = 'HelixSR'                         # AMDLSS's folder in the game: the record and the backup (a 1.9 folder's DLL too)
+OWN = 'helixsr.dll'                        # ...a HelixSR 1.9 build placed as HelixSR/helixsr.dll
+HELIX_DIR = helixsr.FSRFG                  # HelixSR 2.0 build placed next to the .exe: HelixSR-fsrfg/amd_fidelityfx_dx12.dll
 RECORD = 'amdlss-scaler.json'
 BACKUP = 'amdlss-scaler-backup'            # inside FOLDER: the game's files an install had to replace
 INI = 'OptiScaler.ini'
@@ -51,7 +54,9 @@ INI = 'OptiScaler.ini'
 # same list from HelixSR-Scaler-package.txt, which names them too).
 NOT_COPIED = ('setup_linux.sh', 'setup_windows.bat', 'README.txt', 'README-Linux.txt', LIST)
 LOG_FILES = ('OptiScaler.log', f'{FOLDER}/helixsr.log', f'{FOLDER}/helixsr.ini',
-             f'{FOLDER}/helixsr_upscaler.dll', f'{FOLDER}/helixsr-fg/nvexec.log')
+             f'{FOLDER}/helixsr_upscaler.dll', f'{FOLDER}/helixsr-fg/nvexec.log',
+             f'{HELIX_DIR}/helixsr.log', f'{HELIX_DIR}/helixsr.ini',
+             f'{HELIX_DIR}/amd_fidelityfx_upscaler_dx12.amd.dll', f'{HELIX_DIR}/helixsr-fg/nvexec.log')
 FG_OFF = f'{FOLDER}/helixsr-fg.off'        # frame generation switched off: Scaler parks the folder here
 
 
@@ -152,7 +157,10 @@ def install_into(package, exe_folder, helix_folder, name, record):
 
     for rel in files(package):
         put(package / rel, name if rel == DLL else rel)
-    put(Path(helix_folder) / helixsr.DLL, f'{FOLDER}/{OWN}')
+    if (Path(helix_folder) / helixsr.FSRFG / helixsr.DLL).is_file():
+        put(helixsr.dll_path(helix_folder), f'{HELIX_DIR}/{helixsr.DLL}')
+    else:   # a HelixSR 1.9 folder not updated yet
+        put(helixsr.dll_path(helix_folder), f'{FOLDER}/{OWN}')
 
 
 def _name_for(exe_folder):
@@ -271,6 +279,11 @@ def _prune(exe_folder, folders):
             pass
 
 
+def _helix_folders(exe_folder):
+    """HelixSR 2.0's folder in the game and the one Scaler makes inside it while the game runs: removed when empty."""
+    return {Path(exe_folder) / HELIX_DIR, Path(exe_folder) / HELIX_DIR / 'helixsr-fg'}
+
+
 def _unwind(exe_folder, record, force=False):
     """Undoes a record: files AMDLSS created are deleted (one the user replaced is kept and noted, unless `force`),
     then the files it moved come back. Returns the notes. OptiScaler.ini is deleted like Scaler's own remover does
@@ -312,7 +325,7 @@ def remove(exe_folder):
     notes = _unwind(exe_folder, record)
     _runtime_files(exe_folder)
     record_path(exe_folder).unlink(missing_ok=True)
-    _prune(exe_folder, {exe_folder / FOLDER})
+    _prune(exe_folder, {exe_folder / FOLDER, *_helix_folders(exe_folder)})
     return notes
 
 
@@ -371,7 +384,7 @@ def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=N
     except (OSError, HelixSRError) as error:
         _unwind(exe, record, force=True)
         record_path(exe).unlink(missing_ok=True)
-        _prune(exe, {exe / FOLDER})
+        _prune(exe, {exe / FOLDER, *_helix_folders(exe)})
         raise HelixSRError(f'HelixSR Scaler was not installed ({error}); the game\'s files are as they were.')
     record_path(exe).parent.mkdir(parents=True, exist_ok=True)
     if settings is not None:

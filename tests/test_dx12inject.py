@@ -105,7 +105,7 @@ def test_the_other_layout_is_scaler_as_dxgi_reshade_as_reshade64_and_loadreshade
     assert after.state == games.INJECT12
     added = set(names(exe)) - set(before)
     assert {'dxgi.dll', 'ReShade64.dll', 'amdlss_dx12_dlss.addon64', 'amdlss_dx12_dlss.ini', 'OptiScaler.ini',
-            'HelixSR/helixsr.dll', 'HelixSR/amdlss-dx12dlss.json', 'HelixSR/amdlss-scaler.json'} <= added
+            'HelixSR-fsrfg/amd_fidelityfx_dx12.dll', 'HelixSR/amdlss-dx12dlss.json', 'HelixSR/amdlss-scaler.json'} <= added
     assert 'nvngx_dlss.dll' not in added and not any(name.startswith('Luma') for name in added)
     assert (exe / 'dxgi.dll').read_bytes() == b'STAND-IN OptiScaler.dll'            # Scaler took dxgi.dll
     assert (exe / 'ReShade64.dll').read_bytes() == b'STAND-IN dxgi.dll'             # ReShade from Luma's zip

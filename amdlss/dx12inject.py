@@ -12,8 +12,9 @@ Two layouts, chosen by the PC's graphics cards (amdlss.gpu), all next to the gam
                                     nvngx_dlss.dll. No Scaler.
   anything else (AMD, Intel, ...):  HelixSR Scaler as dxgi.dll (amdlss.scaler, as in the Luma route), ReShade as
                                     ReShade64.dll, amdlss_dx12_dlss.addon64, amdlss_dx12_dlss.ini,
-                                    HelixSR\\helixsr.dll, and [Plugins] LoadReshade=true in OptiScaler.ini. Scaler 1.0.6
-                                    sends the add-on's DLSS calls to HelixSR on its own ([DLSS] HelixSR=auto).
+                                    HelixSR-fsrfg\\amd_fidelityfx_dx12.dll, and [Plugins] LoadReshade=true in
+                                    OptiScaler.ini. Scaler 1.1.0 makes HelixSR its FidelityFX upscaler on its own, so
+                                    the add-on's DLSS calls reach it (Upscalers auto).
 
 ReShade 6.8.0.1 (with add-on support) and NVIDIA's nvngx_dlss.dll are not bundled: they come out of Luma's pinned
 release zip, which amdlss.luma already fetches and checks. The add-on and its ini are AMDLSS's own files, bundled in

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from amdlss import covers, framegen, gpu, helixsr, scaler, settings
-from fake_helixsr import make
+from fake_helixsr import age, make
 
 tk = pytest.importorskip('tkinter')
 
@@ -75,7 +75,7 @@ def test_add_folder_and_rescan_work_before_helixsr_is_installed(window, monkeypa
     other = tmp / 'Other'
     other.mkdir()
     folder = make(tmp, [{'name': 'Other', 'folder': str(other), 'fsr': True, 'inputs': ['DLSS']}])   # installed by hand
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(folder)
     (folder / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
     app.rescan()
@@ -100,7 +100,7 @@ def test_games_are_listed_and_buttons_follow_the_selection(window, monkeypatch):
     (tmp / 'Three').mkdir()
     folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']},
                         {'name': 'Three', 'folder': str(tmp / 'Three'), 'fsr': False, 'inputs': ['XeSS']}])
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(folder)
     (folder / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
     app = make_app()
@@ -143,7 +143,7 @@ def test_install_and_remove_buttons_drive_the_whole_path(window, monkeypatch):
     one.mkdir()
     (one / 'amd_fidelityfx_upscaler_dx12.dll').write_bytes(b'GAME')
     folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}])
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(folder)
     (folder / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
     answers = Answers()
@@ -198,7 +198,7 @@ def two_game_app(window, monkeypatch, answers=None):
     (tmp / 'Three').mkdir()
     folder = make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']},
                         {'name': 'Three', 'folder': str(tmp / 'Three'), 'fsr': False, 'inputs': ['XeSS']}])
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(folder)
     (folder / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
     app = App(top, tk, ttk, filedialog, answers or Answers(), font)
@@ -225,7 +225,7 @@ def test_the_frame_generation_control_follows_the_streamline_dlls(window, monkey
     top, app, _one = two_game_app(window, monkeypatch)
     app.tree.selection_set('0')   # One ships Streamline DLSS-G in a subfolder
     top.update()
-    assert len(app.fg_buttons) == 2   # Off and AMD FSR: HelixSR 1.9.2 and later have no frame generation to offer
+    assert len(app.fg_buttons) == 2   # Off and AMD FSR: AMDLSS does not offer HelixSR's own frame generation
     assert [str(w.state) for w in app.fg_buttons] == ['normal', 'normal'] and not shown(app.fg_note)
     app.tree.selection_set('1')   # Three has none: the whole control is greyed, off, with the reason beside it
     top.update()
@@ -259,7 +259,7 @@ def test_a_dlss4_leftover_is_turned_off_by_update_and_the_text_says_why(window, 
     app.tree.selection_set('0')
     top.update()
     assert app.fg_var.get() == '' and [str(w.state) for w in app.fg_buttons] == ['normal', 'normal']
-    assert 'no frame generation of their own' in app.fg_note.cget('text')
+    assert 'does not offer HelixSR\'s own frame generation' in app.fg_note.cget('text')
     assert 'Install or Update turns it off' in app.fg_note.cget('text')
     app.install_game()
     wait(top, app, lambda: len(answers.told) == 2 and not app.busy)
@@ -526,7 +526,7 @@ def test_leftovers_and_games_without_upscalers_are_hidden_until_show_all(window,
     helix = make(tmp, [{'name': 'Ready', 'folder': str(ready), 'fsr': True, 'inputs': ['DLSS']},
                        {'name': 'Leftover', 'folder': str(tmp / 'Leftover'), 'fsr': True, 'inputs': ['DLSS']},
                        {'name': 'Bare', 'folder': str(bare), 'fsr': False, 'inputs': []}])
-    (helix / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(helix)
     (helix / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(helix))
     app = make_app()
@@ -790,7 +790,7 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
     old = tmp / 'data' / 'HelixSR-1.8.1'
     old.parent.mkdir(exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(old)
-    (old / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(old)
     (old / helixsr.BUILT).write_text('{}')
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
     answers, installs = Answers(), []
@@ -799,7 +799,9 @@ def test_an_older_helixsr_is_listed_and_the_button_updates_it(window, monkeypatc
         installs.append((consented, force))
         new = old.parent / helixsr.TOP
         shutil.copytree(old, new)
-        (new / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
+        (new / helixsr.DLL).unlink()   # the pinned build: HelixSR 2.0's layout
+        (new / helixsr.FSRFG).mkdir()
+        (new / helixsr.FSRFG / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
         helixsr.write_package_record(data_dir, new)   # the real fetch records the pinned zip after extracting
         return new
 
@@ -834,7 +836,7 @@ def test_the_old_layout_build_offers_update(window, monkeypatch):
     old = tmp / 'data' / helixsr.TOP
     old.parent.mkdir(exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(old)
-    (old / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())   # the older zip's build: same version
+    age(old, helixsr.VERSION)   # the older zip's build: the 1.9 layout, the same version
     for name in ('amd-fsr', 'dlss-loader', 'fsr3-drop-in', 'manual-install', 'my-fsr', 'optiscaler'):
         (old / name).mkdir()
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
@@ -851,7 +853,7 @@ def test_the_old_layout_build_offers_update(window, monkeypatch):
 
 def test_a_built_current_helixsr_has_nothing_to_update(window, monkeypatch):
     """Built from the pinned zip: the button stays disabled. It used to stay enabled as Update while HelixSR's
-    frame generation was missing; HelixSR 1.9.2 and later have none, so a finished build is finished."""
+    frame generation was missing; AMDLSS does not offer it, so a finished build is finished."""
     from tkinter import filedialog, font, ttk
 
     from amdlss.app import App
@@ -863,7 +865,6 @@ def test_a_built_current_helixsr_has_nothing_to_update(window, monkeypatch):
     folder = data / helixsr.TOP
     folder.parent.mkdir(parents=True, exist_ok=True)
     make(tmp, [{'name': 'One', 'folder': str(one), 'fsr': True, 'inputs': ['DLSS']}]).rename(folder)
-    (folder / helixsr.DLL).write_bytes(f'MZ\x00HelixSR {helixsr.VERSION}\x00'.encode())
     helixsr.write_package_record(data, folder)   # the pinned zip was extracted here
     monkeypatch.delenv('AMDLSS_HELIXSR', raising=False)
     app = App(top, tk, ttk, filedialog, Answers(), font)
@@ -891,7 +892,7 @@ def test_a_game_on_an_older_helixsr_shows_update(window, monkeypatch):
             (game / 'helixsr-install.json').write_text(json.dumps({'helixsr': version}))
         rows.append({'name': name, 'folder': str(game), 'fsr': True, 'inputs': ['DLSS']})
     folder = make(tmp, rows)
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(folder)
     (folder / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
     app = App(top, tk, ttk, filedialog, Answers(), font)
@@ -929,7 +930,7 @@ def test_a_directx_12_unreal_game_gets_the_add_on_and_an_unclear_one_offers_both
         (exe / 'Project-Win64-Shipping.exe').write_bytes(with_imports(build_dll(), imports))
         rows.append({'name': name, 'folder': str(exe), 'fsr': False, 'inputs': []})
     folder = make(tmp, rows)
-    (folder / helixsr.DLL).write_bytes(b'MZ\x00HelixSR 1.8.1\x00')
+    age(folder)
     (folder / helixsr.BUILT).write_text('{}')
     monkeypatch.setenv('AMDLSS_HELIXSR', str(folder))
     answers = Answers()
