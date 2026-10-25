@@ -34,3 +34,9 @@ def test_install_makes_urlopen_use_that_context(empty_store, monkeypatch):
     net.install()
     (handler,) = [h for h in installed[0].handlers if isinstance(h, urllib.request.HTTPSHandler)]
     assert GITHUB_ROOTS <= common_names(handler._context)
+
+
+def test_selftest_check_net_holds_in_a_frozen_build(monkeypatch):
+    from amdlss import selftest, update
+    monkeypatch.setattr(update, 'FROZEN', True)
+    selftest.check_net()

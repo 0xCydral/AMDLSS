@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from . import (VERSION, covers, crashes, dx12inject, framegen, fsr4, games, gpu, helixsr, identify, logs, luma,
+from . import (VERSION, covers, crashes, dx12inject, framegen, fsr4, games, gpu, helixsr, identify, logs, luma, net,
                reports, scaler, update)
 
 
