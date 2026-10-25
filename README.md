@@ -30,7 +30,7 @@ HelixSR is developed on Linux (Proton, Mesa RADV), and AMDLSS runs there the sam
 
 What differs from Windows:
 
-- **Install HelixSR** runs HelixSR's own `helixsr-setup.sh --yes`. It needs Python 3 with numpy: your system's `python3` when it has them (for example the `python3-numpy` package), otherwise the setup downloads a portable Python into `~/.local/share/HelixSR`. AMDLSS never installs system packages. The shader compiler runs through Proton, so install Proton in Steam (any Proton game does it) or Wine.
+- **Install HelixSR** runs HelixSR's own `helixsr-setup.sh --no-fg --dlss <DLL>`, as on Windows. It needs Python 3 with numpy: your system's `python3` when it has them (for example the `python3-numpy` package), otherwise the setup downloads a portable Python into `~/.local/share/HelixSR`. AMDLSS never installs system packages. The shader compiler runs through Proton, so install Proton in Steam (any Proton game does it) or Wine.
 - Games are Proton games. HelixSR finds them in your Linux or Flatpak Steam libraries, plus Heroic and Lutris games; anything else goes through **Add game folder...**.
 - AMDLSS keeps its files in `~/.local/share/AMDLSS` (or `$XDG_DATA_HOME/AMDLSS`); HelixSR's own downloads go to `~/.local/share/HelixSR`. Delete these folders to remove everything.
 - Self-update replaces the `AMDLSS-linux-x86_64` file in place, SHA-256 checked like on Windows.
