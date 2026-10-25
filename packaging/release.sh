@@ -19,6 +19,9 @@ if [ "$DLSS_RC" -ne 0 ]; then
     exit 1
 fi
 echo "== windows exe"
+# certifi: the root CAs a Windows store may not have cached yet (amdlss/net.py); the selftest fails an exe without it.
+amdlss-wine 'C:\Python312\python.exe' -c 'import certifi' > /dev/null 2>&1 ||
+    timeout 300 amdlss-wine 'C:\Python312\python.exe' -m pip install -q --disable-pip-version-check certifi 2>&1 | grep -v ntsync
 timeout 900 amdlss-wine 'C:\Python312\python.exe' -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
     --onefile --name AMDLSS --icon "$ZSRC/amdlss.ico" \
     --add-data "$ZSRC/amdlss.ico;." \

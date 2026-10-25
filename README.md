@@ -205,13 +205,13 @@ Downloads run in the background, so offline the window opens and works as before
 
 ## Build
 
-AMDLSS needs only Python's standard library and Tk to run (Pillow too, for the game covers). To build `dist/AMDLSS.exe` you need a Windows Python 3 from python.org (the build was tested with 3.14) and, in Git Bash:
+AMDLSS needs only Python's standard library and Tk to run (Pillow too, for the game covers). With certifi installed it also trusts Mozilla's list of root certificates. A Windows PC needs that when its own store has not downloaded GitHub's root yet, which shows up as `unable to get local issuer certificate`; the release binaries carry certifi. To build `dist/AMDLSS.exe` you need a Windows Python 3 from python.org (the build was tested with 3.14) and, in Git Bash:
 
 ```
 bash packaging/build.sh
 ```
 
-The script makes a private virtual environment in `out/pyenv`, installs PyInstaller and Pillow there, and freezes `AMDLSS.pyw` into one windowed exe (about 19 MB with Pillow), with the DirectX 12 DLSS add-on bundled in. The add-on is built first, with `bash probe/dx12/dlss/build.sh` (needs Docker); the script stops if `probe/dx12/dlss/out/amdlss_dx12_dlss.addon64` is missing. It prints the SHA-256 of the exe. `packaging/make_icon.py` redraws `amdlss.ico` (needs Pillow).
+The script makes a private virtual environment in `out/pyenv`, installs PyInstaller, Pillow and certifi there, and freezes `AMDLSS.pyw` into one windowed exe (about 19 MB with Pillow), with the DirectX 12 DLSS add-on bundled in. The add-on is built first, with `bash probe/dx12/dlss/build.sh` (needs Docker); the script stops if `probe/dx12/dlss/out/amdlss_dx12_dlss.addon64` is missing. It prints the SHA-256 of the exe. `packaging/make_icon.py` redraws `amdlss.ico` (needs Pillow).
 
 ## Tests
 

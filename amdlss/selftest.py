@@ -446,6 +446,15 @@ def check_zip_slip():
     raise AssertionError('a zip with a path outside the folder was accepted')
 
 
+def check_net():
+    """A release build without certifi fails every request on a Windows PC that never cached GitHub's root CAs."""
+    if not update.FROZEN:
+        return
+    assert net.certifi is not None, 'the build carries no certifi'
+    names = {dict(pair[0] for pair in cert['subject']).get('commonName') for cert in net.context().get_ca_certs()}
+    assert {'USERTrust ECC Certification Authority', 'ISRG Root X1'} <= names, names
+
+
 def check_update():
     order = ['0.1.0-beta.3', '0.1.0-beta.4', '0.1.0-beta.10', '0.1.0']
     assert [update.version_tuple(v) for v in order] == sorted(update.version_tuple(v) for v in order)
@@ -555,7 +564,7 @@ def check_fsr4():
 def run():
     for check in (check_parsing, check_game_rules, check_routes, check_visibility, check_unsafe_folder, check_framegen, check_logging_switch,
                   check_collect_logs, check_history_and_crashes, check_streamline, check_hang_and_unreal, check_reports,
-                  check_helixsr, check_scaler, check_luma, check_dx12inject, check_running_game, check_zip_slip, check_update,
+                  check_helixsr, check_scaler, check_luma, check_dx12inject, check_running_game, check_zip_slip, check_net, check_update,
                   check_identify, check_covers, check_fsr4):
         check()
         print(f'ok  {check.__name__}')

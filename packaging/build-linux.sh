@@ -10,8 +10,9 @@ cd -- "$(dirname -- "$0")/.."
 ADDON=probe/dx12/dlss/out/amdlss_dx12_dlss.addon64
 [ -f "$ADDON" ] || { echo "missing $ADDON: run 'bash probe/dx12/dlss/build.sh' first" >&2; exit 1; }
 
-# Pillow decodes the game covers (Tk cannot read JPEG); the binary needs it and its Tk bridge.
-uv run --no-project --managed-python --python 3.12 --with pyinstaller --with pillow python -m PyInstaller \
+# Pillow decodes the game covers (Tk cannot read JPEG); the binary needs it and its Tk bridge. certifi carries the root
+# CAs a system store may lack (amdlss/net.py); the selftest fails a build without it.
+uv run --no-project --managed-python --python 3.12 --with pyinstaller --with pillow --with certifi python -m PyInstaller \
     --noconfirm --clean --log-level WARN --windowed --onefile \
     --name AMDLSS-linux-x86_64 --add-data "$PWD/amdlss.ico:." \
     --add-data "$PWD/$ADDON:dx12dlss" --add-data "$PWD/probe/dx12/dlss/amdlss_dx12_dlss.ini:dx12dlss" \

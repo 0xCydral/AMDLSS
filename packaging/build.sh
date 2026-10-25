@@ -26,6 +26,9 @@ out/pyenv/Scripts/python.exe -c 'import PyInstaller' 2>/dev/null ||
 # Pillow decodes the game covers (Tk cannot read JPEG); the exe needs it and its Tk bridge.
 out/pyenv/Scripts/python.exe -c 'import PIL.ImageTk' 2>/dev/null ||
     out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pillow
+# certifi: the root CAs a Windows store may not have cached yet (amdlss/net.py); the selftest fails an exe without it.
+out/pyenv/Scripts/python.exe -c 'import certifi' 2>/dev/null ||
+    out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check certifi
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed --onefile \
     --name AMDLSS --icon "$(cygpath -w "$PWD/amdlss.ico")" --add-data "$(cygpath -w "$PWD/amdlss.ico");." \
     --add-data "$(cygpath -w "$PWD/$ADDON");dx12dlss" \

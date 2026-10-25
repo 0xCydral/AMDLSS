@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import (VERSION, covers, dx12inject, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, luma,
+from . import (VERSION, covers, dx12inject, framegen, fsr4, games as gamelist, gpu, helixsr, host, logs, luma, net,
                reports, settings, update)
 from .ui import (BG, BLOOD, BLOOD_HI, CAUTION, CARD, COVER_ART, DIM, FIELD, GLYPH_COLORS, LINE, LINE_HI, MUTED, TEXT,
                  Bar, Card, FlatButton, Gallery, Look, logo, magnifier, mix, plain, segmented, short_path)
@@ -1132,6 +1132,7 @@ class App:
 
 def main(argv):
     host.restore_library_path()
+    net.install()
     if '--selftest' in argv and '--update' not in argv:
         from .selftest import run
         return run()
