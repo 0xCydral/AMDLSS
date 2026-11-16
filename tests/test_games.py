@@ -5,7 +5,7 @@ import ntpath
 import os
 import posixpath
 
-from amdlss import games
+from amdlss import framegen, games
 
 PRINTED = '''[helixsr-setup] looking for games with DLSS, XeSS or FSR ...
     1. Aniimo                                       FSR 3.1 (HelixSR replaces the game's FSR DLL: select AMD FSR in the game)
@@ -54,7 +54,7 @@ def test_state_and_route_texts():
 def test_after_text_says_what_to_choose():
     assert 'choose AMD FSR' in games.after_text(games.Game(name='G', route='direct'))
     text = games.after_text(games.Game(name='G', route='optiscaler'))
-    assert 'choose DLSS' in text and 'Insert' in text
+    assert 'choose DLSS' in text and framegen.MENU_KEY_NAME in text
 
 
 def test_plan_text_warns_and_names_the_files():

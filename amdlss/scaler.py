@@ -26,7 +26,7 @@ import shutil
 from pathlib import Path
 
 from . import VERSION as APP_VERSION
-from . import helixsr, pe
+from . import framegen, helixsr, pe
 from .helixsr import HelixSRError
 
 VERSION = '1.0.3'
@@ -383,6 +383,11 @@ def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=N
                     item['sha256'] = helixsr.sha256_of(ini)
     record_path(exe).write_text(json.dumps(record, indent=1), encoding='utf-8')
     _say(on_line, install_notes(fresh, exe, name, record))
+    try:   # the menu key: the ini's own Insert is missing on many laptop keyboards, so it becomes F8 (a key the
+        if framegen.apply_default(exe, True, data_dir, framegen.MENU_KEY):   # player set is never overwritten)
+            _say(on_line, [f'{INI}: the menu key is {framegen.MENU_KEY_NAME}'])
+    except (HelixSRError, OSError) as error:
+        _say(on_line, [f'{INI}: the menu key was left as it is ({error})'])
     fresh.state, fresh.route, fresh.upscaler = 'optiscaler', 'optiscaler', ''
     return fresh
 

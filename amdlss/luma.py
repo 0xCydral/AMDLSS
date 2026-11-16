@@ -53,7 +53,17 @@ SCALER_NAME = 'dxgi.dll'                      # what OptiScaler is called next t
 RESHADE = 'ReShade64.dll'                     # what Luma's dxgi.dll becomes: the name OptiScaler loads it under
 RENAME = {SCALER_NAME: RESHADE}
 RECORD = 'amdlss-luma.json'                   # AMDLSS's record, inside the game's HelixSR folder
-SETTINGS = 'Luma.ini'                         # Luma's own settings file, written by its overlay (never by AMDLSS)
+RESHADE_INI = 'ReShade.ini'                   # where Luma's own ReShade build keeps its settings (the game's .exe folder)
+OVERLAY_KEY = 'Ctrl + Shift + F7'             # what the texts call ReShade's overlay key (the value AMDLSS writes)
+# Luma UE's own settings. ReShade reads ReShade.ini before the game starts, and Luma reads it through ReShade's config
+# API under the section "Luma" (LumaFramework globals.h MOD_NAME, core.hpp get_config_value): SRUserType is its
+# Upscaler/Super Resolution choice (0 None, 1 Auto, 2 DLSS, 3 FSR 3), so 2 runs the DLSS call HelixSR executes with
+# nothing to open; KeyOverlay is ReShade's own overlay key (virtual key, ctrl, shift, alt; 118 = F7). Both go in
+# through apply_default: only where the file has no line or still holds the tool's own value (its default for
+# KeyOverlay is Home, 36,0,0,0), so a choice the player made is never overwritten.
+SRUSER = framegen.Setting(b'Luma', {'SRUserType': '2'}, '#lumasr', ini=RESHADE_INI)
+OVERLAY = framegen.Setting(b'INPUT', {'KeyOverlay': '118,1,1,0'}, '#overlay', ini=RESHADE_INI,
+                           defaults=('36,0,0,0',))
 
 
 def install_folder(data_dir):
@@ -241,6 +251,10 @@ def plan_text(game):
             f"{FULL_NAME} replaces the game's TAA with a DLSS call, and HelixSR Scaler runs that call on your card, "
             f"the way it runs a game's own DLSS. It needs the game to run in DirectX 11; some games need a '-dx11' "
             f"launch option for that, and AMDLSS cannot check it for you.\n\n"
+            f"AMDLSS also sets two values in {RESHADE_INI} next to the .exe: Luma runs DLSS without opening "
+            f"anything, and Luma's overlay opens with {OVERLAY_KEY} (OptiScaler's menu with "
+            f"{framegen.MENU_KEY_NAME}), since Home and Insert are missing on many laptop keyboards. Remove puts "
+            f"those values back.\n\n"
             f"Files it replaces are kept in the HelixSR folder's {scaler.BACKUP} and put back by Remove.\n\n"
             f'{gamelist.WARNINGS}\n\nInstall into {game.name}?')
 
@@ -248,9 +262,11 @@ def plan_text(game):
 def after_text(game):
     """What to do in the game once the injection is installed."""
     return (f"{FULL_NAME} build {BUILD} is installed in {game.name}, with HelixSR Scaler {scaler.VERSION}.\n\n"
-            f"Start the game and press Home: Luma's overlay (with ReShade's) opens. Set 'Upscaler/Super Resolution' "
-            f"to DLSS - the game's own menu has no upscaler entry, and this is the call HelixSR runs. Press Insert "
-            f"for OptiScaler's overlay: it should name DLSS as the input.\n\n"
+            f"Start the game: AMDLSS set Luma's 'Upscaler/Super Resolution' to DLSS in {RESHADE_INI}, so the DLSS "
+            f"call HelixSR runs needs nothing opened (the game's own menu has no upscaler entry). Luma's overlay "
+            f"(ReShade's) opens with {OVERLAY_KEY} and OptiScaler's menu with {framegen.MENU_KEY_NAME} - both keys "
+            f"are AMDLSS's, since Home and Insert are missing on many laptop keyboards. It is in that overlay that "
+            f"the upscaler can be changed back. OptiScaler's menu should name DLSS as the input.\n\n"
             f"If the frame rate is capped like Vsync, turn Vsync off in OptiScaler's overlay. If the game crashes or "
             f"shows a non-DirectX 11 device error, set DontCreateD3D12DeviceForLuma=true in its OptiScaler.ini.\n\n"
             f"Luma UE is experimental here: the pairing is the one its and OptiScaler's authors document and test, "
@@ -307,6 +323,18 @@ def install_game(helix, game, extras=(), data_dir=None, on_line=None, progress=N
     except (HelixSRError, OSError) as error:
         raise HelixSRError(f'{NAME} and HelixSR Scaler are installed in {game.name}, but {scaler.INI} could not be '
                            f'set to load it ({error}). Press Remove, then Install again.')
+    try:   # Luma's own settings, in the ReShade.ini its build reads next to the .exe: DLSS runs with nothing opened
+        made = not (exe / RESHADE_INI).exists()   # and the overlay key is one every keyboard has. apply_default
+        if framegen.apply_default(exe, True, data_dir, SRUSER):   # never overwrites a value the player picked
+            _say(on_line, [f'{RESHADE_INI}: Luma now runs DLSS by itself (SRUserType=2)'])
+        if framegen.apply_default(exe, True, data_dir, OVERLAY):
+            _say(on_line, [f'{RESHADE_INI}: Luma\'s overlay opens with {OVERLAY_KEY}'])
+        if made and (exe / RESHADE_INI).is_file():
+            record['created'].append({'name': RESHADE_INI, 'sha256': helixsr.sha256_of(exe / RESHADE_INI)})
+            record_path(exe).write_text(json.dumps(record, indent=1), encoding='utf-8')
+    except (HelixSRError, OSError) as error:
+        raise HelixSRError(f'{NAME} and HelixSR Scaler are installed in {game.name}, but {RESHADE_INI} could not be '
+                           f'set up ({error}). Press Remove, then Install again.')
     after.state, after.route, after.upscaler = gamelist.INJECT, gamelist.INJECT, ''
     return after
 
@@ -322,6 +350,11 @@ def remove_game(helix, game, extras=(), data_dir=None, on_line=None):
         if scaler.installed(exe):
             _say(on_line, scaler.remove(exe))
         if data_dir:
+            for setting in (SRUSER, OVERLAY):   # put back what the file still holds of ours (a value the player
+                try:                            # changed is left alone); remove() took the whole file already
+                    framegen.apply_default(exe, False, data_dir, setting)   # when nothing had touched it
+                except (HelixSRError, OSError):
+                    pass                        # a settings file we cannot write never stops a Remove
             framegen.forget(exe, data_dir)
     fresh.state, fresh.route, fresh.upscaler = 'none', '', ''
     return fresh

@@ -133,6 +133,65 @@ def test_forget_drops_the_record(exe, tmp_path):
     assert not (tmp_path / framegen.RECORD).exists()
 
 
+# --- a value that goes in only where the ini still holds the tool's own default (the menu key, ReShade.ini) --------
+
+MENU = b'[Menu]\r\n; Shortcut key for opening menu\r\nShortcutKey=auto\r\n\r\n[Other]\r\nx=1\r\n'
+
+
+def test_the_menu_key_goes_in_where_the_ini_says_auto(exe, tmp_path):
+    (exe / 'OptiScaler.ini').write_bytes(MENU)
+    assert framegen.apply_default(exe, True, tmp_path, framegen.MENU_KEY)
+    assert ini(exe) == MENU.replace(b'ShortcutKey=auto', b'ShortcutKey=0x77')   # F8: Insert is missing on laptops
+    assert not framegen.apply_default(exe, True, tmp_path, framegen.MENU_KEY)   # already ours
+    assert framegen.apply_default(exe, False, tmp_path, framegen.MENU_KEY)
+    assert ini(exe) == MENU and not (tmp_path / framegen.RECORD).exists()
+
+
+def test_a_menu_key_the_player_set_is_never_touched(exe, tmp_path):
+    mine = MENU.replace(b'ShortcutKey=auto', b'ShortcutKey=0x2d')
+    (exe / 'OptiScaler.ini').write_bytes(mine)
+    assert not framegen.apply_default(exe, True, tmp_path, framegen.MENU_KEY)
+    assert not framegen.apply_default(exe, False, tmp_path, framegen.MENU_KEY)
+    assert ini(exe) == mine
+
+
+def test_a_line_the_ini_lacks_is_added_and_dropped_again(exe, tmp_path):
+    bare = b'[Menu]\r\nOther=1\r\n'
+    (exe / 'OptiScaler.ini').write_bytes(bare)
+    assert framegen.apply_default(exe, True, tmp_path, framegen.MENU_KEY)
+    assert ini(exe) == b'[Menu]\r\nOther=1\r\nShortcutKey=0x77\r\n'
+    assert framegen.apply_default(exe, False, tmp_path, framegen.MENU_KEY)
+    assert ini(exe) == bare
+
+
+def test_a_menu_key_the_player_changed_after_is_not_put_back(exe, tmp_path):
+    (exe / 'OptiScaler.ini').write_bytes(MENU)
+    framegen.apply_default(exe, True, tmp_path, framegen.MENU_KEY)
+    edited = ini(exe).replace(b'ShortcutKey=0x77', b'ShortcutKey=0x2d')
+    (exe / 'OptiScaler.ini').write_bytes(edited)
+    assert not framegen.apply_default(exe, False, tmp_path, framegen.MENU_KEY)
+    assert ini(exe) == edited
+
+
+def test_a_missing_file_is_created_and_its_value_dropped_again(exe, tmp_path):
+    """The injected route's ReShade.ini is not there before its first run: its values are written into a new file,
+    and off drops what was added (the whole file goes when nothing else wrote to it)."""
+    setting = framegen.Setting(b'INPUT', {'KeyOverlay': '118,1,1,0'}, '#overlay', ini='ReShade.ini')
+    assert framegen.apply_default(exe, True, tmp_path, setting)
+    assert (exe / 'ReShade.ini').read_bytes() == b'[INPUT]\r\nKeyOverlay=118,1,1,0\r\n'
+    assert framegen.apply_default(exe, False, tmp_path, setting)
+    assert (exe / 'ReShade.ini').read_bytes() == b''      # the section we added goes with our line
+    framegen.forget(exe, tmp_path)
+    assert not (tmp_path / framegen.RECORD).exists()      # its record goes with the other inis'
+
+
+def test_a_section_the_ini_lacks_is_added_with_its_key(exe, tmp_path):
+    setting = framegen.Setting(b'INPUT', {'KeyOverlay': '118,1,1,0'}, '#overlay', ini='ReShade.ini')
+    (exe / 'ReShade.ini').write_bytes(b'[GENERAL]\r\nPreprocessorDefinitions=\r\n')
+    assert framegen.apply_default(exe, True, tmp_path, setting)
+    assert (exe / 'ReShade.ini').read_bytes() == b'[GENERAL]\r\nPreprocessorDefinitions=\r\n[INPUT]\r\nKeyOverlay=118,1,1,0\r\n'
+
+
 def test_a_file_without_the_lines_is_an_error_not_a_guess(exe, tmp_path):
     (exe / 'OptiScaler.ini').write_bytes(b'[Upscalers]\r\nDx12Upscaler = fsr31\r\n')
     with pytest.raises(helixsr.HelixSRError, match='FGInput'):

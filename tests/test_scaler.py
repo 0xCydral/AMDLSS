@@ -221,12 +221,13 @@ def test_install_game_then_update_then_remove(tmp_path):
     assert after.state == 'optiscaler' and scaler.installed(one)
     assert (one / 'dxgi.dll').read_bytes() == b'STAND-IN OptiScaler.dll'
     assert (one / 'amd_fidelityfx_upscaler_dx12.dll').read_bytes() == b'GAME ORIGINAL'   # the drop-in was not used
-    assert (one / 'OptiScaler.ini').read_bytes() == INI                                   # the package's own ini
+    assert (one / 'OptiScaler.ini').read_bytes() == INI.replace(b'ShortcutKey=auto',
+                                                                b'ShortcutKey=0x77')   # the menu key became F8
     assert scaler.mark(client.list_games()[0]).state == 'optiscaler'   # a fresh list sees the record
-    # an update keeps the settings the user made in OptiScaler.ini
+    # an update keeps the settings the user made in OptiScaler.ini (and gives their ini the menu key too)
     (one / 'OptiScaler.ini').write_bytes(b'[FrameGen]\r\nFGInput=nvngxfg\r\n')
     after = scaler.install_game(client, entry, [], data)
-    assert (one / 'OptiScaler.ini').read_bytes() == b'[FrameGen]\r\nFGInput=nvngxfg\r\n'
+    assert (one / 'OptiScaler.ini').read_bytes() == b'[FrameGen]\r\nFGInput=nvngxfg\r\n[Menu]\r\nShortcutKey=0x77\r\n'
     assert scaler.installed(one) and after.state == 'optiscaler'
     # Remove through the app's own path puts every file back
     fsr4.remove_game(client, scaler.mark(client.list_games()[0]), [], data)
@@ -358,7 +359,8 @@ def test_updating_the_reported_wukong_state_moves_the_leftovers_and_leaves_frame
                                               strings={'ProductName': 'OptiScaler',
                                                        'OriginalFilename': 'OptiScaler.dll'}))
     (one / 'ReShade64.dll').write_bytes(b'MZ' + b'OptiScaler' + b'\0' * 32)
-    assert not (data / framegen.RECORD).exists()                    # the tester had no frame generation record
+    record = json.loads((data / framegen.RECORD).read_text(encoding='utf-8'))
+    assert set(record) == {framegen._record_key(one, framegen.MENU_KEY)}   # the menu key, and no frame generation
     lines = []
     after = scaler.install_game(client, client.list_games()[0], [], data,
                                 on_line=lambda text, final=True: lines.append(text))   # the app's Update

@@ -15,6 +15,7 @@ INI = (b'; header\r\n'
        b'PreserveSwapChain=auto\r\nFTInput=auto\r\n\r\n'
        b'[Other]\r\nKey = 1\r\nFGInput=decoy\r\n\r\n'
        b'[Log]\r\nLogToFile=auto\r\nLogLevel=auto\r\n\r\n'
+       b'[Menu]\r\n; Shortcut key for opening menu\r\nShortcutKey=auto\r\n\r\n'
        b'[Libraries]\r\nFfxDx12Path=auto\r\nFfxDx12SRPath=auto\r\n\r\n'
        b'[Plugins]\r\n; Loads Reshade64.dll from game\'s exe folder\r\nLoadAsiPlugins=auto\r\nLoadReshade=auto\r\n')
 LISTED = ('OptiScaler.dll', 'OptiScaler.ini', 'OptiScaler/amd_fidelityfx_upscaler_dx12.dll',

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The two small OptiScaler.ini switches AMDLSS makes for games installed through the OptiScaler route.
+"""The small OptiScaler.ini switches AMDLSS makes for games installed through the OptiScaler route (the injected route
+reads Luma's ReShade.ini through the same mechanism, amdlss.luma).
 
 Frame generation (opt-in). Some games (Dragon's Dogma 2) offer only NVIDIA's DLSS Frame Generation, which cannot run on
 AMD. OptiScaler 0.9.4 can take the game's DLSS FG calls as its input and run AMD's FSR frame generation as the output:
@@ -25,8 +26,17 @@ values in the OptiScaler.ini HelixSR placed there; every other byte of the file 
 held before are kept in AMDLSS's data folder (framegen.json), and a game with frame generation off has the off values
 written out (see OFF): Scaler reads its own auto as "run HelixSR's frame generation once the helixsr-fg files are
 there", so off must be said, or every Scaler install turns DLSS 4 frame generation on by itself.
+
+The menu key (every install). OptiScaler.ini ships "ShortcutKey=auto", which OptiScaler reads as Insert (0x2D; older
+builds used Home, 0x24) - two keys many laptop keyboards do not have. Every Scaler install gets F8 instead, through
+apply_default, which writes ours only where the file still holds its own auto or no line at all: a key the player set
+by hand is never overwritten, and Remove puts what was there back. The same applies AMDLSS's values to an ini that may
+not hold the key at all (amdlss.luma's ReShade.ini: [INPUT] KeyOverlay) or that ships its own default ([Luma]
+SRUserType); `ini` names the file a Setting lives in.
+
 HelixSR's own uninstall restores or deletes OptiScaler.ini, so Remove needs no help from here beyond forget() dropping
-the records (and the OptiScaler.log that our logging switch made).
+the records (and the OptiScaler.log that our logging switch made). A ReShade.ini the injected route created is kept in
+that route's own file record instead (amdlss-luma.json), so Remove deletes it while it is untouched.
 """
 import json
 import os
@@ -37,8 +47,12 @@ from pathlib import Path
 from .helixsr import HelixSRError
 
 # One switch: the [section] and the values that mean "on"; `tag` keeps its record apart in framegen.json; `optional`
-# names the keys an ini may lack (they are skipped, not an error).
-Setting = namedtuple('Setting', 'section values tag optional', defaults=((),))
+# names the keys an ini may lack (they are skipped, not an error); `ini` is the file it lives in, and `defaults` the
+# values that mean "nobody chose" (apply_default writes ours only where the file holds one of those, or no line).
+RECORD = 'framegen.json'
+INI = 'OptiScaler.ini'
+LOG = 'OptiScaler.log'
+Setting = namedtuple('Setting', 'section values tag optional ini defaults', defaults=((), INI, ()))
 ON = {'FGInput': 'dlssg', 'FGOutput': 'fsrfg'}
 SECTION = b'FrameGen'
 FRAMEGEN = Setting(SECTION, {'Enabled': 'true', **ON, 'PreserveSwapChain': 'false'}, '',
@@ -47,6 +61,11 @@ LOGGING = Setting(b'Log', {'LogToFile': 'true', 'LogLevel': '2'}, '#log')
 # amdlss.luma's route: OptiScaler loads the ReShade build Luma UE is (renamed ReShade64.dll) from the game's .exe
 # folder. Scaler's own ini ships "LoadReshade = auto", which OptiScaler reads as false, so the key must be written.
 RESHADE = Setting(b'Plugins', {'LoadReshade': 'true'}, '#reshade')
+# The OptiScaler menu key, for every Scaler install: the ini ships "auto", which OptiScaler reads as Insert, a key
+# many laptop keyboards do not have. F8 exists on every keyboard and is not one Steam (F12 is its screenshot key),
+# OptiScaler itself (PageUp, PageDown, End) or many games bind; a key the player set is never overwritten.
+MENU_KEY = Setting(b'Menu', {'ShortcutKey': '0x77'}, '#menukey', defaults=('auto',))
+MENU_KEY_NAME = 'F8'                          # what the window and the logs call it
 # The frame generation generator: AMD FSR's (OptiScaler turns the game's DLSS Frame Generation into FSR frames) or
 # HelixSR's own experimental DLSS 4 mode (the game's DLSS Frame Generation runs HelixSR's network on any GPU, from
 # the helixsr-fg files; FGInput=nvngxfg makes OptiScaler leave FGOutput alone, dllmain.cpp).
@@ -69,13 +88,11 @@ def off_values(setting):
         if candidate == setting:
             return values
     return {}
-RECORD = 'framegen.json'
-INI = 'OptiScaler.ini'
-LOG = 'OptiScaler.log'
 
 
-def ini_path(exe_folder):
-    return Path(exe_folder) / INI
+def ini_path(exe_folder, setting=FRAMEGEN):
+    """The ini the setting lives in, next to the game's .exe."""
+    return Path(exe_folder) / setting.ini
 
 
 def _section(data, section):
@@ -115,6 +132,48 @@ def set_values(data, values, setting=FRAMEGEN):
     return data
 
 
+def _read_keys(data, setting):
+    """{key: value or None} for the setting's keys in the file (None: the file has no line for it)."""
+    span = _section(data, setting.section)
+    values = {}
+    for name in setting.values:
+        match = _key(name).search(data, *span) if span else None
+        values[name] = match.group('val').decode('utf-8', errors='replace') if match else None
+    return values
+
+
+def _put(data, section, name, value):
+    """The ini bytes with [section] name set to `value`: an existing line is rewritten, a missing line is added to
+    the section (a missing section is appended), so a key the ini does not have can still be given a value."""
+    span = _section(data, section)
+    if span:
+        match = _key(name).search(data, *span)
+        if match:
+            return data[:match.start('val')] + value.encode() + data[match.end('val'):]
+        end = span[1]
+        gap = b'' if data[span[0]:end].endswith(b'\n') else b'\r\n'
+        return data[:end] + gap + name.encode() + b'=' + value.encode() + b'\r\n' + data[end:]
+    gap = b'' if not data or data.endswith(b'\n') else b'\r\n'
+    return data + gap + b'[' + section + b']\r\n' + name.encode() + b'=' + value.encode() + b'\r\n'
+
+
+def _drop(data, section, name):
+    """The ini bytes with the [section] name line removed, when the file has one; a section left with no line of its
+    own goes with it, so a value added to a file AMDLSS did not create is taken out byte for byte."""
+    span = _section(data, section)
+    match = _key(name).search(data, *span) if span else None
+    if not match:
+        return data
+    tail = data[match.end():]
+    cut = 2 if tail.startswith(b'\r\n') else 1 if tail.startswith(b'\n') else 0
+    data = data[:match.start()] + data[match.end() + cut:]
+    span = _section(data, section)
+    if span and not re.search(rb'(?m)^[ \t]*\S', data[span[0]:span[1]]):   # blank lines only: the section is empty
+        head = re.search(rb'(?m)^\[' + re.escape(section) + rb'\][ \t]*\r?\n?', data)
+        data = data[:head.start()] + data[head.end():]
+    return data
+
+
 def _holds(current, setting, names):
     """True when every one of `names` has the setting's "on" value in `current`."""
     return all(current.get(name) == setting.values[name] for name in names)
@@ -124,7 +183,7 @@ def is_on(exe_folder, setting=FRAMEGEN):
     """True when the game's OptiScaler.ini holds the setting's required "on" values (False when unreadable). An
     optional key still at its old value does not count, so a game switched on before it existed shows as on."""
     try:
-        current = read_values(ini_path(exe_folder).read_bytes(), setting)
+        current = read_values(ini_path(exe_folder, setting).read_bytes(), setting)
         return _holds(current, setting, [name for name in setting.values if name not in setting.optional])
     except (OSError, HelixSRError):
         return False
@@ -147,7 +206,7 @@ def write_off(exe_folder, setting):
     """Writes the setting's own "off" values (OFF), so it never stays at Scaler's auto, which Scaler resolves to
     HelixSR's frame generation once its files are there. A file without the setting's section cannot hold them and
     is left as it is. Returns True when the file changed."""
-    path = ini_path(exe_folder)
+    path = ini_path(exe_folder, setting)
     try:
         data = path.read_bytes()
     except OSError as error:
@@ -192,7 +251,7 @@ DLSS4_OFF = ((HELIX_FG, off_values(HELIX_FG)),
 def _holds_any(exe_folder, setting):
     """True when the file holds any one of the setting's "on" values (the other may already be off)."""
     try:
-        current = read_values(ini_path(exe_folder).read_bytes(), setting)
+        current = read_values(ini_path(exe_folder, setting).read_bytes(), setting)
     except (OSError, HelixSRError):
         return False
     return any(current.get(name) == value for name, value in setting.values.items())
@@ -207,7 +266,7 @@ def clear_dlss4(exe_folder, data_dir=None):
     for setting, defaults in DLSS4_OFF:
         if not _holds_any(exe_folder, setting):
             continue
-        path = ini_path(exe_folder)
+        path = ini_path(exe_folder, setting)
         try:
             data = path.read_bytes()
         except OSError as error:
@@ -229,7 +288,7 @@ def clear_dlss4(exe_folder, data_dir=None):
 # --- the record of what the file held before ---------------------------------------------------------------------
 
 def _record_key(exe_folder, setting=FRAMEGEN):
-    return os.path.normcase(os.path.realpath(ini_path(exe_folder))) + setting.tag
+    return os.path.normcase(os.path.realpath(ini_path(exe_folder, setting))) + setting.tag
 
 
 def _load(data_dir):
@@ -260,7 +319,7 @@ def apply(exe_folder, on, data_dir, setting=FRAMEGEN):
     (unless it already holds ours) and sets ours; a key already ours keeps the value remembered earlier, so a game
     switched on by an older AMDLSS gains a new key without losing what it first held. Off: puts the remembered values
     back, only while the file still holds ours. Returns True when the file changed."""
-    path = ini_path(exe_folder)
+    path = ini_path(exe_folder, setting)
     try:
         data = path.read_bytes()
     except OSError as error:
@@ -290,12 +349,63 @@ def apply(exe_folder, on, data_dir, setting=FRAMEGEN):
     return True
 
 
+def apply_default(exe_folder, on, data_dir, setting):
+    """Writes the setting's own value where the file still holds what the tool itself ships (setting.defaults, e.g.
+    "auto") or has no line for the key at all, so a value the player set is never overwritten. On: remembers what the
+    file held (None for a key it had no line for) in the record and writes ours; a key already ours keeps the value
+    remembered earlier. Off: puts the remembered state back, only while the file still holds exactly ours (a line we
+    added is dropped again). Returns True when the file changed."""
+    path = ini_path(exe_folder, setting)
+    records, key = _load(data_dir), _record_key(exe_folder, setting)
+    try:
+        data = path.read_bytes()
+    except OSError:
+        if not on:
+            if records.pop(key, None) is not None:
+                _save(data_dir, records)    # the file is gone: its record goes with it
+            return False
+        data = b''                          # no file yet: it is ours to make and fill
+    if on:
+        current = _read_keys(data, setting)
+        before, changed = dict(records.get(key, {})), False
+        for name, ours in setting.values.items():
+            value = current.get(name)
+            if value == ours:
+                continue                    # already ours: the record keeps what the file held first
+            if value is not None and value.strip().lower() != ours.lower() \
+                    and value.strip().lower() not in {item.lower() for item in setting.defaults}:
+                continue                    # the player's own value: never overwritten
+            if name not in before:
+                before[name] = value        # None when the file had no line for the key
+            data, changed = _put(data, setting.section, name, ours), True
+        if changed:
+            records[key] = before
+            _write(path, data)
+            _save(data_dir, records)
+        return changed
+    before = records.pop(key, None)
+    if before is None:
+        return False
+    changed = False
+    if before:
+        current = _read_keys(data, setting)
+        for name, old in before.items():
+            if current.get(name) != setting.values.get(name):
+                continue                    # the player changed it (or removed the line): not ours to put back
+            data = _drop(data, setting.section, name) if old is None else _put(data, setting.section, name, old)
+            changed = True
+        if changed:
+            _write(path, data)
+    _save(data_dir, records)
+    return changed
+
+
 def forget(exe_folder, data_dir):
-    """Drops every record of a game HelixSR was just removed from (this module's and amdlss.fsr4's). When our logging
-    switch was on there, the OptiScaler.log it made is deleted too (HelixSR deletes the log only for an OptiScaler.ini
-    it created itself)."""
+    """Drops every record of a game HelixSR was just removed from (this module's, amdlss.fsr4's and amdlss.luma's
+    ReShade.ini values). When our logging switch was on there, the OptiScaler.log it made is deleted too (HelixSR
+    deletes the log only for an OptiScaler.ini it created itself)."""
     records = _load(data_dir)
-    base = _record_key(exe_folder)
+    base = os.path.normcase(os.path.realpath(exe_folder)).rstrip('\\/') + os.sep   # every ini in that folder
     logged = _record_key(exe_folder, LOGGING) in records
     gone = [key for key in records if key.startswith(base)]
     for key in gone:

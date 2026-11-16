@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from amdlss import fsr4, games, gpu, helixsr, settings
+from amdlss import framegen, fsr4, games, gpu, helixsr, settings
 from test_pe import build_dll
 
 AMD_BYTES = build_dll(version=(4, 1, 1, 2740))
@@ -207,6 +207,6 @@ def test_the_after_text_says_what_to_pick_in_the_game(tmp_path):
     drop = fsr4.after_text(game(name='Fable'), 'direct', source)
     assert 'FSR 4.1.1 is installed in Fable' in drop and 'choose AMD FSR' in drop and 'your DLL 4.1.1.9' in drop
     opti = fsr4.after_text(game(name='Fable'), 'optiscaler', source, generator='amd')
-    assert 'choose DLSS' in opti and 'FFX Upscaler' in opti and 'Insert' in opti and 'watermark' in opti
+    assert 'choose DLSS' in opti and 'FFX Upscaler' in opti and framegen.MENU_KEY_NAME in opti and 'watermark' in opti
     assert games.FRAMEGEN_HINT in opti and games.FRAMEGEN_HINT not in fsr4.after_text(game(), 'optiscaler', source)
     assert games.FRAMEGEN_DLSS4_HINT in fsr4.after_text(game(), 'optiscaler', source, generator='dlss4')

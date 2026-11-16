@@ -19,9 +19,10 @@ STATE_TEXT = {'none': 'not installed', 'direct': 'FSR drop-in', 'optiscaler': 'O
               'dlss': 'DLSS loader (experimental)', 'fsr4': 'FSR 4.1.1 drop-in', 'unknown': 'installed',
               'inject': 'DLSS injected (Luma UE)'}
 # What to pick in the game's menu, as HelixSR's setup reports it (helixsr_install.in_game). The injected route has no
-# entry of its own in the game: what it runs is chosen in Luma's own overlay.
+# entry of its own in the game: AMDLSS sets Luma's own upscaler choice in ReShade.ini (amdlss.luma), and Luma writes
+# that value back if the player changes it in its overlay.
 IN_GAME = {'direct': 'AMD FSR', 'optiscaler': 'DLSS', 'dlss': 'DLSS', 'fsr4': 'AMD FSR',
-           'inject': "DLSS in Luma's menu (press Home)"}
+           'inject': 'DLSS (AMDLSS sets it)'}
 
 
 @dataclass
@@ -523,7 +524,7 @@ def after_text(game, frame_gen='', fallback=''):
     from . import framegen   # lazy: framegen imports helixsr, which imports this module
     text = f"HelixSR is installed in {game.name}.\n\nIn the game's graphics settings choose {game.in_game()}."
     if game.active_route == 'optiscaler':
-        text += " Press Insert in the game to open OptiScaler's menu."
+        text += f" Press {framegen.MENU_KEY_NAME} in the game to open OptiScaler's menu."
         if frame_gen == framegen.AMD:
             text += '\n\n' + FRAMEGEN_HINT
         elif frame_gen == framegen.DLSS4:

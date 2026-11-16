@@ -173,9 +173,12 @@ def test_the_texts_say_what_will_happen_and_what_to_check(tmp_path, game):
     plan = luma.plan_text(entry)
     assert luma.FULL_NAME in plan and luma.BUILD in plan and 'DirectX 11' in plan
     assert 'SHA-256' in plan and 'MIT' in plan and scaler.BACKUP in plan and games.WARNINGS in plan
+    assert luma.OVERLAY_KEY in plan and framegen.MENU_KEY_NAME in plan and luma.RESHADE_INI in plan
     after = luma.after_text(entry)
-    assert 'Home' in after and 'DLSS' in after and 'DontCreateD3D12DeviceForLuma' in after
+    assert luma.OVERLAY_KEY in after and framegen.MENU_KEY_NAME in after and 'DLSS' in after
+    assert 'DontCreateD3D12DeviceForLuma' in after
     assert 'experimental' in after and 'original files' in after
+    assert games.Game(name='One', route='inject').in_game() == 'DLSS (AMDLSS sets it)'
     assert luma.FULL_NAME in luma.ROW_NOTE and 'no upscaler' in luma.ROW_NOTE
     assert luma.NAME in luma.download_text(0, luma.ZIP_SIZE)
     assert 'HelixSR Scaler' in luma.download_text(0, scaler.ZIP_SIZE)   # Scaler's pinned size tells the two apart
@@ -244,7 +247,11 @@ def test_install_game_installs_luma_then_scaler_and_sets_loadreshade(tmp_path):
     assert luma.installed(exe) and scaler.installed(exe)
     ini = (exe / scaler.INI).read_bytes()
     assert b'LoadReshade=true' in ini and b'LoadReshade=auto' not in ini and ini.count(b'LoadReshade') == 1
+    assert b'ShortcutKey=0x77' in ini                         # OptiScaler's menu key: F8, since Insert may be missing
+    reshade = (exe / luma.RESHADE_INI).read_bytes()
+    assert b'SRUserType=2' in reshade and b'KeyOverlay=118,1,1,0' in reshade   # DLSS runs with nothing opened
     assert any('injected a DLSS call' in line for line in lines)
+    assert any('Luma now runs DLSS' in line for line in lines)
     assert any('LoadReshade=true' in line for line in lines)
     # Update: the same install again, keeping the settings the user made in OptiScaler.ini
     (exe / scaler.INI).write_bytes(ini + b'; the user added a line\r\n')
@@ -256,6 +263,31 @@ def test_install_game_installs_luma_then_scaler_and_sets_loadreshade(tmp_path):
     assert fresh.state == 'none' and not luma.installed(exe) and not scaler.installed(exe)
     assert tree(exe) == before
     assert not (data / framegen.RECORD).exists()   # the ini record goes with the install
+
+
+def test_a_player_value_in_reshade_ini_is_kept_and_put_back(tmp_path):
+    """ReShade.ini may be the player's own file (a ReShade they installed in the game). Our two values go in where
+    it holds the tool's own defaults and Remove gives exactly those bytes back."""
+    client, entry, data, exe = world(tmp_path)
+    own = b'[GENERAL]\r\nPreprocessorDefinitions=\r\n\r\n[INPUT]\r\nKeyOverlay=36,0,0,0\r\nKeyEffects=\r\n'
+    (exe / luma.RESHADE_INI).write_bytes(own)
+    before = tree(exe)
+    luma.install_game(client, entry, [], data)
+    text = (exe / luma.RESHADE_INI).read_bytes()
+    assert b'[GENERAL]' in text and b'KeyEffects=' in text           # the player's own file, kept as it was
+    assert b'SRUserType=2' in text and b'KeyOverlay=118,1,1,0' in text
+    luma.remove_game(client, scaler.mark(client.list_games()[0]), [], data)
+    assert (exe / luma.RESHADE_INI).read_bytes() == own and tree(exe) == before
+
+
+def test_a_key_the_player_set_in_reshade_ini_is_never_overwritten(tmp_path):
+    client, entry, data, exe = world(tmp_path)
+    chosen = b'[INPUT]\r\nKeyOverlay=119,0,0,0\r\n[Luma]\r\nSRUserType=3\r\n'
+    (exe / luma.RESHADE_INI).write_bytes(chosen)
+    luma.install_game(client, entry, [], data)
+    assert (exe / luma.RESHADE_INI).read_bytes() == chosen
+    luma.remove_game(client, scaler.mark(client.list_games()[0]), [], data)
+    assert (exe / luma.RESHADE_INI).read_bytes() == chosen
 
 
 def test_install_game_refuses_a_game_with_anti_cheat(tmp_path):

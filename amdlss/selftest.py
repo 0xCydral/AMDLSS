@@ -132,6 +132,15 @@ def check_framegen():
         assert b'FrameGeneration=off' in off and b'FGInput=nofg' in off and framegen.generator_of(folder) == ''
         assert framegen.apply_generator(folder, framegen.DLSS4, folder)
         assert framegen.apply_generator(folder, '', folder) and path.read_bytes() == off
+    menu = b'[Menu]\r\n; Shortcut key for opening menu\r\nShortcutKey=auto\r\n'
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / 'OptiScaler.ini'
+        path.write_bytes(menu)
+        assert framegen.apply_default(folder, True, folder, framegen.MENU_KEY)      # Insert: F8
+        assert b'ShortcutKey=0x77' in path.read_bytes()
+        assert framegen.apply_default(folder, False, folder, framegen.MENU_KEY) and path.read_bytes() == menu
+        path.write_bytes(menu.replace(b'auto', b'0x2d'))
+        assert not framegen.apply_default(folder, True, folder, framegen.MENU_KEY)  # a key the player set
     assert framegen.name_of(framegen.DLSS4) == 'DLSS 4 (HelixSR)' and framegen.name_of('') == 'off'
 
 
@@ -339,6 +348,16 @@ def check_luma():
         assert not luma.installed(game)
         assert (game / luma.DLSS).read_bytes() == b'the game already had one'
         assert sorted(p.name for p in game.iterdir()) == ['Game.exe', luma.DLSS]
+        # Luma's own settings (ReShade.ini, read by the build Luma ships): DLSS runs with nothing opened, and the
+        # overlay key is one every keyboard has; a value the player set is never touched, and off drops ours again
+        assert framegen.apply_default(game, True, folder, luma.SRUSER)
+        assert framegen.apply_default(game, True, folder, luma.OVERLAY)
+        text = (game / luma.RESHADE_INI).read_bytes()
+        assert b'SRUserType=2' in text and b'KeyOverlay=118,1,1,0' in text
+        assert framegen.apply_default(game, False, folder, luma.SRUSER)
+        assert framegen.apply_default(game, False, folder, luma.OVERLAY)
+        assert b'SRUserType' not in (game / luma.RESHADE_INI).read_bytes()
+        assert b'KeyOverlay' not in (game / luma.RESHADE_INI).read_bytes()
         # the layout: only an Unreal shipping folder with a shipping .exe in it counts, and never a 32-bit one
         binaries = root / 'Game' / 'Binaries' / 'Win64'
         binaries.mkdir(parents=True)

@@ -610,9 +610,9 @@ def after_text(game, route, source, generator='', fallback=''):
         text += "In the game's graphics settings choose AMD FSR."
     else:
         text += ("In the game's graphics settings choose DLSS (or XeSS if that is all it offers); it runs "
-                 f"{NAME}. Press Insert in the game to open OptiScaler's menu, then Upscaling > Upscalers > FFX "
-                 f"Upscaler, and pick {NAME}: the menu header names the version in use. To see it on screen, turn on "
-                 "the FSR 4 watermark in that menu.")
+                 f"{NAME}. Press {framegen.MENU_KEY_NAME} in the game to open OptiScaler's menu, then Upscaling > "
+                 f"Upscalers > FFX Upscaler, and pick {NAME}: the menu header names the version in use. To see it "
+                 "on screen, turn on the FSR 4 watermark in that menu.")
         if generator == framegen.AMD:
             text += '\n\n' + gamelist.FRAMEGEN_HINT
         elif generator == framegen.DLSS4:
