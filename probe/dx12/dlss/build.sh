@@ -3,7 +3,7 @@
 # Same MSVC-ABI clang-cl + xwin toolchain as the probe, inside Docker; nothing is installed on the host.
 # Run: bash probe/dx12/dlss/build.sh   (needs docker and git)
 #
-# Steps: fetch the NGX SDK and the Dear ImGui headers at pinned tags, compile velocity_decode.hlsl to DXIL with a pinned dxc and embed it,
+# Steps: fetch the NGX SDK and the Dear ImGui headers at pinned tags, compile velocity_decode.hlsl, half_fill.hlsl and camera_mv.hlsl to DXIL with a pinned dxc and embed them,
 # run selftest.cpp (the pure logic) on the Linux host of the container, then compile and link the add-on.
 set -euo pipefail
 
@@ -71,6 +71,9 @@ docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e DXC_URL="$DXC_U
     /opt/dxc/bin/dxc -T cs_6_0 -E main -Fo out/half_fill.dxil half_fill.hlsl
     echo "half_fill.dxil: $(stat -c %s out/half_fill.dxil) bytes"
     xxd -i -n g_half_dxil out/half_fill.dxil > out/half_dxil.h
+    /opt/dxc/bin/dxc -T cs_6_0 -E main -Fo out/camera_mv.dxil camera_mv.hlsl
+    echo "camera_mv.dxil: $(stat -c %s out/camera_mv.dxil) bytes"
+    xxd -i -n g_cammv_dxil out/camera_mv.dxil > out/cammv_dxil.h
 
     clang++ -std=c++17 -Wall -Wextra selftest.cpp -o /tmp/selftest
     /tmp/selftest

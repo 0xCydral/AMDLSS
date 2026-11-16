@@ -16,6 +16,11 @@
  * A trigger file next to the add-on (amdlss_dx12_dlss.dump) captures the next N upscale outputs, DLSS or the game's TSR, to
  * dump_seq/ as DDS files (see "frame-sequence dump" below and the README); seq_quality.py measures them.
  *
+ * UE4 games (Project Wingman, 4.27, D3D12) have no TSR: their TemporalAA compute shader (TAAU permutation, DXBC) is recognised by
+ * hash the same way. Its scene color, depth, velocity and output come from the SRV and UAV tables, its viewports and jitter from
+ * cb0 and the camera reprojection matrix from the View buffer cb1; camera_mv.hlsl builds the motion vectors. It is only replaced
+ * when the game renders at or below the output size (r.ScreenPercentage <= 100); at the game's default 150% its own TAA runs.
+ *
  * Known gaps, logged once: translucency u4 is not used and u2 (history metadata) is not written. u1, TSR's half-size
  * output that bloom and eye adaptation read, is filled from the DLSS output (ini fill_half_res).
  */
@@ -76,6 +81,7 @@ NVSDK_NGX_Result NVSDK_CONV evaluate_feature(ID3D12GraphicsCommandList *cl, cons
 #include <unordered_set>
 #include <vector>
 
+#include "cammv_dxil.h"
 #include "decode_dxil.h"
 #include "half_dxil.h"
 #include "logic.hpp"
@@ -132,6 +138,7 @@ struct CmdState
 	std::map<uint32_t, descriptor_table> tables;
 	std::map<uint32_t, std::vector<Entry>> pushes;
 	std::map<uint32_t, std::vector<uint32_t>> consts;
+	std::vector<uint64_t> rts; // graphics only (probe mode): the bound render target views
 };
 
 std::mutex g_mutex;
@@ -140,6 +147,8 @@ std::unordered_map<uint64_t, std::vector<LayoutParam>> g_layouts;
 std::unordered_map<uint64_t, std::vector<Entry>> g_heaps;
 std::unordered_map<uint64_t, std::shared_ptr<const Info>> g_views;
 std::unordered_map<const command_list *, CmdState> g_cmds;
+std::unordered_map<uint64_t, uint64_t> g_ps_pipelines;     // probe mode: graphics pipeline -> hash of its pixel shader
+std::unordered_map<const command_list *, CmdState> g_gfx; // probe mode: the graphics side of each command list
 std::unordered_set<uint64_t> g_live_buffers; // never map or restore a destroyed buffer
 
 // While our own commands go through the game's list, ReShade calls our handlers again; they must ignore them.
@@ -164,6 +173,7 @@ struct Config
 	int render_preset = 0;              // NVSDK_NGX_DLSS_Hint_Render_Preset value, set on all five per-mode hints; 0 = Default
 	bool auto_exposure = true;          // the AutoExposure create flag
 	float render_scale = 0;             // r.ScreenPercentage written to the game's Engine.ini; 0 = leave the game's own scale
+	bool ue4_mv_unjitter = true;        // UE4 TAAU: subtract the jitter from the pixel position before the camera reprojection
 };
 // Written under g_mutex (the ini reload and the overlay); the dispatch path copies it into its Snapshot under g_mutex.
 Config g_cfg;
@@ -171,6 +181,9 @@ std::string g_dir, g_log_path, g_ini_path;
 FILETIME g_ini_time = {};
 bool g_reset_next = false; // set when TSR ran in between or the ini changed: DLSS must not trust its history
 std::atomic<uint32_t> g_perf_seconds { 5 }; // perf_report_seconds (0 = off), written by load_ini, read on every present
+// Probe mode (ini probe=1): the present count and back buffer size on_present records, for the unknown-dispatch log.
+std::atomic<bool> g_probe { false };
+std::atomic<uint32_t> g_present_count { 0 }, g_bb_w { 0 }, g_bb_h { 0 };
 
 void log_line(const char *fmt, ...)
 {
@@ -308,7 +321,8 @@ void dump_tsr_bytecode(uint64_t hash, logic::TsrPass pass, const void *code, siz
 		if (!dumped.insert(hash).second)
 			return;
 	}
-	const char *role = pass == logic::TsrPass::single ? "single pass" : pass == logic::TsrPass::update_history ? "two-pass UpdateHistory" : "two-pass resolve";
+	const char *role = pass == logic::TsrPass::single ? "single pass" : pass == logic::TsrPass::update_history ? "two-pass UpdateHistory" :
+		pass == logic::TsrPass::ue4_taa ? "UE4 TAAU, DXBC" : "two-pass resolve";
 	const std::string path = g_dir + str_format("tsr_%016llx.dxil", static_cast<unsigned long long>(hash));
 	FILE *f = fopen(path.c_str(), "wb");
 	const bool ok = f != nullptr && fwrite(code, 1, size, f) == size;
@@ -317,16 +331,48 @@ void dump_tsr_bytecode(uint64_t hash, logic::TsrPass pass, const void *code, siz
 	log_line("TSR bytecode %016llx (%s, %zu bytes) %s %s", static_cast<unsigned long long>(hash), role, size, ok ? "written to" : "could not be written to", path.c_str());
 }
 
+// Probe mode: every compute shader's DXIL goes to probe/<hash>.dxil once, and every pixel shader's to probe/ps_<hash>.dxil
+// (`prefix` "ps_"), so an unknown pass can be disassembled (disasm.sh).
+void probe_note_pipeline(uint64_t hash, const void *code, size_t size, const char *prefix = "")
+{
+	static std::unordered_set<uint64_t> noted[2];
+	static std::mutex m;
+	{
+		std::lock_guard<std::mutex> lock(m);
+		if (!noted[*prefix != 0].insert(hash).second)
+			return;
+	}
+	const std::string dir = g_dir + "probe";
+	CreateDirectoryA(dir.c_str(), nullptr);
+	const std::string path = dir + str_format("\\%s%016llx.dxil", prefix, static_cast<unsigned long long>(hash));
+	FILE *f = fopen(path.c_str(), "wb");
+	const bool ok = f != nullptr && fwrite(code, 1, size, f) == size;
+	if (f != nullptr)
+		fclose(f);
+	log_line("probe %s %016llx size=%zu%s", *prefix != 0 ? "ps" : "pipeline", static_cast<unsigned long long>(hash), size, ok ? "" : " (could not be written)");
+}
+
 void on_init_pipeline(device *, pipeline_layout, uint32_t count, const pipeline_subobject *subobjects, pipeline pipe)
 {
 	for (uint32_t i = 0; i < count; ++i)
 	{
+		if (g_probe && subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].count != 0)
+		{
+			const auto *ps = static_cast<const shader_desc *>(subobjects[i].data);
+			const uint64_t ps_hash = ps->code != nullptr ? fnv1a(ps->code, ps->code_size) : 0;
+			if (ps_hash != 0)
+				probe_note_pipeline(ps_hash, ps->code, ps->code_size, "ps_");
+			std::lock_guard<std::mutex> lock(g_mutex);
+			g_ps_pipelines[pipe.handle] = ps_hash;
+		}
 		if (subobjects[i].type != pipeline_subobject_type::compute_shader || subobjects[i].count == 0)
 			continue;
 		const auto *shader = static_cast<const shader_desc *>(subobjects[i].data);
 		const uint64_t hash = shader->code != nullptr ? fnv1a(shader->code, shader->code_size) : 0;
 		if (const logic::TsrPass pass = logic::tsr_pass_for_hash(hash); pass != logic::TsrPass::none)
 			dump_tsr_bytecode(hash, pass, shader->code, shader->code_size);
+		if (g_probe && hash != 0)
+			probe_note_pipeline(hash, shader->code, shader->code_size);
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_pipelines[pipe.handle] = hash;
 	}
@@ -335,6 +381,7 @@ void on_destroy_pipeline(device *, pipeline pipe)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_pipelines.erase(pipe.handle);
+	g_ps_pipelines.erase(pipe.handle);
 }
 
 void on_init_pipeline_layout(device *, uint32_t count, const pipeline_layout_param *params, pipeline_layout layout)
@@ -463,14 +510,35 @@ void on_reset_command_list(command_list *cmd_list)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_cmds.erase(cmd_list);
+		g_gfx.erase(cmd_list);
 		drop_pending_locked(cmd_list, "the command list was reset or destroyed");
 	}
 	dump_cmd_reset(cmd_list);
 }
 
+// Probe mode: the graphics side of a command list, kept apart from the compute state (D3D12 has one root signature for each).
+CmdState &gfx_state(command_list *cmd_list, pipeline_layout layout)
+{
+	CmdState &st = g_gfx[cmd_list];
+	if (st.layout != layout.handle)
+	{
+		st.layout = layout.handle;
+		st.tables.clear();
+		st.pushes.clear();
+	}
+	return st;
+}
+
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
 {
-	if (t_busy || (stages & pipeline_stage::compute_shader) == static_cast<pipeline_stage>(0))
+	if (t_busy)
+		return;
+	if (g_probe && (stages & pipeline_stage::all_graphics) != static_cast<pipeline_stage>(0))
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		g_gfx[cmd_list].pipeline = pipe.handle;
+	}
+	if ((stages & pipeline_stage::compute_shader) == static_cast<pipeline_stage>(0))
 		return;
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_cmds[cmd_list].pipeline = pipe.handle;
@@ -478,7 +546,17 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
 
 void on_push_descriptors(command_list *cmd_list, shader_stage stages, pipeline_layout layout, uint32_t param, const descriptor_table_update &update)
 {
-	if (t_busy || (stages & shader_stage::compute) == static_cast<shader_stage>(0))
+	if (t_busy)
+		return;
+	if (g_probe && (stages & shader_stage::all_graphics) != static_cast<shader_stage>(0))
+	{
+		std::vector<Entry> gfx_entries;
+		for (uint32_t k = 0; k < update.count; ++k)
+			gfx_entries.push_back(make_entry(cmd_list->get_device(), update.type, update.descriptors, k));
+		std::lock_guard<std::mutex> lock(g_mutex);
+		gfx_state(cmd_list, layout).pushes[param] = std::move(gfx_entries);
+	}
+	if ((stages & shader_stage::compute) == static_cast<shader_stage>(0))
 		return;
 	std::vector<Entry> entries;
 	for (uint32_t k = 0; k < update.count; ++k)
@@ -521,6 +599,12 @@ void on_bind_descriptor_tables(command_list *cmd_list, shader_stage stages, pipe
 		CmdState &cs = compute_state(cmd_list, layout);
 		for (uint32_t i = 0; i < count; ++i)
 			cs.tables[first + i] = tables[i];
+	}
+	if (g_probe && (stages & shader_stage::all_graphics) != static_cast<shader_stage>(0))
+	{
+		CmdState &gs = gfx_state(cmd_list, layout);
+		for (uint32_t i = 0; i < count; ++i)
+			gs.tables[first + i] = tables[i];
 	}
 }
 
@@ -593,8 +677,16 @@ constexpr size_t kDsvHistory = 32;
 std::vector<uint64_t> g_dsv_history;
 std::atomic<uint64_t> g_last_dsv { 0 };
 
-void on_bind_render_targets(command_list *, uint32_t, const resource_view *, resource_view dsv)
+void on_bind_render_targets(command_list *cmd_list, uint32_t count, const resource_view *rtvs, resource_view dsv)
 {
+	if (g_probe && !t_busy)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		std::vector<uint64_t> &rts = g_gfx[cmd_list].rts;
+		rts.clear();
+		for (uint32_t i = 0; i < count; ++i)
+			rts.push_back(rtvs[i].handle);
+	}
 	if (t_busy || dsv.handle == 0 || g_last_dsv.exchange(dsv.handle) == dsv.handle)
 		return;
 	std::lock_guard<std::mutex> lock(g_mutex);
@@ -744,14 +836,194 @@ bool read_tsr_constants(device *dev, const CmdState &st, const logic::TsrLayout 
 	return true;
 }
 
+// ---- probe mode (ini probe=1): find the upscale pass of a game this add-on has no hash for ---------------------------------
+
+// Calls f(param, range, register, entry) for every descriptor the compute pipeline's root signature binds: the ranges of each
+// descriptor table (read from the heap shadow, like find_bindings) and each root descriptor (root CBV). g_mutex held.
+template <class F>
+void probe_each_binding(device *dev, CmdState &st, F f)
+{
+	const auto layout = g_layouts.find(st.layout);
+	if (layout == g_layouts.end())
+		return;
+	for (uint32_t p = 0; p < layout->second.size(); ++p)
+	{
+		const LayoutParam &lp = layout->second[p];
+		if (lp.type == pipeline_layout_param_type::push_descriptors)
+		{
+			const auto push = st.pushes.find(p);
+			if (push == st.pushes.end() || lp.ranges.empty())
+				continue;
+			for (uint32_t k = 0; k < push->second.size(); ++k)
+				f(p, lp.ranges[0], lp.ranges[0].dx_register_index + k, push->second[k]);
+			continue;
+		}
+		const auto table = st.tables.find(p);
+		if (table == st.tables.end())
+			continue;
+		for (const descriptor_range &r : lp.ranges)
+		{
+			uint64_t heap;
+			uint32_t base;
+			const auto h = heap_offset(dev, table->second, r.binding, 0, heap, base) ? g_heaps.find(heap) : g_heaps.end();
+			if (h == g_heaps.end())
+				continue;
+			const uint32_t n = r.count == UINT32_MAX ? kUnboundedCap : r.count;
+			for (uint32_t j = 0; j < n && base + j < h->second.size(); ++j)
+			{
+				Entry &e = h->second[base + j];
+				if (!e.set || e.type == descriptor_type::sampler)
+					continue;
+				resolve(e);
+				f(p, r, r.dx_register_index + j, e);
+			}
+		}
+	}
+}
+
+logic::ProbeView probe_view_of(const Entry &e, const descriptor_range &r)
+{
+	logic::ProbeView v;
+	const Info &i = *e.info;
+	v.uav = r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view;
+	v.depth_usage = (i.desc.usage & resource_usage::depth_stencil) != static_cast<resource_usage>(0);
+	v.width = i.desc.texture.width;
+	v.height = i.desc.texture.height;
+	v.res_format = static_cast<uint32_t>(i.desc.texture.format);
+	v.view_format = static_cast<uint32_t>(i.view_format);
+	return v;
+}
+
+bool probe_is_texture(const Entry &e)
+{
+	return e.info != nullptr && !e.info->buffer_range && e.info->resource != 0 && e.info->desc.type != resource_type::buffer;
+}
+
+// The first 512 bytes of a constant buffer in an upload heap (the CPU wrote it before this dispatch), as float32 values.
+void probe_dump_cbv(device *dev, const Info &info)
+{
+	if (info.resource == 0 || g_live_buffers.count(info.resource) == 0 || info.desc.heap != memory_heap::upload || info.offset >= info.desc.buffer.size)
+		return;
+	uint64_t bytes = (std::min)(static_cast<uint64_t>(512), info.desc.buffer.size - info.offset);
+	if (info.range != 0 && info.range < bytes)
+		bytes = info.range;
+	bytes &= ~static_cast<uint64_t>(3);
+	void *data = nullptr;
+	if (bytes == 0 || !dev->map_buffer_region({ info.resource }, info.offset, bytes, map_access::read_only, &data) || data == nullptr)
+		return;
+	uint8_t copy[512];
+	memcpy(copy, data, static_cast<size_t>(bytes));
+	dev->unmap_buffer_region({ info.resource });
+	log_line("%s", logic::probe_float_lines(copy, static_cast<size_t>(bytes)).c_str());
+}
+
+// True when something an upscaler would bind is bound: logic::probe_view_interesting on any texture. g_mutex held.
+bool probe_interesting(device *dev, CmdState &st, uint32_t bb_w, uint32_t bb_h)
+{
+	bool interesting = false;
+	probe_each_binding(dev, st, [&](uint32_t, const descriptor_range &r, uint32_t, const Entry &e) {
+		if (probe_is_texture(e) && logic::probe_view_interesting(probe_view_of(e, r), bb_w, bb_h))
+			interesting = true;
+	});
+	return interesting;
+}
+
+// One log line per bound view or root descriptor, and the float dump of every CBV in an upload heap. g_mutex held.
+void probe_log_bindings(device *dev, CmdState &st, uint32_t bb_w, uint32_t bb_h)
+{
+	probe_each_binding(dev, st, [&](uint32_t p, const descriptor_range &r, uint32_t reg, const Entry &e) {
+		const char kind = r.type == descriptor_type::constant_buffer || r.type == descriptor_type::constant_buffer_with_dynamic_offset ? 'b' :
+			r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view ? 'u' : 't';
+		char head[96];
+		snprintf(head, sizeof(head), "  %c%u space%u (root param %u)", kind, reg, r.dx_register_space, p);
+		if (e.info == nullptr)
+			log_line("%s: no creation snapshot", head);
+		else if (e.info->buffer_range)
+		{
+			log_line("%s: buffer %llx offset %llu range %llu size %llu heap %u", head, static_cast<unsigned long long>(e.info->resource), static_cast<unsigned long long>(e.info->offset),
+				static_cast<unsigned long long>(e.info->range), static_cast<unsigned long long>(e.info->desc.buffer.size), static_cast<unsigned>(e.info->desc.heap));
+			if (kind == 'b')
+				probe_dump_cbv(dev, *e.info);
+		}
+		else if (probe_is_texture(e))
+		{
+			const logic::ProbeView v = probe_view_of(e, r);
+			static const char *const kDims[] = { "unknown", "buffer", "texture_1d", "texture_1d_array", "texture_2d", "texture_2d_array", "texture_2d_multisample",
+				"texture_2d_multisample_array", "texture_3d", "texture_cube", "texture_cube_array", "acceleration_structure" };
+			const size_t dim = static_cast<size_t>(e.info->view_type);
+			log_line("%s: %ux%u x%u %s, format %s (%u), view format %s (%u)%s", head, v.width, v.height, static_cast<unsigned>(e.info->desc.texture.depth_or_layers),
+				dim < std::size(kDims) ? kDims[dim] : "?", logic::probe_format_name(v.res_format), v.res_format, logic::probe_format_name(v.view_format), v.view_format,
+				logic::probe_view_interesting(v, bb_w, bb_h) ? " <-- interesting" : "");
+		}
+		else
+			log_line("%s: view %llx, resource %llx is not a texture or buffer range", head, static_cast<unsigned long long>(e.handle), static_cast<unsigned long long>(e.info->resource));
+	});
+}
+
+// False while `hash` was logged less than log_every_n_frames presents ago (or at all, when that is 0). g_mutex held.
+bool probe_due(const std::unordered_map<uint64_t, uint32_t> &last_logged, uint64_t hash, uint32_t frame)
+{
+	const auto it = last_logged.find(hash);
+	return it == last_logged.end() || (g_cfg.log_every != 0 && frame - it->second >= g_cfg.log_every);
+}
+
+// Called on a dispatch of a compute shader that is not UE5 TSR. g_mutex held. Logs at most one block per shader hash every
+// log_every_n_frames presents, and only for a dispatch that binds something an upscaler would (logic::probe_view_interesting).
+void probe_dispatch(device *dev, CmdState &st, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+	static std::unordered_map<uint64_t, uint32_t> last_logged;
+	const uint32_t frame = g_present_count, bb_w = g_bb_w, bb_h = g_bb_h;
+	if (!probe_due(last_logged, hash, frame) || !probe_interesting(dev, st, bb_w, bb_h))
+		return;
+	last_logged[hash] = frame;
+	log_line("probe dispatch %016llx groups=%ux%ux%u present=%u back_buffer=%ux%u", static_cast<unsigned long long>(hash), gx, gy, gz, frame, bb_w, bb_h);
+	probe_log_bindings(dev, st, bb_w, bb_h);
+}
+
+// "WxH format name (number)" of a render target view, from the view shadow.
+std::string probe_rt_text(uint64_t view)
+{
+	const auto v = g_views.find(view);
+	if (v == g_views.end() || v->second->resource == 0 || v->second->desc.type == resource_type::buffer)
+		return "unknown";
+	const uint32_t fmt = static_cast<uint32_t>(v->second->view_format != format::unknown ? v->second->view_format : v->second->desc.texture.format);
+	return str_format("%ux%u %s (%u)", v->second->desc.texture.width, v->second->desc.texture.height, logic::probe_format_name(fmt), fmt);
+}
+
+// Called on every draw in probe mode: UE4's TemporalAA may be a full-screen pixel shader. Same rule as probe_dispatch, keyed by the
+// pixel shader's hash, plus the render targets. The game's draw is never touched.
+void probe_draw(command_list *cmd_list, uint32_t vertices)
+{
+	static std::unordered_map<uint64_t, uint32_t> last_logged;
+	std::lock_guard<std::mutex> lock(g_mutex);
+	const auto it = g_gfx.find(cmd_list);
+	if (it == g_gfx.end())
+		return;
+	const auto ps = g_ps_pipelines.find(it->second.pipeline);
+	if (ps == g_ps_pipelines.end() || ps->second == 0)
+		return;
+	const uint64_t hash = ps->second;
+	const uint32_t frame = g_present_count, bb_w = g_bb_w, bb_h = g_bb_h;
+	device *dev = cmd_list->get_device();
+	if (!probe_due(last_logged, hash, frame) || !probe_interesting(dev, it->second, bb_w, bb_h))
+		return;
+	last_logged[hash] = frame;
+	const std::vector<uint64_t> &rts = it->second.rts;
+	log_line("probe draw ps=%016llx vertices=%u rt0=%s present=%u back_buffer=%ux%u", static_cast<unsigned long long>(hash), vertices,
+		rts.empty() ? "none" : probe_rt_text(rts[0]).c_str(), frame, bb_w, bb_h);
+	for (size_t i = 0; i < rts.size(); ++i)
+		log_line("  rt%zu: %s", i, probe_rt_text(rts[i]).c_str());
+	probe_log_bindings(dev, it->second, bb_w, bb_h);
+}
+
 // ---- native D3D12: decode pass, NGX, state restore -----------------------------------------------------------------
 
 struct Native
 {
 	ID3D12Device *dev = nullptr;
-	ID3D12RootSignature *rs = nullptr, *half_rs = nullptr;
-	ID3D12PipelineState *pso = nullptr, *half_pso = nullptr;
-	bool half_ready = false;
+	ID3D12RootSignature *rs = nullptr, *half_rs = nullptr, *cam_rs = nullptr;
+	ID3D12PipelineState *pso = nullptr, *half_pso = nullptr, *cam_pso = nullptr;
+	bool half_ready = false, cam_ready = false; // optional passes: the half-size fill, and the UE4 TAAU motion vectors
 	ID3D12DescriptorHeap *heap = nullptr;
 	UINT inc = 0;
 	uint32_t ring = 0;
@@ -827,6 +1099,15 @@ bool ensure_native(ID3D12Device *dev)
 	}
 	if (!g_native.half_ready)
 		log_line("half-res fill: its shader could not be created, u1 will not be filled");
+	D3D12_COMPUTE_PIPELINE_STATE_DESC cam = {};
+	if (SUCCEEDED(dev->CreateRootSignature(0, g_cammv_dxil, g_cammv_dxil_len, IID_PPV_ARGS(&g_native.cam_rs))))
+	{
+		cam.pRootSignature = g_native.cam_rs;
+		cam.CS = { g_cammv_dxil, g_cammv_dxil_len };
+		g_native.cam_ready = SUCCEEDED(dev->CreateComputePipelineState(&cam, IID_PPV_ARGS(&g_native.cam_pso)));
+	}
+	if (!g_native.cam_ready)
+		log_line("UE4 TAAU motion vectors: the camera_mv shader could not be created, UE4 games keep their own TAA");
 	g_native.failed = false;
 	g_native.ready = true;
 	log_line("decode pass ready (%zu bytes of DXIL)", static_cast<size_t>(g_decode_dxil_len));
@@ -925,6 +1206,52 @@ void record_decode(ID3D12GraphicsCommandList *cl, ID3D12Resource *velocity, ID3D
 	cl->SetComputeRootSignature(g_native.rs);
 	cl->SetPipelineState(g_native.pso);
 	cl->SetComputeRoot32BitConstants(0, 8, &constants, 0);
+	cl->SetComputeRootDescriptorTable(1, gpu);
+	cl->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+}
+
+// UE4 TAAU: motion vectors in input pixels from the velocity texture and, for static pixels, camera reprojection from depth
+// (see camera_mv.hlsl). Depth and velocity are in the SRV state (the game's own dispatch reads them there); the result is the
+// shared motion-vector texture, left in the UAV state like record_decode leaves it.
+void record_camera_mv(ID3D12GraphicsCommandList *cl, ID3D12Resource *depth, ID3D12Resource *velocity, const logic::Ue4View &view, bool unjitter,
+	float jitter_x, float jitter_y, uint32_t min_x, uint32_t min_y, uint32_t w, uint32_t h)
+{
+	const uint32_t slot = g_native.ring++ % kDecodeRing;
+	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_native.heap->GetCPUDescriptorHandleForHeapStart();
+	D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_native.heap->GetGPUDescriptorHandleForHeapStart();
+	cpu.ptr += static_cast<SIZE_T>(slot) * kDescriptorsPerSet * g_native.inc;
+	gpu.ptr += static_cast<UINT64>(slot) * kDescriptorsPerSet * g_native.inc;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srv.Texture2D.MipLevels = 1;
+	srv.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; // the depth plane of the d32s8 buffer
+	g_native.dev->CreateShaderResourceView(depth, &srv, cpu);
+	cpu.ptr += g_native.inc;
+	srv.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+	g_native.dev->CreateShaderResourceView(velocity, &srv, cpu);
+	cpu.ptr += g_native.inc;
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+	uav.Format = DXGI_FORMAT_R16G16_FLOAT;
+	uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	g_native.dev->CreateUnorderedAccessView(g_native.mv, nullptr, &uav, cpu);
+
+	struct { float rows[16]; uint32_t min_x, min_y, w, h; float jx, jy; uint32_t unjitter, pad; } constants = {};
+	memcpy(constants.rows, view.clip_to_prev, sizeof(constants.rows));
+	constants.min_x = min_x;
+	constants.min_y = min_y;
+	constants.w = w;
+	constants.h = h;
+	constants.jx = jitter_x;
+	constants.jy = jitter_y;
+	constants.unjitter = unjitter ? 1u : 0u;
+	static_assert(sizeof(constants) == 24 * 4, "camera_mv.hlsl takes 24 root constants");
+	ID3D12DescriptorHeap *heaps[] = { g_native.heap };
+	cl->SetDescriptorHeaps(1, heaps);
+	cl->SetComputeRootSignature(g_native.cam_rs);
+	cl->SetPipelineState(g_native.cam_pso);
+	cl->SetComputeRoot32BitConstants(0, 24, &constants, 0);
 	cl->SetComputeRootDescriptorTable(1, gpu);
 	cl->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
 }
@@ -1120,6 +1447,8 @@ struct Snapshot
 	logic::TsrConstants tsr;
 	bool jitter_fallback = false;
 	bool update_skipped = false; // two-pass: the game's UpdateHistory did not run this frame, so its history is stale
+	bool ue4 = false;            // UE4 TAAU: `tsr` holds cb0's viewports mapped to the TSR fields (history = output), `ue4_view` is cb1's
+	logic::Ue4View ue4_view;
 	Config cfg; // g_cfg as it was when this dispatch started; the overlay may change g_cfg while the pass records
 };
 
@@ -1195,9 +1524,9 @@ std::string config_summary(const Config &c)
 {
 	char buf[768];
 	snprintf(buf, sizeof(buf),
-		"enabled=%d render_scale=%s render_preset=%s auto_exposure=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u",
+		"enabled=%d render_scale=%s render_preset=%s auto_exposure=%d jitter_sign=(%g,%g) mv_scale=(%g,%g) mv_scale_source=%s mv_encoding=%s composite_translucency=%d fill_half_res=%d never_fallback_after_start=%d log_every_n_frames=%u jitter_cycle=%u ue4_mv_unjitter=%d",
 		c.enabled, logic::render_scale_text(c.render_scale).c_str(), logic::render_preset_name(c.render_preset), c.auto_exposure, c.jitter_sign_x, c.jitter_sign_y, c.mv_scale_x, c.mv_scale_y,
-		c.mv_scale_from_game ? "game" : "ini", c.mv_gamma ? "gamma" : "linear", c.composite_translucency, c.fill_half_res, c.never_fallback_after_start, c.log_every, c.jitter_cycle);
+		c.mv_scale_from_game ? "game" : "ini", c.mv_gamma ? "gamma" : "linear", c.composite_translucency, c.fill_half_res, c.never_fallback_after_start, c.log_every, c.jitter_cycle, c.ue4_mv_unjitter);
 	return buf;
 }
 
@@ -1249,6 +1578,7 @@ void load_ini(bool reload)
 	g_cfg.fill_half_res = ini.number("fill_half_res", 1) != 0;
 	g_cfg.never_fallback_after_start = ini.number("never_fallback_after_start", 1) != 0;
 	g_cfg.composite_translucency = ini.number("composite_translucency", 1) != 0;
+	g_cfg.ue4_mv_unjitter = ini.number("ue4_mv_unjitter", 1) != 0;
 	const std::string source = ini.text("mv_scale_source", "game");
 	g_cfg.mv_scale_from_game = source != "ini";
 	if (source != "ini" && source != "game")
@@ -1272,6 +1602,9 @@ void load_ini(bool reload)
 	g_cfg.render_scale = scale_percent < 0 ? 0.0f : static_cast<float>(scale_percent);
 	const double perf_seconds = ini.number("perf_report_seconds", 5);
 	g_perf_seconds = perf_seconds > 0 ? static_cast<uint32_t>(perf_seconds) : 0;
+	g_probe = ini.number("probe", 0) != 0;
+	if (g_probe && !reload)
+		log_line("probe mode on: compute shaders go to %sprobe, unknown passes are logged", g_dir.c_str());
 
 	const std::string after = config_summary(g_cfg);
 	if (!reload)
@@ -1311,6 +1644,7 @@ std::map<std::string, std::string> ini_values(const Config &c)
 		{ "fill_half_res", flag(c.fill_half_res) },
 		{ "never_fallback_after_start", flag(c.never_fallback_after_start) },
 		{ "composite_translucency", flag(c.composite_translucency) },
+		{ "ue4_mv_unjitter", flag(c.ue4_mv_unjitter) },
 		{ "mv_encoding", c.mv_gamma ? "gamma" : "linear" },
 	};
 }
@@ -1323,7 +1657,7 @@ bool dir_exists(const std::string &path)
 	return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-// %LOCALAPPDATA%\<project>\Saved\Config\WindowsClient\Engine.ini, or ...\Windows\ when only that folder exists. The project
+// %LOCALAPPDATA%\<project>\Saved\Config\WindowsClient\Engine.ini, or ...\Windows\ or ...\WindowsNoEditor\ (UE4) when only that folder exists. The project
 // comes from the exe's path. Returns "" and sets `error` when the folder cannot be found.
 std::string engine_ini_path(std::string &error)
 {
@@ -1342,10 +1676,10 @@ std::string engine_ini_path(std::string &error)
 		return "";
 	}
 	const std::string config = std::string(local, local_len) + "\\" + project + "\\Saved\\Config\\";
-	for (const char *target : { "WindowsClient", "Windows" })
+	for (const char *target : { "WindowsClient", "Windows", "WindowsNoEditor" })
 		if (dir_exists(config + target))
 			return config + target + "\\Engine.ini";
-	error = "neither " + config + "WindowsClient nor " + config + "Windows exists";
+	error = "none of " + config + "WindowsClient, Windows or WindowsNoEditor exists";
 	return "";
 }
 
@@ -1510,16 +1844,16 @@ void status_path(Status::Path path, const char *reason = "")
 	++g_status.seq;
 }
 
-// The first three times per reason are logged in full; every one is counted. A fallback means TSR runs, so DLSS
+// The first three times per reason (log_limit) are logged in full; every one is counted. A fallback means TSR runs, so DLSS
 // resets its history on its next frame.
-bool give_up(const char *key, const std::string &why)
+bool give_up(const char *key, const std::string &why, int log_limit = 3)
 {
 	status_path(Status::Path::fallback, key);
 	perf_count_upscale(false);
 	stat_count((std::string("fallback-") + key).c_str());
 	if (g_ngx.evals > 0)
 		g_reset_next = true;
-	if (first_n(key, 3))
+	if (first_n(key, log_limit))
 		log_line("not replacing the upscale pass: %s (the game renders normally)", why.c_str());
 	return false;
 }
@@ -1594,12 +1928,14 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!proxy_device(dev, pdev, why) || !proxy_list(cmd_list, cl, why))
 		return give_up("proxy", why);
 
-	if (b.output.width < b.color.width || b.output.height < b.color.height)
+	if (!s.ue4 && (b.output.width < b.color.width || b.output.height < b.color.height))
 		return give_up("output-smaller", "output is smaller than the render size: " + describe("u0 output", b.output) + "; " + describe("u3 color", b.color));
-	if (b.velocity.res_format != format::r16g16_unorm && b.velocity.res_format != format::r16g16_typeless)
+	if (!s.ue4 && b.velocity.res_format != format::r16g16_unorm && b.velocity.res_format != format::r16g16_typeless)
 		return give_up("velocity-format", "u6 is not r16g16_unorm: " + describe("u6 velocity", b.velocity));
 	if (!ensure_native(pdev))
 		return give_up("native", "the decode pass could not be created");
+	if (s.ue4 && !g_native.cam_ready)
+		return give_up("native", "the UE4 TAAU motion vector pass could not be created");
 	if (!ensure_ngx(pdev))
 		return give_up("ngx", "NGX or DLSS is unavailable (see the NGX lines above)");
 	if (!ensure_mv_texture(b.color.width, b.color.height))
@@ -1607,7 +1943,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 	// Translucency is composited over the scene color only when both are plain r16g16b16a16_float of the same size.
 	auto is_rgba16f = [](format f) { return f == format::r16g16b16a16_float || f == format::r16g16b16a16_typeless; };
-	bool composite = cfg.composite_translucency;
+	bool composite = cfg.composite_translucency && !s.ue4; // UE4 TAAU has no separate translucency texture
 	if (composite && !(b.translucency.ok && is_rgba16f(b.translucency.res_format) && is_rgba16f(b.color.res_format) &&
 		b.translucency.width == b.color.width && b.translucency.height == b.color.height))
 	{
@@ -1619,7 +1955,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (composite && !ensure_comp_texture(b.color.width, b.color.height))
 		composite = false;
 
-	if (first_time("known-gaps"))
+	if (!s.ue4 && first_time("known-gaps"))
 		log_line("known gaps: translucency u4 (%s); u2 (history metadata) is no longer written; u1 (half-size color) is %s",
 			composite ? "composited over u3 before DLSS" : "dropped", cfg.fill_half_res ? "filled from u0" : "no longer written (fill_half_res=0)");
 
@@ -1634,8 +1970,21 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 
 	// Velocity to pixels: the game's own scale (b0 @272, UE: ScreenVelocityToInputPixelVelocity), negated because DLSS
 	// wants current to previous and UE's V is current minus previous; or the ini factors times the viewport size.
-	const float scale_x = cfg.mv_scale_from_game ? -t.velocity_to_pixels[0] : cfg.mv_scale_x * rw;
-	const float scale_y = cfg.mv_scale_from_game ? -t.velocity_to_pixels[1] : cfg.mv_scale_y * rh;
+	const float scale_x = s.ue4 ? 0.0f : cfg.mv_scale_from_game ? -t.velocity_to_pixels[0] : cfg.mv_scale_x * rw;
+	const float scale_y = s.ue4 ? 0.0f : cfg.mv_scale_from_game ? -t.velocity_to_pixels[1] : cfg.mv_scale_y * rh;
+	if (s.ue4)
+	{
+		static uint32_t last[8] = {};
+		const uint32_t now[8] = { t.input_min[0], t.input_min[1], rw, rh, t.history_min[0], t.history_min[1], ow, oh };
+		if (memcmp(last, now, sizeof(now)) != 0)
+		{
+			memcpy(last, now, sizeof(now));
+			log_line("UE4 TAAU viewports: input min (%u,%u) size %ux%u of color %ux%u; output min (%u,%u) size %ux%u of output %ux%u; jitter (%+.4f, %+.4f), pre-exposure %g, "
+				"motion vectors unjitter=%d", t.input_min[0], t.input_min[1], rw, rh, b.color.width, b.color.height, t.history_min[0], t.history_min[1], ow, oh,
+				b.output.width, b.output.height, s.jitter_x, s.jitter_y, s.ue4_view.pre_exposure, cfg.ue4_mv_unjitter);
+		}
+	}
+	else
 	{
 		static uint32_t last[12] = {};
 		const uint32_t now[12] = { t.input_min[0], t.input_min[1], rw, rh, t.history_min[0], t.history_min[1], ow, oh,
@@ -1679,7 +2028,10 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 	if (!before.empty())
 		cl->ResourceBarrier(static_cast<UINT>(before.size()), before.data());
 
-	record_decode(cl, velocity, color, composite ? translucency : color, composite, scale_x, scale_y, cfg.mv_gamma, t.input_min[0], t.input_min[1], rw, rh);
+	if (s.ue4)
+		record_camera_mv(cl, depth, velocity, s.ue4_view, cfg.ue4_mv_unjitter, s.jitter_x, s.jitter_y, t.input_min[0], t.input_min[1], rw, rh);
+	else
+		record_decode(cl, velocity, color, composite ? translucency : color, composite, scale_x, scale_y, cfg.mv_gamma, t.input_min[0], t.input_min[1], rw, rh);
 	// The decode pass wrote the motion vectors (and the composited color): make them readable for DLSS.
 	std::vector<D3D12_RESOURCE_BARRIER> generated;
 	std::vector<ID3D12Resource *> generated_res = { g_native.mv };
@@ -1720,8 +2072,11 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		e.InReset = reset ? 1 : 0;
 		e.InMVScaleX = 1.0f;
 		e.InMVScaleY = 1.0f;
-		if (!cfg.auto_exposure) // no exposure texture is supplied: tell DLSS the exposure is neutral
-			e.InPreExposure = e.InExposureScale = 1.0f;
+		if (!cfg.auto_exposure) // no exposure texture is supplied: tell DLSS the exposure is neutral (UE4: cb1's pre-exposure)
+		{
+			e.InPreExposure = s.ue4 ? s.ue4_view.pre_exposure : 1.0f;
+			e.InExposureScale = 1.0f;
+		}
 		r = NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_ngx.feature, g_ngx.params, &e);
 		ok = NVSDK_NGX_SUCCEED(r);
 		stat_count(ok ? "evaluate-ok" : "evaluate-failed");
@@ -1731,7 +2086,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		if (n <= 10 || !ok || (cfg.log_every != 0 && n % cfg.log_every == 0))
 			log_line("evaluate #%llu: 0x%08x %s viewport %ux%u -> %ux%u jitter (%+.4f, %+.4f)%s reset=%d%s", static_cast<unsigned long long>(n),
 				static_cast<unsigned>(r), narrow(GetNGXResultAsString(r)).c_str(), rw, rh, ow, oh, s.jitter_x, s.jitter_y,
-				s.jitter_fallback ? " [fallback B]" : " [read from b0]", reset ? 1 : 0, ok ? (t.camera_cut != 0 ? " (camera cut)" : "") : " FAILED, original pass runs");
+				s.jitter_fallback ? " [fallback B]" : s.ue4 ? " [read from cb0]" : " [read from b0]", reset ? 1 : 0, ok ? (t.camera_cut != 0 ? " (camera cut)" : "") : " FAILED, original pass runs");
 	}
 	{
 		std::lock_guard<std::mutex> lock(g_status_m);
@@ -1758,7 +2113,7 @@ bool replace_upscale(command_list *cmd_list, Snapshot &s)
 		back.push_back(transition(g, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	cl->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
 	// Only after a successful evaluate: when it failed the original pass still runs and writes u1 itself.
-	if (ok && cfg.fill_half_res)
+	if (ok && cfg.fill_half_res && !s.ue4) // UE4 TAAU has no half-size output
 	{
 		const Tex &half = b.half;
 		if (!g_native.half_ready || !half.ok || half.res_format != format::r11g11b10_float || b.output.res_format != format::r11g11b10_float)
@@ -1874,6 +2229,166 @@ Prep prepare_upscale(command_list *cmd_list, const CmdState &cs, const logic::Ts
 		else
 			return fail("jitter", "the TSR constants could not be read (" + why + ") and no earlier read locked the Halton phase");
 	}
+	return Prep::replace;
+}
+
+// ---- UE4 TemporalAA (TAAU): Project Wingman ------------------------------------------------------------------------------
+
+// The TAA shader reads scene color at t1, depth at t2, velocity at t3 and writes u0; its constants are the cbuffers b0 (the
+// pass) and b1 (UE's View). Which root parameter holds each is read from the pipeline layout, not assumed: the probe capture
+// has an SRV table at parameter 0 and a UAV table at parameter 2, and the first run logs the whole layout.
+bool find_ue4_bindings(device *dev, CmdState &st, Bindings &b)
+{
+	probe_each_binding(dev, st, [&](uint32_t, const descriptor_range &r, uint32_t reg, const Entry &e) {
+		if (r.dx_register_space != 0)
+			return;
+		const bool srv = r.type == descriptor_type::shader_resource_view || r.type == descriptor_type::buffer_shader_resource_view;
+		const bool uav = r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view;
+		Tex *target = srv ? (reg == 1 ? &b.color : reg == 2 ? &b.depth : reg == 3 ? &b.velocity : nullptr) : uav && reg == 0 ? &b.output : nullptr;
+		if (target != nullptr)
+			*target = tex_from(e);
+	});
+	return b.output.ok && b.color.ok && b.depth.ok && b.velocity.ok;
+}
+
+// The CBV bound at register b<reg> (space 0), whether it is a root descriptor or sits in a descriptor table; `param` is the
+// root parameter it came from. g_mutex held.
+bool find_cbv(device *dev, CmdState &st, uint32_t reg, Info &out, uint32_t &param)
+{
+	bool found = false;
+	probe_each_binding(dev, st, [&](uint32_t p, const descriptor_range &r, uint32_t bound, const Entry &e) {
+		const bool cbv = r.type == descriptor_type::constant_buffer || r.type == descriptor_type::constant_buffer_with_dynamic_offset;
+		if (found || !cbv || r.dx_register_space != 0 || bound != reg || e.info == nullptr || !e.info->buffer_range)
+			return;
+		out = *e.info;
+		param = p;
+		found = true;
+	});
+	return found;
+}
+
+// Copies the first `bytes` of a constant buffer that lives in an upload heap (the CPU wrote it before this dispatch).
+bool read_cbv(device *dev, const Info &info, size_t bytes, uint8_t *dst, std::string &why)
+{
+	if (info.resource == 0 || g_live_buffers.count(info.resource) == 0)
+		why = "constant buffer unresolved or destroyed";
+	else if (info.desc.heap != memory_heap::upload)
+		why = "constant buffer is not in an upload heap";
+	else if (info.offset + bytes > info.desc.buffer.size || (info.range != 0 && info.range < bytes))
+		why = str_format("the constants need %zu bytes, the buffer view has %llu", bytes, static_cast<unsigned long long>(info.range));
+	if (!why.empty())
+		return false;
+	void *data = nullptr;
+	if (!dev->map_buffer_region({ info.resource }, info.offset, bytes, map_access::read_only, &data) || data == nullptr)
+	{
+		why = "map_buffer_region failed";
+		return false;
+	}
+	memcpy(dst, data, bytes);
+	dev->unmap_buffer_region({ info.resource });
+	return true;
+}
+
+// "param 0 table t0 t1x2; param 1 root descriptor b0; ..." for the log.
+std::string layout_text(const CmdState &st)
+{
+	const auto layout = g_layouts.find(st.layout);
+	if (layout == g_layouts.end())
+		return "root signature unknown";
+	std::string out;
+	for (uint32_t p = 0; p < layout->second.size(); ++p)
+	{
+		const LayoutParam &lp = layout->second[p];
+		out += str_format("%sparam %u %s", p != 0 ? "; " : "", p,
+			lp.type == pipeline_layout_param_type::push_descriptors ? "root descriptor" : lp.type == pipeline_layout_param_type::push_constants ? "root constants" : "table");
+		for (const descriptor_range &r : lp.ranges)
+		{
+			const bool cbv = r.type == descriptor_type::constant_buffer || r.type == descriptor_type::constant_buffer_with_dynamic_offset;
+			const bool srv = r.type == descriptor_type::shader_resource_view || r.type == descriptor_type::buffer_shader_resource_view;
+			const bool uav = r.type == descriptor_type::unordered_access_view || r.type == descriptor_type::buffer_unordered_access_view;
+			out += str_format(" %c%u", cbv ? 'b' : srv ? 't' : uav ? 'u' : r.type == descriptor_type::sampler ? 's' : '?', r.dx_register_index);
+			out += r.count == UINT32_MAX ? "x*" : r.count != 1 ? str_format("x%u", r.count) : "";
+		}
+	}
+	return out;
+}
+
+// Same checks as prepare_upscale for the UE4 TAAU dispatch: bindings, sizes, cb0 and cb1. g_mutex held. The cb0 viewports go
+// into s.tsr (history = the output viewport) so replace_upscale treats both passes alike. `fallback` has been counted and logged.
+Prep prepare_ue4_upscale(command_list *cmd_list, const CmdState &cs, Snapshot &s)
+{
+	const auto fail = [](const char *key, const std::string &why) {
+		give_up(key, why);
+		return Prep::fallback;
+	};
+	device *dev = cmd_list->get_device();
+	s.st = cs;
+	s.cfg = g_cfg;
+	s.ue4 = true;
+	if (const auto l = g_layouts.find(s.st.layout); l != g_layouts.end())
+		s.params = l->second;
+	if (first_time("ue4-layout"))
+		log_line("UE4 TAAU root signature: %s", layout_text(s.st).c_str());
+
+	Bindings &b = s.b;
+	const bool found = find_ue4_bindings(dev, s.st, b);
+	const std::string seen = describe("t1 color", b.color) + "; " + describe("t2 depth", b.depth) + "; " + describe("t3 velocity", b.velocity) + "; " + describe("u0 output", b.output);
+	if (!found)
+		return fail("bindings", "not all of t1, t2, t3 and u0 are usable textures [" + seen + "]");
+	if (b.velocity.res_format != format::r16g16b16a16_unorm)
+		return fail("velocity-format", "t3 is not r16g16b16a16_unorm [" + seen + "]");
+	if (b.depth.res_format != format::r32_g8_typeless && b.depth.res_format != format::d32_float_s8_uint)
+		return fail("depth-format", "t2 is not a d32s8 depth buffer [" + seen + "]");
+	if (b.color.width != b.velocity.width || b.color.height != b.velocity.height || b.color.width != b.depth.width || b.color.height != b.depth.height)
+	{
+		stat_mismatch(seen);
+		return fail("size-mismatch", "color, depth and velocity differ in size [" + seen + "]");
+	}
+
+	Info cb0, cb1;
+	uint32_t p0 = 0, p1 = 0;
+	if (!find_cbv(dev, s.st, 0, cb0, p0) || !find_cbv(dev, s.st, 1, cb1, p1))
+		return fail("constants", "no constant buffer at b0 or b1 in any root parameter (" + layout_text(s.st) + ")");
+	if (first_time("ue4-cbv"))
+		log_line("UE4 TAAU constant buffers: cb0 from root parameter %u (buffer %llx offset %llu range %llu heap %u), cb1 from root parameter %u (buffer %llx offset %llu range %llu heap %u)",
+			p0, static_cast<unsigned long long>(cb0.resource), static_cast<unsigned long long>(cb0.offset), static_cast<unsigned long long>(cb0.range), static_cast<unsigned>(cb0.desc.heap),
+			p1, static_cast<unsigned long long>(cb1.resource), static_cast<unsigned long long>(cb1.offset), static_cast<unsigned long long>(cb1.range), static_cast<unsigned>(cb1.desc.heap));
+	uint8_t raw0[logic::kUe4Cb0Bytes], raw1[logic::kUe4ViewBytes];
+	std::string why;
+	logic::Ue4TaaConstants c;
+	if (!read_cbv(dev, cb0, sizeof(raw0), raw0, why))
+		return fail("constants", "cb0: " + why);
+	if (!logic::parse_ue4_taa_constants(raw0, sizeof(raw0), c))
+		return fail("constants", str_format("cb0 is not plausible TAA constants: input size (%g, %g) @432, input buffer (%g, %g) @304, output size (%g, %g) @368, output min (%g, %g) @384, "
+			"output max (%g, %g) @392, input min (%g, %g) @416, jitter (%g, %g) @448", logic::read_f32(raw0, 432), logic::read_f32(raw0, 436), logic::read_f32(raw0, 304),
+			logic::read_f32(raw0, 308), logic::read_f32(raw0, 368), logic::read_f32(raw0, 372), logic::read_f32(raw0, 384), logic::read_f32(raw0, 388), logic::read_f32(raw0, 392),
+			logic::read_f32(raw0, 396), logic::read_f32(raw0, 416), logic::read_f32(raw0, 420), logic::read_f32(raw0, 448), logic::read_f32(raw0, 452)));
+	if (!read_cbv(dev, cb1, sizeof(raw1), raw1, why))
+		return fail("constants", "cb1: " + why);
+	if (!logic::parse_ue4_view(raw1, sizeof(raw1), s.ue4_view))
+		return fail("constants", str_format("cb1 is not a plausible View buffer: pre-exposure %g @2168, ClipToPrevClip row 0 (%g, %g, %g, %g) @1952",
+			logic::read_f32(raw1, logic::kUe4PreExposure), logic::read_f32(raw1, 1952), logic::read_f32(raw1, 1956), logic::read_f32(raw1, 1960), logic::read_f32(raw1, 1964)));
+
+	const uint32_t rw = static_cast<uint32_t>(c.input_size[0] + 0.5f), rh = static_cast<uint32_t>(c.input_size[1] + 0.5f);
+	const uint32_t ow = static_cast<uint32_t>(c.output_size[0] + 0.5f), oh = static_cast<uint32_t>(c.output_size[1] + 0.5f);
+	if (rw > ow || rh > oh) // the game's default 150% scale: DLSS only upscales, so the game's TAA keeps this frame
+	{
+		give_up("render-larger", str_format("render larger than output (game resolution scale above 100%%): %ux%u > %ux%u", rw, rh, ow, oh), 1);
+		return Prep::fallback;
+	}
+
+	logic::TsrConstants &t = s.tsr;
+	for (int i = 0; i < 2; ++i)
+	{
+		t.input_min[i] = static_cast<uint32_t>(c.input_min[i] + 0.5f);
+		t.input_size[i] = c.input_size[i];
+		t.history_min[i] = static_cast<uint32_t>(c.output_min[i] + 0.5f);
+		t.history_size[i] = c.output_size[i];
+		t.jitter[i] = c.jitter[i];
+	}
+	t.camera_cut = c.camera_cut;
+	s.jitter_x = c.jitter[0];
+	s.jitter_y = c.jitter[1];
 	return Prep::replace;
 }
 
@@ -2643,14 +3158,18 @@ void on_close_command_list(command_list *cmd_list)
 {
 	dump_post_event(cmd_list);
 }
-bool on_draw(command_list *cmd_list, uint32_t, uint32_t, uint32_t, uint32_t)
+bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t, uint32_t, uint32_t)
 {
 	dump_post_event(cmd_list);
+	if (g_probe && !t_busy)
+		probe_draw(cmd_list, vertices);
 	return false;
 }
-bool on_draw_indexed(command_list *cmd_list, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t, uint32_t, int32_t, uint32_t)
 {
 	dump_post_event(cmd_list);
+	if (g_probe && !t_busy)
+		probe_draw(cmd_list, indices);
 	return false;
 }
 bool on_indirect(command_list *cmd_list, indirect_command, resource, uint64_t, uint32_t, uint32_t)
@@ -2659,7 +3178,7 @@ bool on_indirect(command_list *cmd_list, indirect_command, resource, uint64_t, u
 	return false;
 }
 
-bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
+bool on_dispatch(command_list *cmd_list, uint32_t group_x, uint32_t group_y, uint32_t group_z)
 {
 	if (t_busy)
 		return false;
@@ -2694,6 +3213,16 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			}
 			break;
 		}
+		case logic::TsrPass::ue4_taa:
+		{
+			status_mode("UE4 TAAU");
+			if (!begin_upscale_frame())
+				return false;
+			const Prep prep = prepare_ue4_upscale(cmd_list, it->second, s);
+			if (prep != Prep::replace)
+				return prep == Prep::keep_previous;
+			break;
+		}
 		case logic::TsrPass::update_history:
 			dump_note_update(cmd_list, it->second, pipe->second);
 			return on_update_history(cmd_list, it->second, pipe->second);
@@ -2709,6 +3238,8 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 			break;
 		}
 		default:
+			if (g_probe)
+				probe_dispatch(cmd_list->get_device(), it->second, pipe->second, group_x, group_y, group_z);
 			return false;
 		}
 	}
@@ -2718,6 +3249,8 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 	t_busy = false;
 	if (pass == logic::TsrPass::resolve)
 		finish_resolve(replaced, s);
+	if (pass == logic::TsrPass::ue4_taa) // the frame-sequence dump is written for TSR's formats
+		return replaced;
 	if (replaced)
 		dump_dlss_frame(cmd_list, s);
 	else
@@ -2732,8 +3265,15 @@ bool on_dispatch(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
 }
 
 // Present: one timestamp per frame. When the window's wall time is over, its statistics are logged as one `perf:` line.
-void on_present(command_queue *, swapchain *, const rect *, const rect *, uint32_t, const rect *)
+void on_present(command_queue *, swapchain *sc, const rect *, const rect *, uint32_t, const rect *)
 {
+	if (g_probe)
+	{
+		const resource_desc bb = sc->get_device()->get_resource_desc(sc->get_current_back_buffer());
+		g_bb_w = bb.texture.width;
+		g_bb_h = bb.texture.height;
+		++g_present_count;
+	}
 	dump_present();
 	const LONGLONG now = qpc_now(), freq = qpc_freq();
 	const uint32_t seconds = g_perf_seconds;
@@ -2881,6 +3421,11 @@ void draw_overlay(reshade::api::effect_runtime *)
 		ImGui::Text("Now rendering %ux%u -> %ux%u, ratio %.3f (%s)", st.rw, st.rh, st.ow, st.oh, static_cast<double>(st.rw) / st.ow, logic::preset_name(st.mode));
 	else
 		ImGui::TextDisabled("Now rendering: no upscale pass seen yet");
+	// The game reads r.ScreenPercentage only at start, so a mode picked here changes nothing until a restart.
+	// "Game default" is 0 and asks for no particular scale.
+	if (st.rw != 0 && edit.render_scale > 0 && std::abs(100.0 * st.rw / st.ow - edit.render_scale) > 1.0)
+		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Restart the game to apply this mode: it still renders at %.0f%%, the mode asks for %s%%.",
+			100.0 * st.rw / st.ow, logic::percent_text(edit.render_scale).c_str());
 	ImGui::TextWrapped("Sets the game's render resolution (r.ScreenPercentage in its Engine.ini) so DLSS has fewer pixels to start from. "
 		"Takes effect the next time the game starts.");
 	const char *names[logic::kRenderPresetCount];
